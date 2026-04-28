@@ -77,6 +77,10 @@ HIGH_FREQ = 8000
 
 # CIF parameters
 CIF_THRESHOLD = 1.0
+# Defer the last N LFR frames of each chunk's CIF to the next chunk:
+# these frames have no right-context in the current encoder run; they'll
+# reach full context once they become history in the next chunk's run.
+RIGHT_LOOKAHEAD_LFR = 1
 CIF_TAIL_THRESHOLD = 0.5    # Minimum weight to fire tail token on finalize
 
 # Tokens
@@ -344,6 +348,8 @@ class ParaformerTRTStream(ASRStream):
         # Full utterance audio for CMVN (matches offline normalization)
         self._all_audio = np.array([], dtype=np.float32)
         self._prev_total_frames = 0
+        # Absolute LFR-frame index of next CIF-eligible frame (for right look-ahead defer)
+        self._cif_processed_lfr = 0
 
         # Per-utterance state
         self._all_token_ids: list[int] = []
@@ -377,6 +383,7 @@ class ParaformerTRTStream(ASRStream):
         self._history_audio = np.array([], dtype=np.float32)
         self._all_audio = np.array([], dtype=np.float32)
         self._prev_total_frames = 0
+        self._cif_processed_lfr = 0
 
     def accept_waveform(self, sample_rate: int, samples: np.ndarray) -> None:
         if samples.dtype != np.float32:
@@ -408,30 +415,27 @@ class ParaformerTRTStream(ASRStream):
         """
         t0 = time.perf_counter()
 
-        # 1. Accumulate full-utterance audio (Bug G fix: full-utterance CMVN
-        # matches offline normalization, fixes alpha scale drift).
+        # 1. Accumulate full-utterance audio (full-utterance CMVN matches
+        # offline normalization)
         self._all_audio = np.concatenate([self._all_audio, audio])
 
-        # 2. FBank+CMVN over FULL utterance, then slice (history+new) for encoder
+        # 2. FBank + LFR stack over FULL utterance — keeps LFR alignment
+        # identical to offline path (chunk-boundary independent)
         all_feats = compute_fbank(self._all_audio)
-        cur_total_frames = all_feats.shape[0]
-        new_frames = cur_total_frames - self._prev_total_frames
-        if new_frames <= 0:
+        all_lfr = stack_frames(all_feats)
+        cur_total_lfr = all_lfr.shape[0]
+        new_lfr = cur_total_lfr - self._prev_total_frames
+        if new_lfr <= 0:
             return
-        self._prev_total_frames = cur_total_frames
+        self._prev_total_frames = cur_total_lfr
 
-        # Encoder window = last (LEFT_CONTEXT + new) frames for FSMN context
-        left_ctx_frames = int(LEFT_CONTEXT_SEC * SAMPLE_RATE / HOP_SIZE)
-        enc_window_frames = min(cur_total_frames, left_ctx_frames + new_frames)
-        feats_pre = all_feats[-enc_window_frames:]
-        hist_frames = enc_window_frames - new_frames
+        # 3. Run encoder over FULL accumulated LFR (max engine: 400 frames).
+        # Decoder then has full-utterance cross-attention memory like offline.
+        # Encoder cost is bounded; profile 1 covers up to 400 LFR (~24s).
+        feats = all_lfr if cur_total_lfr <= 400 else all_lfr[-400:]
+        hist_stacked = feats.shape[0] - new_lfr
+        new_stacked = new_lfr
 
-        feats = stack_frames(feats_pre)          # LFR-downsampled
-        # Convert raw-fbank frame counts to LFR-stacked counts
-        hist_stacked = (hist_frames + NUM_STRIDE - 1) // NUM_STRIDE
-        new_stacked = feats.shape[0] - hist_stacked
-
-        # 3. Encoder TRT inference (on full stacked features for FSMN context)
         t1 = time.perf_counter()
         enc, alphas = self._backend._run_encoder(feats)
         enc_time = (time.perf_counter() - t1) * 1000
@@ -447,17 +451,24 @@ class ParaformerTRTStream(ASRStream):
             self._chunk_count += 1
             return
 
-        # 4. CIF: only on NEW frames (skip history)
-        enc_t = enc[0]       # [feats_len, 512]
-        alphas_t = alphas[0]  # [feats_len]
+        # 4. CIF on NEW frames, but DEFER the last RIGHT_LOOKAHEAD LFR frames
+        # (they have no right context in this chunk; they'll get full context
+        # in the next chunk's encoder run and become "history" then).
+        enc_t = enc[0]
+        alphas_t = alphas[0]
 
-        # Skip history frames for CIF/decoder — they were already processed
-        if hist_stacked > 0:
-            enc_t = enc_t[hist_stacked:]
-            alphas_t = alphas_t[hist_stacked:]
+        cif_end = enc_t.shape[0] - RIGHT_LOOKAHEAD_LFR
+        cif_start = max(self._cif_processed_lfr, hist_stacked)
+        if cif_end <= cif_start:
+            self._chunk_count += 1
+            return
+
+        cif_enc = enc_t[cif_start:cif_end]
+        cif_alphas = alphas_t[cif_start:cif_end]
+        self._cif_processed_lfr = cif_end
 
         acoustic_embeds, self._carry_weight, self._carry_embed = cif(
-            enc_t, alphas_t,
+            cif_enc, cif_alphas,
             carry_weight=self._carry_weight,
             carry_embed=self._carry_embed,
         )
@@ -466,12 +477,11 @@ class ParaformerTRTStream(ASRStream):
             self._chunk_count += 1
             return
 
-        # 6. Decoder ORT-CUDA inference (only NEW-frame encoder slice;
-        # cache + CIF state advance over non-overlapping time span)
-        enc_new = enc[:, hist_stacked:, :] if hist_stacked > 0 else enc
+        # 6. Decoder cross-attends acoustic_embeds over FULL enc window
+        # (history + new) — matches offline cross-attention memory shape
         t2 = time.perf_counter()
         sample_ids = self._backend._run_decoder(
-            enc_new, enc_new.shape[1],
+            enc, enc.shape[1],
             acoustic_embeds, len(acoustic_embeds),
             self._cache,
         )
@@ -513,45 +523,33 @@ class ParaformerTRTStream(ASRStream):
 
         if len(self._all_audio) >= WINDOW_SIZE:
             all_feats = compute_fbank(self._all_audio)
-            cur_total_frames = all_feats.shape[0]
-            new_frames = cur_total_frames - self._prev_total_frames
+            all_lfr = stack_frames(all_feats)
+            cur_total_lfr = all_lfr.shape[0]
 
-            if new_frames > 0:
-                self._prev_total_frames = cur_total_frames
-                left_ctx_frames = int(LEFT_CONTEXT_SEC * SAMPLE_RATE / HOP_SIZE)
-                enc_window_frames = min(cur_total_frames, left_ctx_frames + new_frames)
-                feats_pre = all_feats[-enc_window_frames:]
-                hist_frames = enc_window_frames - new_frames
-
-                feats = stack_frames(feats_pre)
-                hist_stacked = (hist_frames + NUM_STRIDE - 1) // NUM_STRIDE
-                new_stacked = feats.shape[0] - hist_stacked
-            else:
-                feats = None
-
-            enc, alphas = (self._backend._run_encoder(feats)
-                           if feats is not None else (None, None))
+            # At finalize, run encoder on the full utterance (or last 400 LFR
+            # cap) and drain ALL pending CIF frames (no right-defer — there's
+            # no more future audio).
+            feats = all_lfr if cur_total_lfr <= 400 else all_lfr[-400:]
+            enc, alphas = self._backend._run_encoder(feats)
             if enc is not None and alphas is not None:
-                logger.debug(
-                    f'[paraformer-stream] finalize enc_call frames_total={feats.shape[0]} '
-                    f'new_frames={new_stacked} history_frames={hist_stacked}'
-                )
-                enc_t = enc[0]
-                alphas_t = alphas[0]
-                if hist_stacked > 0:
-                    enc_t = enc_t[hist_stacked:]
-                    alphas_t = alphas_t[hist_stacked:]
+                # CIF from where streaming left off to the very end
+                cif_start = max(self._cif_processed_lfr,
+                                feats.shape[0] - cur_total_lfr + cur_total_lfr - feats.shape[0])
+                # Map absolute LFR index to position within feats window
+                cif_start_local = max(0, cif_start - (cur_total_lfr - feats.shape[0]))
+                cif_enc = enc[0][cif_start_local:]
+                cif_alphas = alphas[0][cif_start_local:]
+                self._cif_processed_lfr = cur_total_lfr
 
                 acoustic_embeds, self._carry_weight, self._carry_embed = cif(
-                    enc_t, alphas_t,
+                    cif_enc, cif_alphas,
                     carry_weight=self._carry_weight,
                     carry_embed=self._carry_embed,
                 )
 
                 if len(acoustic_embeds) > 0:
-                    enc_new = enc[:, hist_stacked:, :] if hist_stacked > 0 else enc
                     sample_ids = self._backend._run_decoder(
-                        enc_new, enc_new.shape[1],
+                        enc, enc.shape[1],
                         acoustic_embeds, len(acoustic_embeds),
                         self._cache,
                     )
@@ -673,8 +671,13 @@ class ParaformerTRTBackend(ASRBackend):
         n_warmup = min(warmup_feats.shape[0], 40)
         warmup_feats = warmup_feats[:n_warmup]
 
-        enc, alphas = self._run_encoder_trt(warmup_feats)
-        if enc is not None and alphas is not None and not np.isnan(alphas).any():
+        force_ort = os.path.exists("/tmp/force_ort_enc")
+        if force_ort:
+            logger.info("PARAFORMER_FORCE_ENC_ORT=1, using ORT CUDA encoder (BF16 A/B test)")
+            enc, alphas = None, None
+        else:
+            enc, alphas = self._run_encoder_trt(warmup_feats)
+        if not force_ort and enc is not None and alphas is not None and not np.isnan(alphas).any():
             logger.info("Encoder TRT engine validated (no NaN)")
             self._enc_provider = "trt"
         else:
