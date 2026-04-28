@@ -34,6 +34,29 @@ TTSPipeline::TTSPipeline(const std::string& model_dir,
                          const std::string& cp_engine_path, int device_id) {
   LoadConfig(sherpa_dir);
 
+  // Derive engine directory from talker_engine_path for file-existence checks.
+  std::string engine_dir_early = talker_engine_path;
+  {
+    auto slash = engine_dir_early.rfind('/');
+    if (slash != std::string::npos) engine_dir_early = engine_dir_early.substr(0, slash);
+    else engine_dir_early = ".";
+  }
+
+  // Load text embed table FIRST (before TRT engines) so vocab pruning saves RAM
+  // before the heavier TRT allocations occur. Use file-existence-based skip flags
+  // since TRT engines are always present in production.
+  {
+    ORTSkipFlags skip_early;
+    skip_early.skip_vocoder = std::ifstream(engine_dir_early + "/vocoder_fp16.engine").good();
+    skip_early.skip_talker_prefill = true;  // TRT decode engine handles prefill
+    skip_early.lazy_speaker_encoder = true;
+    skip_early.lazy_tokenizer_encode = true;
+    skip_early.skip_cp_embed = std::ifstream(sherpa_dir + "/cp_embed_fp32.bin").good();
+    skip_early.skip_codec_embed = std::ifstream(sherpa_dir + "/codec_embed_fp32.bin").good();
+    std::cout << "Loading ORT models (embed table first)..." << std::endl;
+    ort_ = std::make_unique<ORTModels>(model_dir, sherpa_dir, skip_early, device_id);
+  }
+
   std::cout << "Loading TRT engines..." << std::endl;
   talker_ = std::make_unique<TRTTalkerEngine>(
       talker_engine_path, cfg_.num_hidden_layers, cfg_.hidden_dim, cfg_.n_heads,
@@ -114,19 +137,9 @@ TTSPipeline::TTSPipeline(const std::string& model_dir,
     }
   }
 
-  // Build ORT skip flags based on which TRT engines were loaded and whether
-  // pre-extracted binary tables are available. Create ORTModels afterwards.
-  {
-    ORTSkipFlags skip;
-    skip.skip_vocoder = (trt_vocoder_ != nullptr);
-    skip.skip_talker_prefill = trt_prefill_loaded;
-    skip.lazy_speaker_encoder = true;   // load on first voice-clone use
-    skip.lazy_tokenizer_encode = true;  // load on first voice-clone use
-    // Skip ORT sessions when pre-extracted binary files are present
-    skip.skip_cp_embed = std::ifstream(sherpa_dir + "/cp_embed_fp32.bin").good();
-    skip.skip_codec_embed = std::ifstream(sherpa_dir + "/codec_embed_fp32.bin").good();
-    ort_ = std::make_unique<ORTModels>(model_dir, sherpa_dir, skip, device_id);
-  }
+  // ORT models (embed table) already loaded early before TRT engines.
+  // Nothing to do here.
+  (void)trt_prefill_loaded;  // suppress unused-variable warning
 
   // Try to load cp_embed table on GPU for fast lookup
   LoadCPEmbedTable(sherpa_dir);

@@ -2,6 +2,7 @@
 #include "tts_ort_models.h"
 
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -55,7 +56,15 @@ ORTModels::ORTModels(const std::string& model_dir,
 
   // Try new split text_embed path first: FP16 binary + projection ONNX
   {
-    std::string embed_path = sherpa_dir + "/text_embed_fp16.bin";
+    // Check for vocab pruning: prefer pruned embed if token_map exists
+    bool want_prune = (std::getenv("TTS_VOCAB_PRUNED") &&
+                       std::string(std::getenv("TTS_VOCAB_PRUNED")) == "1");
+    std::string map_path = sherpa_dir + "/token_map.bin";
+    std::string pruned_path = sherpa_dir + "/text_embed_fp16_pruned.bin";
+    text_pruned_ = want_prune && fs::exists(map_path) && fs::exists(pruned_path);
+
+    std::string embed_path = text_pruned_ ? pruned_path
+                                          : sherpa_dir + "/text_embed_fp16.bin";
     std::string proj_path = sherpa_dir + "/text_projection_only.onnx";
     if (fs::exists(embed_path) && fs::exists(proj_path)) {
       // Load FP16 embedding table
@@ -64,10 +73,33 @@ ORTModels::ORTModels(const std::string& model_dir,
       ef.seekg(0);
       text_embed_table_.resize(fsize / 2);
       ef.read(reinterpret_cast<char*>(text_embed_table_.data()), fsize);
-      text_embed_vocab_ = 151936;  // Qwen3 vocab
-      text_embed_dim_ = (int)(fsize / 2 / text_embed_vocab_);
-      std::cout << "  Loaded text_embed FP16: " << embed_path
-                << " (" << fsize / (1024*1024) << " MB)" << std::endl;
+
+      if (text_pruned_) {
+        // Load red2orig map
+        std::ifstream mf(map_path, std::ios::binary | std::ios::ate);
+        size_t msize = mf.tellg();
+        mf.seekg(0);
+        text_red2orig_.resize(msize / sizeof(uint32_t));
+        mf.read(reinterpret_cast<char*>(text_red2orig_.data()), msize);
+        std::cout << "  Loaded token_map: " << map_path
+                  << " (" << text_red2orig_.size() << " entries)" << std::endl;
+
+        // Build orig2red: size=full_vocab, -1 = not kept
+        text_orig2red_.resize(151936, -1);
+        for (size_t i = 0; i < text_red2orig_.size(); ++i) {
+          text_orig2red_[text_red2orig_[i]] = static_cast<int32_t>(i);
+        }
+        text_embed_vocab_ = static_cast<int>(text_red2orig_.size());
+        text_embed_dim_ = static_cast<int>(fsize / 2 / text_embed_vocab_);
+        std::cout << "  Loaded pruned text_embed FP16: " << embed_path
+                  << " (" << fsize / (1024*1024) << " MB, "
+                  << text_embed_vocab_ << "x" << text_embed_dim_ << ")" << std::endl;
+      } else {
+        text_embed_vocab_ = 151936;  // Qwen3 vocab
+        text_embed_dim_ = (int)(fsize / 2 / text_embed_vocab_);
+        std::cout << "  Loaded text_embed FP16: " << embed_path
+                  << " (" << fsize / (1024*1024) << " MB)" << std::endl;
+      }
       // Load projection ONNX
       text_projection_ = std::make_unique<Ort::Session>(env_, proj_path.c_str(), opts);
       std::cout << "  Loaded text_projection: " << proj_path << std::endl;
@@ -75,6 +107,10 @@ ORTModels::ORTModels(const std::string& model_dir,
     } else {
       // Fallback to old combined text_project.onnx
       text_project_ = load(sherpa_dir + "/text_project.onnx");
+      if (text_pruned_) {
+        std::cerr << "  WARNING: vocab pruning requested but old text_project.onnx "
+                  << "path active — pruning not applied" << std::endl;
+      }
     }
   }
   if (flags.skip_codec_embed) {
@@ -205,7 +241,18 @@ std::vector<float> ORTModels::TextProject(
     std::vector<float> embeds(T * D);
     for (int t = 0; t < T; ++t) {
       int idx = (int)input_ids[t];
-      if (idx < 0 || idx >= text_embed_vocab_) idx = 0;
+      int vocab = text_embed_vocab_;
+      if (text_pruned_) {
+        if (idx < 0 || idx >= (int)text_orig2red_.size() || text_orig2red_[idx] < 0) {
+          std::cerr << "[TTS] TextProject: token " << idx
+                    << " not in pruned vocab, clamping to 0" << std::endl;
+          idx = 0;
+        } else {
+          idx = text_orig2red_[idx];
+        }
+      } else {
+        if (idx < 0 || idx >= vocab) idx = 0;
+      }
       const uint16_t* src = text_embed_table_.data() + (size_t)idx * D;
       for (int d = 0; d < D; ++d) {
         embeds[t * D + d] = fp16_to_fp32(src[d]);

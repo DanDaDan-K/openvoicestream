@@ -86,6 +86,11 @@ class ORTModels {
   int text_embed_dim_ = 0;
   bool has_split_text_embed_ = false;
 
+  // Vocab pruning: orig→reduced ID mapping for text embedding lookup
+  std::vector<int32_t> text_red2orig_;   // [red_idx] → orig_id
+  std::vector<int32_t> text_orig2red_;   // [orig_id] → red_idx, -1 if not kept
+  bool text_pruned_ = false;
+
   std::unique_ptr<Ort::Session> codec_embed_;
   std::unique_ptr<Ort::Session> cp_embed_;
   std::unique_ptr<Ort::Session> talker_prefill_;
