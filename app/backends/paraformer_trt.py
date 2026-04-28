@@ -673,13 +673,8 @@ class ParaformerTRTBackend(ASRBackend):
         n_warmup = min(warmup_feats.shape[0], 40)
         warmup_feats = warmup_feats[:n_warmup]
 
-        force_ort = os.path.exists("/tmp/force_ort_enc")
-        if force_ort:
-            logger.info("PARAFORMER_FORCE_ENC_ORT=1, using ORT CUDA encoder (BF16 A/B test)")
-            enc, alphas = None, None
-        else:
-            enc, alphas = self._run_encoder_trt(warmup_feats)
-        if not force_ort and enc is not None and alphas is not None and not np.isnan(alphas).any():
+        enc, alphas = self._run_encoder_trt(warmup_feats)
+        if enc is not None and alphas is not None and not np.isnan(alphas).any():
             logger.info("Encoder TRT engine validated (no NaN)")
             self._enc_provider = "trt"
         else:

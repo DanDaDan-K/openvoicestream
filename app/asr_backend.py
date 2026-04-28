@@ -92,6 +92,7 @@ def create_asr_backend(backend_name: Optional[str] = None) -> ASRBackend:
 
     Auto-detect logic:
         - If LANGUAGE_MODE=multilanguage → qwen3 (52 languages)
+        - If LANGUAGE_MODE=zh_en → paraformer_trt (Jetson TRT zh+en)
         - Otherwise, use ASR_BACKEND env var (default: sherpa)
     """
     if backend_name is None:
@@ -100,12 +101,18 @@ def create_asr_backend(backend_name: Optional[str] = None) -> ASRBackend:
         if language_mode == "multilanguage":
             backend_name = "qwen3"
             logger.info("LANGUAGE_MODE=multilanguage → using qwen3 ASR backend")
+        elif language_mode == "zh_en":
+            backend_name = os.environ.get("ASR_BACKEND", "paraformer_trt")
+            logger.info("LANGUAGE_MODE=zh_en → using %s ASR backend", backend_name)
         else:
             backend_name = os.environ.get("ASR_BACKEND", "sherpa")
 
     if backend_name == "sherpa":
         from backends.sherpa_asr import SherpaASRBackend
         return SherpaASRBackend()
+    elif backend_name == "paraformer_trt":
+        from backends.paraformer_trt import ParaformerTRTBackend
+        return ParaformerTRTBackend()
     elif backend_name == "qwen3":
         # Try importing from standalone package first, fallback to local
         try:
