@@ -85,26 +85,43 @@ def _compute_time_embedding(t: float, dim: int = TIME_EMB_DIM) -> np.ndarray:
     return emb.reshape(1, dim, 1)
 
 
-def _istft(mag: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Inverse STFT from magnitude and phase components."""
-    complex_spec = mag * (x + 1j * y)
-    n_frames = complex_spec.shape[1]
+# Periodic Hann window matches torch.hann_window(N_FFT, periodic=True) exactly.
+_HANN_PERIODIC = np.hanning(N_FFT + 1)[:-1].astype(np.float32)
+
+
+def _istft(mag: np.ndarray, x: np.ndarray, y: np.ndarray, length: Optional[int] = None) -> np.ndarray:
+    """torch.istft-equivalent NumPy ISTFT (center=True, periodic Hann, COLA).
+
+    mag/x/y: [513, T] float32 (Vocos outputs).
+    """
+    spec = (mag * (x + 1j * y)).astype(np.complex64)  # [F, T]
+    n_frames = spec.shape[1]
+    # IRFFT per time frame: [F, T] -> [N_FFT, T]
+    frames = np.fft.irfft(spec, n=N_FFT, axis=0).astype(np.float32)
+    # Apply window in time domain
+    frames = frames * _HANN_PERIODIC[:, None]
+    sq_window = (_HANN_PERIODIC ** 2).astype(np.float32)
+
+    # OLA reconstruction
     output_len = (n_frames - 1) * HOP_LENGTH + N_FFT
-
     audio = np.zeros(output_len, dtype=np.float32)
-    window = np.hanning(N_FFT)
-
-    for i in range(n_frames):
-        frame = np.fft.irfft(complex_spec[:, i], n=N_FFT) * window
-        start = i * HOP_LENGTH
-        audio[start:start + N_FFT] += frame
-
-    window_sum = np.zeros(output_len, dtype=np.float32)
+    win_sum = np.zeros(output_len, dtype=np.float32)
     for i in range(n_frames):
         start = i * HOP_LENGTH
-        window_sum[start:start + N_FFT] += window ** 2
+        audio[start:start + N_FFT] += frames[:, i]
+        win_sum[start:start + N_FFT] += sq_window
+    audio = audio / np.maximum(win_sum, 1e-11)
 
-    audio = audio / np.maximum(window_sum, 1e-8)
+    # center=True: trim N_FFT//2 from each side
+    pad = N_FFT // 2
+    audio = audio[pad:output_len - pad]
+
+    if length is not None:
+        if len(audio) > length:
+            audio = audio[:length]
+        elif len(audio) < length:
+            audio = np.pad(audio, (0, length - len(audio)))
+
     return audio
 
 
@@ -472,9 +489,8 @@ class MatchaTRTBackend(TTSBackend):
         pool.copy_dtoh(d_y_out, out_y)
         vocos_ms = (time.time() - t0) * 1000
 
-        # ISTFT
-        audio = _istft(mag[0], out_x[0], out_y[0])
-        audio = audio[:mel_frames * HOP_LENGTH]
+        # ISTFT (length matches mel_frames * HOP_LENGTH)
+        audio = _istft(mag[0], out_x[0], out_y[0], length=mel_frames * HOP_LENGTH)
 
         if np.abs(audio).max() > 0:
             audio = audio / np.abs(audio).max() * 0.95
