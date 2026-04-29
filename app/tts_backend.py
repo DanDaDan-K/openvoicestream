@@ -99,20 +99,17 @@ def create_backend(backend_name: Optional[str] = None) -> TTSBackend:
     """Factory: create TTS backend by name.
 
     Args:
-        backend_name: 'sherpa', 'qwen3_trt', or None for auto-detect.
+        backend_name: 'matcha_trt', 'sherpa', 'qwen3_trt', or None for auto-detect.
 
     Auto-detect logic:
-        - If LANGUAGE_MODE=multilanguage → qwen3_trt (52 languages)
-        - Otherwise, use TTS_BACKEND env var (default: sherpa)
+        - LANGUAGE_MODE=zh_en → matcha_trt (Matcha-icefall-zh-en, TRT)
+        - LANGUAGE_MODE=multilanguage → qwen3_trt (52 languages)
+        - Override with TTS_BACKEND env var (matcha_trt|sherpa|qwen3_trt)
     """
     if backend_name is None:
-        # Check LANGUAGE_MODE for automatic backend selection
         language_mode = os.environ.get("LANGUAGE_MODE", "zh_en")
-        if language_mode == "multilanguage":
-            backend_name = "qwen3_trt"
-            logger.info("LANGUAGE_MODE=multilanguage → using qwen3_trt backend")
-        else:
-            backend_name = os.environ.get("TTS_BACKEND", "sherpa")
+        default = "matcha_trt" if language_mode == "zh_en" else "qwen3_trt"
+        backend_name = os.environ.get("TTS_BACKEND", default)
 
     if backend_name == "sherpa":
         from backends.sherpa import SherpaBackend
