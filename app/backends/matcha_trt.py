@@ -140,16 +140,23 @@ class MatchaTRTBackend(TTSBackend):
         self._ready = True
 
     def _load_acoustic_ort(self):
-        """Load baked model-steps-3.onnx via ORT-CPU.
+        """Load baked model-steps-3.onnx via ORT with CUDA EP.
 
         Bypasses split TRT estimator due to time_emb npy mismatch with
-        current model variant. Acoustic ~600ms on CPU (one ORT call vs
-        TRT split ~10ms) — accuracy > speed.
+        current model variant. Single-shot ORT call with CUDA EP gives
+        GPU acceleration without the TRT split accuracy risk.
         """
         import onnxruntime as ort
         path = os.path.join(_MODEL_BASE, "model-steps-3.onnx")
-        self._acoustic_ort = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-        logger.info("Acoustic ORT loaded (CPU): %s", path)
+        providers = [
+            ("CUDAExecutionProvider", {"device_id": 0, "arena_extend_strategy": "kSameAsRequested"}),
+            "CPUExecutionProvider",
+        ]
+        sess_opt = ort.SessionOptions()
+        sess_opt.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self._acoustic_ort = ort.InferenceSession(path, sess_opt, providers=providers)
+        logger.info("Acoustic ORT loaded (%s): %s",
+                     self._acoustic_ort.get_providers()[0], path)
 
     def _load_lexicon(self):
         """Load lexicon.txt and tokens.txt."""
