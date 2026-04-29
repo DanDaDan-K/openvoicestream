@@ -13,6 +13,7 @@ struct ORTSkipFlags {
   bool skip_talker_prefill = false;    // TRT prefill loaded; skip talker_prefill ORT
   bool lazy_speaker_encoder = false;   // load speaker_encoder on first use
   bool lazy_tokenizer_encode = false;  // load tokenizer12hz_encode on first use
+  bool lazy_vocoder = false;           // load vocoder on first Vocoder() call
   bool skip_cp_embed = false;    // pre-extracted cp_embed_fp32.bin available
   bool skip_codec_embed = false; // pre-extracted codec_embed_fp32.bin available
 };
@@ -49,6 +50,10 @@ class ORTModels {
   // vocoder: codes [1, T, 16] int64 → audio [N] float32
   std::vector<float> Vocoder(const int64_t* codes, int n_frames, int n_groups);
 
+  // Lazy-load vocoder session (no-op if already loaded). Call after memory-heavy
+  // TRT deserializations complete to avoid overlapping peak allocations.
+  void EnsureVocoder();
+
   // speaker_encoder: mel [1, T, 128] float32 → spk_embed [D] float32
   // Returns empty if speaker_encoder not loaded
   std::vector<float> SpeakerEncode(const float* mel, int mel_frames);
@@ -76,8 +81,10 @@ class ORTModels {
   Ort::SessionOptions MakeCPUSessionOptions();
 
   // Stored for lazy loading
+  std::string model_dir_;
   std::string sherpa_dir_;
   int device_id_ = 0;
+  bool lazy_vocoder_ = false;
 
   std::unique_ptr<Ort::Session> text_project_;      // old combined model (fallback)
   std::unique_ptr<Ort::Session> text_projection_;   // new: projection-only ONNX

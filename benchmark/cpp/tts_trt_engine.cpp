@@ -195,13 +195,17 @@ TRTTalkerEngine::TRTTalkerEngine(const std::string& engine_path, int n_layers,
 
 void TRTTalkerEngine::Init() {
   if (has_dual_profiles_) {
-    // Create decode context (Profile 1) immediately — needed for DecodeStep.
-    // Prefill context (Profile 0) is lazily created on first Prefill() call
-    // to avoid its ~150 MB workspace overlapping with other engine deserializations.
+    // Create BOTH contexts eagerly during Init() while 1+ GB is available.
+    // Lazy creation deferred ctx_prefill_ to first Prefill() call, but on 8 GB
+    // devices only ~100 MB remains after full pipeline load — not enough for
+    // the ~150-200 MB TRT execution context workspace. Creating both upfront
+    // costs ~500 MB total (vs ~328 MB for decode-only), paid from 1028 MB.
     ctx_decode_.reset(engine_->createExecutionContext());
     ctx_decode_->setOptimizationProfileAsync(1, nullptr);
+    ctx_prefill_.reset(engine_->createExecutionContext());
+    ctx_prefill_->setOptimizationProfileAsync(0, nullptr);
     context_.reset();
-    std::cout << "  TRTTalkerEngine: DUAL-PROFILE engine (prefill ctx lazy)" << std::endl;
+    std::cout << "  TRTTalkerEngine: DUAL-PROFILE engine (both contexts eager)" << std::endl;
   } else {
     context_.reset(engine_->createExecutionContext());
     std::cout << "  TRTTalkerEngine: single-profile engine" << std::endl;
@@ -732,12 +736,7 @@ TRTTalkerEngine::PrefillResult TRTTalkerEngine::Prefill(
   // === Batch prefill path (decode engine with dynamic seq_len) ===
   // Dual-profile engine: use Profile 0 context (ctx_prefill_).
   // Single-profile engine: use context_ (which must support dynamic seq_len).
-  // Lazy-create prefill context on first use to defer its ~150 MB workspace
-  // past the memory-critical engine loading phase.
-  if (has_dual_profiles_ && !ctx_prefill_) {
-    ctx_prefill_.reset(engine_->createExecutionContext());
-    ctx_prefill_->setOptimizationProfileAsync(0, nullptr);
-  }
+  // ctx_prefill_ is created eagerly in Init() — no lazy fallback needed.
   auto* ctx = has_dual_profiles_ ? ctx_prefill_.get() : context_.get();
 
   if (first_step_) {

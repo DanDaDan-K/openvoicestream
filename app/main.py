@@ -135,14 +135,21 @@ async def startup():
         logger.warning("ASR backend failed: %s", e)
 
     import tts_service
-    logger.info("Pre-loading TTS model...")
-    tts_service.preload()
+    if os.environ.get("LAZY_TTS", "").lower() in ("1", "true", "yes"):
+        logger.info("TTS preload skipped (LAZY_TTS set); will load on first request.")
+    else:
+        logger.info("Pre-loading TTS model...")
+        tts_service.preload()
 
     # Warm up the dedicated streaming-TTS executor thread so its CUDA
     # per-thread context is initialized before the first /tts/stream
     # request lands. Without this, the very first streaming request
     # pays a ~30ms cold-context tax on prefill.
-    try:
+    # Skip when LAZY_TTS — TTS not loaded yet, can't warm what isn't there.
+    if os.environ.get("LAZY_TTS", "").lower() in ("1", "true", "yes"):
+        logger.info("TTS streaming warmup skipped (LAZY_TTS).")
+    else:
+      try:
         from tts_backend import TTSCapability
         if tts_service.has_capability(TTSCapability.STREAMING):
             backend = tts_service.get_backend()
@@ -160,7 +167,7 @@ async def startup():
             import asyncio as _asyncio
             await _asyncio.get_event_loop().run_in_executor(executor, _warm_stream)
             logger.info("TTS streaming executor warmed up (1 thread, CUDA primed).")
-    except Exception as exc:  # pragma: no cover
+      except Exception as exc:  # pragma: no cover
         logger.warning("TTS streaming executor warm-up skipped: %s", exc)
 
     logger.info("Speech service ready.")

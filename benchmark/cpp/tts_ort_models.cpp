@@ -38,8 +38,10 @@ ORTModels::ORTModels(const std::string& model_dir,
                      int device_id)
     : env_(ORT_LOGGING_LEVEL_WARNING, "qwen3tts"),
       mem_info_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)),
+      model_dir_(model_dir),
       sherpa_dir_(sherpa_dir),
-      device_id_(device_id) {
+      device_id_(device_id),
+      lazy_vocoder_(flags.lazy_vocoder) {
   auto opts = MakeSessionOptions(device_id);
 
   std::cout << "Loading ORT models..." << std::endl;
@@ -144,9 +146,11 @@ ORTModels::ORTModels(const std::string& model_dir,
     }
   }
 
-  // Vocoder: skip if TRT vocoder engine is active
+  // Vocoder: skip if TRT vocoder covers it, or defer if lazy
   if (flags.skip_vocoder) {
     std::cout << "  Skipped vocoder ORT (TRT active)" << std::endl;
+  } else if (flags.lazy_vocoder) {
+    std::cout << "  vocoder: deferred (lazy)" << std::endl;
   } else {
     if (fs::exists(sherpa_dir + "/vocoder.onnx"))
       vocoder_ = load(sherpa_dir + "/vocoder.onnx");
@@ -406,8 +410,35 @@ ORTModels::PrefillResult ORTModels::TalkerPrefill(const float* embeds,
   return result;
 }
 
+void ORTModels::EnsureVocoder() {
+  if (vocoder_) return;  // already loaded
+  if (!lazy_vocoder_) return;  // not deferred — should have been loaded eagerly
+  std::cout << "  Lazy-loading vocoder ORT session..." << std::endl;
+  auto opts = MakeSessionOptions(device_id_);
+  auto load = [&](const std::string& path) -> std::unique_ptr<Ort::Session> {
+    if (!fs::exists(path)) return nullptr;
+    return std::make_unique<Ort::Session>(env_, path.c_str(), opts);
+  };
+  if (fs::exists(sherpa_dir_ + "/vocoder.onnx"))
+    vocoder_ = load(sherpa_dir_ + "/vocoder.onnx");
+  else if (fs::exists(sherpa_dir_ + "/tokenizer12hz_decode.onnx"))
+    vocoder_ = load(sherpa_dir_ + "/tokenizer12hz_decode.onnx");
+  else if (fs::exists(model_dir_ + "/vocoder.onnx"))
+    vocoder_ = load(model_dir_ + "/vocoder.onnx");
+  else
+    vocoder_ = load(model_dir_ + "/tokenizer12hz_decode.onnx");
+  if (vocoder_)
+    std::cout << "  ORT vocoder session loaded (lazy)" << std::endl;
+  else
+    std::cerr << "  ORT vocoder NOT FOUND — TTS will fail" << std::endl;
+}
+
 std::vector<float> ORTModels::Vocoder(const int64_t* codes, int n_frames,
                                       int n_groups) {
+  // Lazy-load vocoder session if deferred (TTS_VOCODER_TRT=0 path)
+  if (!vocoder_ && lazy_vocoder_) {
+    const_cast<ORTModels*>(this)->EnsureVocoder();
+  }
   if (!vocoder_) return {};
 
   int64_t shape[] = {1, n_frames, n_groups};

@@ -50,10 +50,18 @@ config.set_flag(trt.BuilderFlag.BF16)
 
 n_layers = 5
 
+# Detect optional scalar inputs (v1 ONNX has past_length, deployed engine has + gen_step)
+import_names = [network.get_input(j).name for j in range(network.num_inputs)]
+print(f'Detected ONNX inputs: {import_names}')
+
 # Profile 0: prefill (variable seq, empty KV)
 p0 = builder.create_optimization_profile()
 p0.set_shape('inputs_embeds',  (1, 1, 1024), (1, 20, 1024), (1, 200, 1024))
 p0.set_shape('cache_position', (1,),         (20,),         (200,))
+if 'past_length' in import_names:
+    p0.set_shape('past_length', (), (), ())
+if 'gen_step' in import_names:
+    p0.set_shape('gen_step', (), (), ())
 for i in range(n_layers):
     p0.set_shape(f'past_key_{i}',   (1, 8, 0, 128), (1, 8, 0, 128), (1, 8, 0, 128))
     p0.set_shape(f'past_value_{i}', (1, 8, 0, 128), (1, 8, 0, 128), (1, 8, 0, 128))
@@ -63,6 +71,10 @@ config.add_optimization_profile(p0)
 p1 = builder.create_optimization_profile()
 p1.set_shape('inputs_embeds',  (1, 1, 1024), (1, 1, 1024), (1, 1, 1024))
 p1.set_shape('cache_position', (1,),         (1,),         (1,))
+if 'past_length' in import_names:
+    p1.set_shape('past_length', (), (), ())
+if 'gen_step' in import_names:
+    p1.set_shape('gen_step', (), (), ())
 for i in range(n_layers):
     p1.set_shape(f'past_key_{i}',   (1, 8, 0, 128), (1, 8, 10, 128), (1, 8, 20, 128))
     p1.set_shape(f'past_value_{i}', (1, 8, 0, 128), (1, 8, 10, 128), (1, 8, 20, 128))

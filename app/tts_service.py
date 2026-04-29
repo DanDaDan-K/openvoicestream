@@ -35,6 +35,15 @@ def preload() -> None:
     backend.preload()
 
 
+def _ensure_loaded() -> TTSBackend:
+    """Lazy preload trigger: load TTS backend on first request if LAZY_TTS skipped startup load."""
+    backend = get_backend()
+    if not backend.is_ready():
+        logger.info("TTS lazy-load triggered by request (LAZY_TTS path)...")
+        backend.preload()
+    return backend
+
+
 def synthesize(
     text: str,
     speaker_id: Optional[int] = None,
@@ -44,7 +53,7 @@ def synthesize(
     **kwargs,
 ) -> tuple[bytes, dict]:
     """Synthesize text to WAV bytes. Returns (wav_bytes, metadata)."""
-    return get_backend().synthesize(
+    return _ensure_loaded().synthesize(
         text=text, speaker_id=speaker_id, speed=speed,
         pitch_shift=pitch_shift, language=language, **kwargs
     )
@@ -57,7 +66,7 @@ def clone_voice(
     **kwargs,
 ) -> tuple[bytes, dict]:
     """Synthesize with voice cloning. Raises NotImplementedError if unsupported."""
-    return get_backend().clone_voice(
+    return _ensure_loaded().clone_voice(
         text=text, speaker_embedding=speaker_embedding,
         language=language, **kwargs
     )
@@ -65,7 +74,7 @@ def clone_voice(
 
 def extract_speaker_embedding(audio_wav_bytes: bytes) -> bytes:
     """Extract speaker embedding from WAV. Raises NotImplementedError if unsupported."""
-    return get_backend().extract_speaker_embedding(audio_wav_bytes)
+    return _ensure_loaded().extract_speaker_embedding(audio_wav_bytes)
 
 
 def get_sample_rate() -> int:

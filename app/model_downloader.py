@@ -91,7 +91,8 @@ def _download_and_extract(url: str, dest_dir: str) -> None:
 def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") -> None:
     """Ensure all required models for the given language mode are present."""
     required = {}
-    required.update(MODELS.get(language_mode, MODELS["zh_en"]))
+    required.update(MODELS.get(language_mode, {}))
+    # multilanguage mode uses Qwen3 TRT engines baked into the image — no CDN pull needed.
     # SenseVoice is optional — don't block startup for it (lazy-loaded)
 
     missing = []

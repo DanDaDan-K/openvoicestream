@@ -29,13 +29,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 libsndfile1 sox \
     && rm -rf /var/lib/apt/lists/*
 
-# FastAPI stack
+# FastAPI stack + piper-phonemize for matcha_trt English G2P
 RUN pip3 install --no-cache-dir --index-url https://pypi.org/simple \
     fastapi \
     "uvicorn[standard]" \
     soundfile \
     python-multipart \
-    'numpy<2'
+    'numpy<2' \
+    piper-phonemize
 
 # Copy onnxruntime (with CUDA EP) from builder — only the Python package
 COPY --from=builder /usr/local/lib/python3.10/dist-packages/onnxruntime \

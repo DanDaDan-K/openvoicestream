@@ -63,7 +63,15 @@ TTSPipeline::TTSPipeline(const std::string& model_dir,
   // since TRT engines are always present in production.
   {
     ORTSkipFlags skip_early;
-    skip_early.skip_vocoder = std::ifstream(engine_dir_early + "/vocoder_fp16.engine").good();
+    // TTS_VOCODER_TRT=0 forces ORT vocoder fallback — must NOT skip ORT vocoder
+    // even if the TRT engine file exists on disk.
+    bool force_ort_vocoder = false;
+    {
+      const char* env_voc_trt = std::getenv("TTS_VOCODER_TRT");
+      if (env_voc_trt && env_voc_trt[0] == '0') force_ort_vocoder = true;
+    }
+    skip_early.skip_vocoder = !force_ort_vocoder &&
+        std::ifstream(engine_dir_early + "/vocoder_fp16.engine").good();
     skip_early.skip_talker_prefill = true;  // TRT decode engine handles prefill
     skip_early.lazy_speaker_encoder = true;
     skip_early.lazy_tokenizer_encode = true;
@@ -83,7 +91,7 @@ TTSPipeline::TTSPipeline(const std::string& model_dir,
   TTSPipelineMemLog("before_talker_weights");
   talker_ = std::make_unique<TRTTalkerEngine>(
       talker_engine_path, cfg_.num_hidden_layers, cfg_.hidden_dim, cfg_.n_heads,
-      cfg_.head_dim, cfg_.vocab_size, 32, /*defer_context=*/true);
+      cfg_.head_dim, cfg_.vocab_size, 16, /*defer_context=*/true);
   TTSPipelineMemLog("after_talker_weights");
 
   // Create Talker execution context NOW, while 1+ GB is still available.
@@ -139,13 +147,23 @@ TTSPipeline::TTSPipeline(const std::string& model_dir,
     // Vocoder weights-only deserialization peak (~450 MB) needs more headroom
     // than is left after CP KV load + graph capture (~135 MB). Loading at
     // this point (~415 MB available) avoids the CP KV peak overlap.
+    // TTS_VOCODER_TRT=0 forces ORT fallback — saves ~373 MB deserialization
+    // peak on memory-constrained 8 GB devices.
+    bool use_trt_vocoder = true;
+    {
+      const char* env_voc_trt = std::getenv("TTS_VOCODER_TRT");
+      if (env_voc_trt && env_voc_trt[0] == '0') {
+        use_trt_vocoder = false;
+        std::cout << "  TTS_VOCODER_TRT=0 — forcing ORT vocoder fallback (saves ~373 MB peak)" << std::endl;
+      }
+    }
     std::string voc_engine_path = engine_dir + "/vocoder_fp16.engine";
     std::ifstream voc_test(voc_engine_path);
-    if (voc_test.good()) {
+    if (use_trt_vocoder && voc_test.good()) {
       voc_test.close();
       std::cout << "  Found vocoder TRT engine: " << voc_engine_path << std::endl;
       TTSPipelineMemLog("before_vocoder_weights");
-      trt_vocoder_ = std::make_unique<TRTVocoderEngine>(voc_engine_path, 200,
+      trt_vocoder_ = std::make_unique<TRTVocoderEngine>(voc_engine_path, 100,
                                                          24000 * 20,
                                                          /*defer_context=*/true);
       TTSPipelineMemLog("after_vocoder_weights");
