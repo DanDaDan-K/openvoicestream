@@ -122,5 +122,9 @@ def create_asr_backend(backend_name: Optional[str] = None) -> ASRBackend:
             from backends.qwen3_asr import Qwen3ASRBackend
             logger.info("Using Qwen3ASRBackend from local backends/")
         return Qwen3ASRBackend()
+    elif backend_name == "trt_edgellm":
+        from backends.trt_edge_llm_asr import TRTEdgeLLMASRBackend
+        logger.info("Using TRTEdgeLLMASRBackend (TRT-Edge-LLM subprocess)")
+        return TRTEdgeLLMASRBackend()
     else:
         raise ValueError(f"Unknown ASR backend: {backend_name}")

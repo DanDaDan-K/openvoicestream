@@ -127,5 +127,9 @@ def create_backend(backend_name: Optional[str] = None) -> TTSBackend:
         from backends.matcha_trt import MatchaTRTBackend
         logger.info("Using MatchaTRTBackend from local backends/")
         return MatchaTRTBackend()
+    elif backend_name == "trt_edgellm":
+        from backends.trt_edge_llm_tts import TRTEdgeLLMTTSBackend
+        logger.info("Using TRTEdgeLLMTTSBackend (TRT-Edge-LLM subprocess)")
+        return TRTEdgeLLMTTSBackend()
     else:
         raise ValueError(f"Unknown TTS backend: {backend_name}")
