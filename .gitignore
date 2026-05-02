@@ -22,6 +22,9 @@ models/
 .DS_Store
 Thumbs.db
 
+# Git worktrees
+.worktrees/
+
 # Wheels (binary, managed separately)
 wheels/
 
