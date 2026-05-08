@@ -662,3 +662,86 @@ Lessons to carry forward:
 - For single-profile Talker engines, do not treat `inputs_embeds` max seqLen as KV capacity. The runtime must track input max and past-KV max separately.
 - W8A16 needs a quality gate before any dual-resident soak: compare BF16 vs W8 prefill/decode logits, first codec token sequence, frame count, and audio duration before listening tests.
 - The next W8 step should be numerical diagnosis or a dual-profile W8A16 rebuild, not tuning EOS sampling knobs.
+
+## Run 12 - BF16 Vocoder50 + TTS Pruned Vocab +5k
+
+Artifact:
+
+| Artifact | Path |
+|---|---|
+| Expanded Talker dir | `/tmp/qwen3tts_ref_0507_from_nano/talker_pruned_text_plus5k_0508` |
+| Expansion script | `scripts/expand_qwen3_tts_pruned_vocab.py` |
+
+Expansion result:
+
+```json
+{
+  "base_rows": 35669,
+  "added_rows": 5000,
+  "total_rows": 40669,
+  "embedding_bytes": 166580224,
+  "embedding_mib": 158.86,
+  "forced_present": {"104307": true}
+}
+```
+
+Implementation notes:
+
+- The script preserves the existing reduced row order, appends selected original tokenizer IDs, writes a new `text_embedding.safetensors`, and updates `token_map.bin`.
+- It uses the full Talker embedding as the source of truth and keeps runtime IDs in the original Qwen tokenizer ID space.
+- The first expansion forced token id `104307`, which was the missing id for `你好，今天天气很好。`, then added a small multilingual/default corpus and low-id filler.
+- Container validation must not mount the host `/tmp` over the image `/tmp`. For this engine set, the app container needs host TRT 10.3 libraries mounted narrowly as `/tmp/trt-libs` and exported first in `LD_LIBRARY_PATH`; mounting all of `/tmp` can accidentally shadow image/runtime files.
+
+TTS-only result for `你好，今天天气很好。` with BF16 Talker + vocoder50:
+
+| Stage | MemAvailable |
+|---|---:|
+| `worker_after_tts_runtime` | 2385 MB |
+| `worker_after_lazy_code2wav` | 1947 MB |
+| first chunk `worker_after_code2wav_chunk` | 1846 MB |
+| final chunk `worker_after_code2wav_final_chunk` | 1845 MB |
+
+TTS-only output:
+
+```json
+{"chunk_count":2,"frames":27,"samples":51840,"pcm_bytes":103680,"first_chunk_ms":3471.561,"generation_ms":3644.827,"code2wav_ms":1187.413,"total_ms":4363.189,"rtf":2.02}
+```
+
+Dual-resident result with ASR warmup enabled:
+
+| Stage | MemAvailable |
+|---|---:|
+| TTS `worker_entry_before_plugin` | 4176 MB |
+| TTS `worker_before_tts_runtime` | 4100 MB |
+| TTS `worker_after_tts_runtime` | 167 MB |
+| TTS `worker_after_ready` | 167 MB |
+| startup warmup `worker_before_lazy_code2wav` | 210 MB |
+| startup warmup `worker_after_lazy_code2wav` | 148 MB |
+| startup warmup `worker_after_code2wav_final_chunk` | 103 MB |
+| concurrent real requests after final Code2Wav | 108-110 MB |
+| later sequential long request after final Code2Wav | 144 MB |
+
+Real `/tts/stream` requests while ASR remained resident:
+
+```text
+POST /tts/stream {"text":"你好","language":"chinese"}
+HTTP 200, downloaded 46,084 bytes, time_starttransfer 0.068 s, time_total 3.892 s
+
+POST /tts/stream {"text":"你好，今天天气很好。","language":"chinese"}
+HTTP 200, downloaded 80,644 bytes, time_starttransfer 0.067 s, time_total 2.526 s
+
+POST /tts/stream {"text":"你好，今天天气很好。","language":"chinese"}
+HTTP 200, downloaded 88,324 bytes, time_starttransfer 0.003 s, time_total 2.606 s
+```
+
+Outcome:
+
+- `+5k` vocab expansion works functionally: the previously missing longer Chinese sentence now streams PCM while ASR and TTS remain resident.
+- It is still not production-safe. `worker_after_tts_runtime` dropped to `167 MB` from the vocoder50/pruned baseline's `420 MB`, far more than the raw `~19.5 MB` embedding-row budget would suggest. Treat this as allocator/swap/noise plus fragmented headroom, not just tensor bytes.
+- The startup minimum stayed around `103 MB`, and real requests stayed around `108-144 MB` available. This is similar to the original vocoder50 fit proof, but too close to the edge for soak.
+
+Decision:
+
+- Keep `+5k` as the current widest BF16 dual-resident vocab that has passed the streaming gate.
+- Do not jump to `+10k` on BF16 until another memory cut is available. The expected tensor cost is only another `~19.5 MB`, but the measured `after_tts_runtime` floor is already too low.
+- W8A16 memory could support a wider vocab, but W8 output quality is not usable yet, so it remains a separate repair branch.

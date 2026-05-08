@@ -454,3 +454,30 @@ Decision:
   - Talker hidden state feeding CodePredictor;
   - frame count and duration.
 - If the single-profile iterative prefill is the quality source, rebuild W8A16 with a true prefill profile instead of accepting iterative prefill.
+
+## TTS Pruned Vocab +5k Decision
+
+The first expansion from `35669` rows to `40669` rows passed the real dual-resident streaming gate:
+
+- ASR worker remained resident and warmed.
+- TTS worker reached ready with BF16 Talker + vocoder50.
+- Startup TTS streaming warmup produced PCM.
+- Real `/tts/stream` for both `你好` and `你好，今天天气很好。` returned PCM while both workers stayed resident.
+
+Measured memory:
+
+- `worker_after_tts_runtime=167 MB`
+- startup warmup `worker_after_lazy_code2wav=148 MB`
+- startup warmup `worker_after_code2wav_final_chunk=103 MB`
+- real request final Code2Wav points around `108-144 MB`
+
+Decision:
+
+- Keep `talker_pruned_text_plus5k_0508` as the current BF16 vocab-expansion artifact.
+- Do not advance to `+10k` on BF16 yet. The raw row cost is small, but the measured ready floor is already too low and swap is active.
+- The next meaningful memory work should be W8 quality repair, another non-quality-loss Talker/CP cut, or further Code2Wav resident reduction before widening vocab again.
+
+Operational lesson:
+
+- In the Docker validation path, do not mount the whole host `/tmp` into the app container. It can shadow image runtime files and confuse TensorRT library selection.
+- For the current 10.3-built ASR/TTS engines, mount only `/tmp/trt-libs` and `/tmp/qwen3tts_ref_0507_from_nano`, then put `/tmp/trt-libs` first in `LD_LIBRARY_PATH`.
