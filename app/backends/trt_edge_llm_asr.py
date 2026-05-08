@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -45,14 +46,62 @@ _DEFAULT_TOP_P = float(os.environ.get("ASR_TOP_P", "0.8"))
 _DEFAULT_TOP_K = int(os.environ.get("ASR_TOP_K", "50"))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() not in ("0", "false", "no")
+
+
 class TRTEdgeLLMASRBackend(ASRBackend):
     """ASR via TRT-Edge-LLM llm_inference subprocess."""
 
     def __init__(self):
+        self._config = self._load_config()
         self._ready = False
         self._worker: Optional[subprocess.Popen] = None
         self._worker_lock = threading.Lock()
         self._worker_ready_meta: dict = {}
+        self._worker_stderr_tail: deque[str] = deque(maxlen=80)
+
+    def _load_config(self) -> dict:
+        manifest: dict = {}
+        manifest_path = os.environ.get("EDGE_LLM_ASR_MANIFEST")
+        if manifest_path:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        use_worker_default = bool(manifest.get("use_worker", True))
+        return {
+            "asr_binary": os.environ.get(
+                "EDGE_LLM_ASR_BIN", manifest.get("asr_binary", ASR_BINARY)
+            ),
+            "worker_binary": os.environ.get(
+                "EDGE_LLM_ASR_WORKER_BIN",
+                manifest.get("worker_binary", ASR_WORKER_BINARY),
+            ),
+            "plugin_path": os.environ.get(
+                "EDGELLM_PLUGIN_PATH", manifest.get("plugin_path", PLUGIN_PATH)
+            ),
+            "engine_dir": os.environ.get(
+                "EDGE_LLM_ASR_ENGINE_DIR", manifest.get("engine_dir", ASR_ENGINE_DIR)
+            ),
+            "audio_encoder_dir": os.environ.get(
+                "EDGE_LLM_ASR_AUDIO_ENC_DIR",
+                manifest.get("audio_encoder_dir", ASR_AUDIO_ENC_DIR),
+            ),
+            "use_worker": _env_bool("EDGE_LLM_ASR_WORKER", use_worker_default),
+            "mel_tensor_name": os.environ.get(
+                "EDGE_LLM_ASR_MEL_TENSOR_NAME",
+                manifest.get("mel_tensor_name", "mel"),
+            ),
+            "max_mel_frames": int(
+                os.environ.get(
+                    "EDGE_LLM_ASR_MAX_MEL_FRAMES",
+                    str(manifest.get("max_mel_frames", 6000)),
+                )
+            ),
+            "manifest_path": manifest_path,
+        }
 
     # -- ASRBackend interface ------------------------------------------------
 
@@ -73,16 +122,21 @@ class TRTEdgeLLMASRBackend(ASRBackend):
 
     def preload(self) -> None:
         """Verify all required files exist."""
+        worker_binary = self._config["worker_binary"]
+        asr_binary = self._config["asr_binary"]
+        plugin_path = self._config["plugin_path"]
+        engine_dir = self._config["engine_dir"]
+        audio_encoder_dir = self._config["audio_encoder_dir"]
         required = [
-            (ASR_WORKER_BINARY if self._use_worker() else ASR_BINARY, "ASR binary"),
-            (PLUGIN_PATH, "TRT-Edge-LLM plugin"),
-            (os.path.join(ASR_ENGINE_DIR, "config.json"), "LLM config"),
-            (os.path.join(ASR_ENGINE_DIR, "llm.engine"), "LLM engine"),
+            (worker_binary if self._use_worker() else asr_binary, "ASR binary"),
+            (plugin_path, "TRT-Edge-LLM plugin"),
+            (os.path.join(engine_dir, "config.json"), "LLM config"),
+            (os.path.join(engine_dir, "llm.engine"), "LLM engine"),
             (os.path.join(
-                ASR_AUDIO_ENC_DIR, "audio", "config.json"
+                audio_encoder_dir, "audio", "config.json"
             ), "audio encoder config"),
             (os.path.join(
-                ASR_AUDIO_ENC_DIR, "audio", "audio_encoder.engine"
+                audio_encoder_dir, "audio", "audio_encoder.engine"
             ), "audio encoder engine"),
         ]
         missing = []
@@ -95,33 +149,45 @@ class TRTEdgeLLMASRBackend(ASRBackend):
             )
 
         logger.info(
-            "ASR backend preload OK (binary=%s engine=%s audio_enc=%s)",
-            ASR_WORKER_BINARY if self._use_worker() else ASR_BINARY,
-            ASR_ENGINE_DIR,
-            ASR_AUDIO_ENC_DIR,
+            "ASR backend preload OK (config=%s)",
+            self._config,
         )
         if self._use_worker():
             self._ensure_worker()
         self._ready = True
 
     def _use_worker(self) -> bool:
-        return os.environ.get("EDGE_LLM_ASR_WORKER", "1").lower() not in ("0", "false", "no")
+        return bool(self._config["use_worker"])
 
     def _worker_env(self) -> dict:
         env = os.environ.copy()
-        env["EDGELLM_PLUGIN_PATH"] = PLUGIN_PATH
+        env["EDGELLM_PLUGIN_PATH"] = self._config["plugin_path"]
         env.setdefault("EDGE_LLM_ASR_CUDA_GRAPH", "0")
         return env
+
+    def _drain_worker_stderr(self, worker: subprocess.Popen) -> None:
+        if worker.stderr is None:
+            return
+        for line in worker.stderr:
+            text = line.rstrip()
+            self._worker_stderr_tail.append(text)
+            if "[JV_MEM]" in text:
+                logger.info("ASR worker: %s", text)
+            else:
+                logger.debug("ASR worker stderr: %s", text)
+
+    def _stderr_tail_text(self) -> str:
+        return "\n".join(self._worker_stderr_tail)
 
     def _ensure_worker(self) -> None:
         if self._worker is not None and self._worker.poll() is None:
             return
         cmd = [
-            ASR_WORKER_BINARY,
+            self._config["worker_binary"],
             "--engineDir",
-            ASR_ENGINE_DIR,
+            self._config["engine_dir"],
             "--multimodalEngineDir",
-            ASR_AUDIO_ENC_DIR,
+            self._config["audio_encoder_dir"],
         ]
         self._worker = subprocess.Popen(
             cmd,
@@ -132,10 +198,17 @@ class TRTEdgeLLMASRBackend(ASRBackend):
             bufsize=1,
             env=self._worker_env(),
         )
+        self._worker_stderr_tail.clear()
+        threading.Thread(
+            target=self._drain_worker_stderr,
+            args=(self._worker,),
+            name="trt-edgellm-asr-stderr",
+            daemon=True,
+        ).start()
         assert self._worker.stdout is not None
         ready_line = self._worker.stdout.readline()
         if not ready_line:
-            stderr = self._worker.stderr.read()[-2000:] if self._worker.stderr else ""
+            stderr = self._stderr_tail_text()
             raise RuntimeError(f"ASR worker failed to start: {stderr}")
         ready = json.loads(ready_line)
         if ready.get("event") != "ready":
@@ -201,7 +274,7 @@ class TRTEdgeLLMASRBackend(ASRBackend):
             elapsed_worker = time.time() - t0
 
         if not line:
-            stderr = self._worker.stderr.read()[-2000:] if self._worker.stderr else ""
+            stderr = self._stderr_tail_text()
             self._worker = None
             raise RuntimeError(f"ASR worker exited before response: {stderr}")
         output_data = json.loads(line)
@@ -249,17 +322,18 @@ class TRTEdgeLLMASRBackend(ASRBackend):
             # -- 1. Compute mel spectrogram (with duration guard) --
             mel_t0 = time.time()
             mel = audio_bytes_to_mel(audio_bytes)  # [1, 128, T] float32
-            if mel.shape[2] > 6000:  # ~60 seconds at 16kHz 10ms hop
+            max_mel_frames = int(self._config["max_mel_frames"])
+            if mel.shape[2] > max_mel_frames:  # 10ms hop
                 raise ValueError(
                     f"Audio too long: {mel.shape[2]} frames (~{mel.shape[2]*0.01:.0f}s). "
-                    "Max 6000 frames (60s). Split into smaller chunks."
+                    f"Max {max_mel_frames} frames (~{max_mel_frames*0.01:.0f}s). Split into smaller chunks."
                 )
 
             # Convert to FP16 for TRT
             mel_fp16 = mel.astype(np.float16)
 
             mel_path = os.path.join(tmpdir, "mel.safetensors")
-            write_safetensors(mel_fp16, "mel", mel_path)
+            write_safetensors(mel_fp16, self._config["mel_tensor_name"], mel_path)
             elapsed_mel_s = time.time() - mel_t0
             logger.info(
                 "Mel computed: shape=%s size=%s -> %s",
@@ -306,9 +380,9 @@ class TRTEdgeLLMASRBackend(ASRBackend):
             # -- 3. Run binary --
             cli_args = [
                 "--engineDir",
-                ASR_ENGINE_DIR,
+                self._config["engine_dir"],
                 "--multimodalEngineDir",
-                ASR_AUDIO_ENC_DIR,
+                self._config["audio_encoder_dir"],
                 "--inputFile",
                 input_path,
                 "--outputFile",
@@ -316,7 +390,7 @@ class TRTEdgeLLMASRBackend(ASRBackend):
             ]
 
             t0 = time.time()
-            result = run_binary(ASR_BINARY, cli_args, timeout=60)
+            result = run_binary(self._config["asr_binary"], cli_args, timeout=60)
             elapsed = time.time() - t0
 
             # -- 4. Parse output — fail loudly on errors

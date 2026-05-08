@@ -18,8 +18,9 @@ import time
 import base64
 import io
 import wave
+from collections import deque
 from typing import Optional
-import importlib.util
+import importlib
 import uuid
 
 from tts_backend import TTSBackend, TTSCapability
@@ -67,7 +68,7 @@ def _split_tts_text(text: str, max_chars: Optional[int] = None) -> list[str]:
 
     if max_chars is None:
         env_name = "EDGE_LLM_TTS_CJK_SEGMENT_MAX_CHARS" if _contains_cjk(normalized) else "EDGE_LLM_TTS_SEGMENT_MAX_CHARS"
-        default_chars = "16" if _contains_cjk(normalized) else "120"
+        default_chars = "48" if _contains_cjk(normalized) else "120"
         max_chars = int(os.environ.get(env_name, default_chars))
     max_chars = max(8, max_chars)
 
@@ -163,7 +164,20 @@ def _split_tts_text(text: str, max_chars: Optional[int] = None) -> list[str]:
     return merged
 
 
-def _concat_wav_bytes(parts: list[bytes]) -> bytes:
+def _segment_pause_ms(segment: str) -> int:
+    if not segment:
+        return 0
+    pause_ms = int(os.environ.get("EDGE_LLM_TTS_SEGMENT_PAUSE_MS", "80"))
+    hard_pause_ms = int(os.environ.get("EDGE_LLM_TTS_HARD_SEGMENT_PAUSE_MS", "120"))
+    stripped = segment.rstrip()
+    if stripped.endswith(("。", "！", "？", "!", "?", ";", "；")):
+        return max(0, hard_pause_ms)
+    if stripped.endswith(("，", ",", "、", "：", ":")):
+        return max(0, pause_ms)
+    return max(0, pause_ms)
+
+
+def _concat_wav_bytes(parts: list[bytes], pauses_ms: Optional[list[int]] = None) -> bytes:
     non_empty = [part for part in parts if part]
     if not non_empty:
         return b""
@@ -172,7 +186,7 @@ def _concat_wav_bytes(parts: list[bytes]) -> bytes:
 
     params = None
     frames: list[bytes] = []
-    for part in non_empty:
+    for idx, part in enumerate(non_empty):
         with wave.open(io.BytesIO(part), "rb") as reader:
             current = reader.getparams()
             comparable = (current.nchannels, current.sampwidth, current.framerate, current.comptype, current.compname)
@@ -181,6 +195,10 @@ def _concat_wav_bytes(parts: list[bytes]) -> bytes:
             elif comparable != params:
                 raise RuntimeError(f"Cannot concatenate WAV segments with different formats: {comparable} != {params}")
             frames.append(reader.readframes(reader.getnframes()))
+            if pauses_ms and idx < len(non_empty) - 1:
+                pause_samples = int(current.framerate * max(0, pauses_ms[idx]) / 1000)
+                if pause_samples > 0:
+                    frames.append(b"\x00" * pause_samples * current.nchannels * current.sampwidth)
 
     nchannels, sampwidth, framerate, comptype, compname = params
     out = io.BytesIO()
@@ -192,6 +210,15 @@ def _concat_wav_bytes(parts: list[bytes]) -> bytes:
         for frame_bytes in frames:
             writer.writeframes(frame_bytes)
     return out.getvalue()
+
+
+def _wav_duration_and_samples(wav_bytes: bytes) -> tuple[float, int]:
+    if not wav_bytes:
+        return 0.0, 0
+    with wave.open(io.BytesIO(wav_bytes), "rb") as reader:
+        samples = reader.getnframes()
+        rate = reader.getframerate()
+    return (samples / rate if rate > 0 else 0.0), samples
 
 
 # Default sampling parameters
@@ -213,10 +240,11 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
 
     def __init__(self):
         self._ready = False
-        self._native_fallback = None
+        self._product_backend = None
         self._worker: Optional[subprocess.Popen] = None
         self._worker_lock = threading.Lock()
         self._worker_ready_meta: dict = {}
+        self._worker_stderr_tail = deque(maxlen=80)
 
     # -- TTSBackend interface ------------------------------------------------
 
@@ -235,49 +263,48 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
     def is_ready(self) -> bool:
         return self._ready
 
+    def _backend_mode(self) -> str:
+        mode = os.environ.get("JETSON_VOICE_TTS_BACKEND", os.environ.get("EDGE_LLM_TTS_BACKEND", "edgellm_worker"))
+        return mode.strip().lower().replace("-", "_")
+
+    def _load_product_explicit_kv_backend(self):
+        model_base = os.environ.get("JETSON_VOICE_TTS_MODEL_BASE", "/home/harvest/voice_test/models/qwen3-tts")
+        overlay = os.environ.get("JETSON_VOICE_TTS_NATIVE_MODULE_DIR", "/home/harvest/voice_test/app_overlay")
+        overlay_backends = os.path.join(overlay, "backends")
+        for path in (overlay, overlay_backends):
+            if os.path.isdir(path) and path not in sys.path:
+                sys.path.insert(0, path)
+
+        os.environ.setdefault("QWEN3_MODEL_BASE", model_base)
+        os.environ.setdefault("QWEN3_MODEL_DIR", os.path.join(model_base, "onnx"))
+        os.environ.setdefault("QWEN3_SHERPA_DIR", os.path.join(model_base, "onnx"))
+        os.environ.setdefault("QWEN3_TALKER_ENGINE", os.path.join(model_base, "engines", "talker_decode_bf16.engine"))
+        os.environ.setdefault("QWEN3_CP_ENGINE", os.path.join(model_base, "engines", "cp_bf16.engine"))
+        os.environ.setdefault("TTS_TALKER_CUDA_GRAPH", "0")
+
+        module = importlib.import_module("backends.qwen3_trt")
+        module = importlib.reload(module)
+        backend = module.Qwen3TRTBackend()
+        logger.info(
+            "Using Jetson Voice product_explicit_kv TTS backend (model_base=%s, talker=%s)",
+            model_base,
+            os.environ.get("QWEN3_TALKER_ENGINE"),
+        )
+        backend.preload()
+        return backend
+
     def preload(self) -> None:
         """Verify all required files exist."""
-        fallback_mode = os.environ.get("EDGE_LLM_TTS_NATIVE_FALLBACK", "0").lower()
-        fallback_base = os.environ.get("EDGE_LLM_TTS_FALLBACK_BASE", "/home/harvest/voice_test")
-        fallback_backend = os.path.join(fallback_base, "app_overlay", "backends", "qwen3_trt.py")
-        fallback_models = os.path.join(fallback_base, "models", "qwen3-tts")
-        use_fallback = fallback_mode in ("1", "true", "yes") or (
-            fallback_mode == "auto" and os.path.exists(fallback_backend)
-        )
-        if use_fallback:
-            overlay = os.path.join(fallback_base, "app_overlay")
-            overlay_backends = os.path.join(overlay, "backends")
-            for path in (overlay, overlay_backends):
-                if path not in sys.path:
-                    sys.path.insert(0, path)
-
-            os.environ.setdefault("QWEN3_MODEL_BASE", fallback_models)
-            os.environ.setdefault("QWEN3_MODEL_DIR", os.path.join(fallback_models, "onnx"))
-            os.environ.setdefault("QWEN3_SHERPA_DIR", os.path.join(fallback_models, "onnx"))
-            os.environ.setdefault(
-                "QWEN3_TALKER_ENGINE",
-                os.path.join(fallback_models, "engines", "talker_decode_bf16.engine"),
-            )
-            os.environ.setdefault(
-                "QWEN3_CP_ENGINE",
-                os.path.join(fallback_models, "engines", "cp_bf16.engine"),
-            )
-            os.environ.setdefault("TTS_TALKER_CUDA_GRAPH", "0")
-
-            spec = importlib.util.spec_from_file_location(
-                "edge_llm_tts_native_fallback", fallback_backend
-            )
-            if spec is None or spec.loader is None:
-                raise RuntimeError(f"Failed to load native fallback backend: {fallback_backend}")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            self._native_fallback = module.Qwen3TRTBackend()
-            logger.warning(
-                "Using native Qwen3 TRT fallback for TTS; EdgeLLM talker logits are known-bad on this Nano build"
-            )
-            self._native_fallback.preload()
+        mode = self._backend_mode()
+        if mode in ("product_explicit_kv", "explicit_kv"):
+            self._product_backend = self._load_product_explicit_kv_backend()
             self._ready = True
             return
+        if mode not in ("edgellm", "edgellm_worker", "official"):
+            raise ValueError(
+                "Unsupported JETSON_VOICE_TTS_BACKEND/EDGE_LLM_TTS_BACKEND value "
+                f"{mode!r}; expected edgellm_worker or product_explicit_kv"
+            )
 
         required = [
             (TTS_WORKER_BINARY if self._use_worker() else TTS_BINARY, "TTS binary"),
@@ -324,6 +351,20 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         env.setdefault("EDGE_LLM_TTS_LAZY_CODE2WAV", "0")
         return env
 
+    def _worker_stderr_snip(self) -> str:
+        return "".join(self._worker_stderr_tail)[-2000:] or "(empty)"
+
+    def _drain_worker_stderr(self) -> None:
+        worker = self._worker
+        if worker is None or worker.stderr is None:
+            return
+        for line in worker.stderr:
+            self._worker_stderr_tail.append(line)
+            if "[JV_MEM]" in line:
+                logger.info("TTS worker: %s", line.rstrip())
+            else:
+                logger.debug("TTS worker stderr: %s", line.rstrip())
+
     def _ensure_worker(self) -> None:
         if self._worker is not None and self._worker.poll() is None:
             return
@@ -338,6 +379,17 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             "--code2wavEngineDir",
             TTS_CODE2WAV_DIR,
         ]
+        optional_flags = [
+            ("EDGE_LLM_TTS_TALKER_BACKEND", "--qwen3TtsTalkerBackend"),
+            ("EDGE_LLM_TTS_TALKER_ENGINE", "--qwen3TtsTalkerEngine"),
+            ("EDGE_LLM_TTS_CODE_PREDICTOR_BACKEND", "--codePredictorBackend"),
+            ("EDGE_LLM_TTS_TEXT_PROJECTION", "--qwen3TtsTextProjection"),
+            ("EDGE_LLM_TTS_PROMPT_KV_CACHE", "--qwen3TtsPromptKvCache"),
+        ]
+        for env_name, flag in optional_flags:
+            value = os.environ.get(env_name)
+            if value:
+                cmd.extend([flag, value])
         self._worker = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -347,11 +399,11 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             bufsize=1,
             env=self._worker_env(),
         )
+        threading.Thread(target=self._drain_worker_stderr, name="tts-worker-stderr", daemon=True).start()
         assert self._worker.stdout is not None
         ready_line = self._worker.stdout.readline()
         if not ready_line:
-            stderr = self._worker.stderr.read()[-2000:] if self._worker.stderr else ""
-            raise RuntimeError(f"TTS worker failed to start: {stderr}")
+            raise RuntimeError(f"TTS worker failed to start: {self._worker_stderr_snip()}")
         ready = json.loads(ready_line)
         if ready.get("event") != "ready":
             raise RuntimeError(f"TTS worker did not become ready: {ready}")
@@ -386,9 +438,8 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             line = self._worker.stdout.readline()
             elapsed = time.time() - t0
         if not line:
-            stderr = self._worker.stderr.read()[-2000:] if self._worker.stderr else ""
             self._worker = None
-            raise RuntimeError(f"TTS worker exited before response: {stderr}")
+            raise RuntimeError(f"TTS worker exited before response: {self._worker_stderr_snip()}")
         response = json.loads(line)
         if not response.get("ok"):
             raise RuntimeError(f"TTS worker failed: {response}")
@@ -413,6 +464,10 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
 
     def generate_streaming(self, text: str, **kwargs):
         """Yield raw PCM int16 chunks from the resident EdgeLLM TTS worker."""
+        if self._product_backend is not None:
+            yield from self._product_backend.generate_streaming(text, **kwargs)
+            return
+
         if _DEFAULT_SEGMENT_TEXT and kwargs.get("segment_text", True):
             segments = _split_tts_text(text, kwargs.get("segment_max_chars"))
             if len(segments) > 1:
@@ -499,9 +554,8 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             while True:
                 line = self._worker.stdout.readline()
                 if not line:
-                    stderr = self._worker.stderr.read()[-2000:] if self._worker.stderr else ""
                     self._worker = None
-                    raise RuntimeError(f"TTS worker exited during stream: {stderr}")
+                    raise RuntimeError(f"TTS worker exited during stream: {self._worker_stderr_snip()}")
                 event = json.loads(line)
                 if not event.get("ok"):
                     raise RuntimeError(f"TTS streaming worker failed: {event}")
@@ -537,11 +591,22 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         """
         if not self._ready:
             raise RuntimeError("TTS backend not preloaded")
+        if self._product_backend is not None:
+            return self._synthesize_single(
+                text,
+                speaker_id=speaker_id,
+                speed=speed,
+                pitch_shift=pitch_shift,
+                language=language,
+                **kwargs,
+            )
+
         if _DEFAULT_SEGMENT_TEXT and kwargs.get("segment_text", True):
             segments = _split_tts_text(text, kwargs.get("segment_max_chars"))
             if len(segments) > 1:
                 segment_kwargs = dict(kwargs)
                 segment_kwargs["segment_text"] = False
+                segment_kwargs.setdefault("seed", int(os.environ.get("JETSON_VOICE_TTS_SEED", "42")))
                 wav_parts: list[bytes] = []
                 segment_meta: list[dict] = []
                 total_elapsed = 0.0
@@ -559,18 +624,21 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
                     wav_parts.append(wav)
                     segment_meta.append({"text": segment, **meta})
                     total_elapsed += float(meta.get("inference_time_s", 0.0))
-                    total_duration += float(meta.get("duration_s", 0.0))
-                    total_samples += int(meta.get("samples", 0))
+                    wav_duration, wav_samples = _wav_duration_and_samples(wav)
+                    total_duration += wav_duration
+                    total_samples += wav_samples
 
-                wav_bytes = _concat_wav_bytes(wav_parts)
+                pauses_ms = [_segment_pause_ms(segment) for segment in segments[:-1]]
+                wav_bytes = _concat_wav_bytes(wav_parts, pauses_ms)
                 meta = {
                     "inference_time_s": round(total_elapsed, 3),
                     "sample_rate": self.sample_rate,
-                    "duration_s": round(total_duration, 3),
-                    "samples": total_samples,
+                    "duration_s": round(total_duration + sum(pauses_ms) / 1000.0, 3),
+                    "samples": total_samples + int(self.sample_rate * sum(pauses_ms) / 1000.0),
                     "rtf": round(total_elapsed / total_duration, 3) if total_duration > 0 else 0.0,
                     "segmented": True,
                     "segment_count": len(segments),
+                    "segment_pauses_ms": pauses_ms,
                     "segments": segment_meta,
                 }
                 return wav_bytes, meta
@@ -594,8 +662,8 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         **kwargs,
     ) -> tuple[bytes, dict]:
         """Run one already-bounded TTS request."""
-        if self._native_fallback is not None:
-            return self._native_fallback.synthesize(
+        if self._product_backend is not None:
+            return self._product_backend.synthesize(
                 text,
                 speaker_id=speaker_id,
                 speed=speed,
