@@ -88,6 +88,15 @@ _TTS_DEFAULT_ROOT = (
     if os.path.exists(os.path.join(_TTS_FIXED_RUNTIME, "engines", "talker", "llm.engine"))
     else os.path.expanduser("~/qwen3-tts-trt-edge-llm-export")
 )
+
+
+def _first_existing_dir(*paths: str) -> str:
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return paths[-1]
+
+
 TTS_TALKER_DIR = os.environ.get(
     "EDGE_LLM_TTS_TALKER_DIR",
     os.path.join(_TTS_DEFAULT_ROOT, "engines", "talker"),
@@ -98,9 +107,12 @@ TTS_CODE_PREDICTOR_DIR = os.environ.get(
 )
 TTS_CODE2WAV_DIR = os.environ.get(
     "EDGE_LLM_TTS_CODE2WAV_DIR",
-    os.path.join(_TTS_DEFAULT_ROOT, "engines", "code2wav")
-    if os.path.exists(os.path.join(_TTS_DEFAULT_ROOT, "engines", "code2wav"))
-    else os.path.expanduser("~/qwen3-tts-trt-edge-llm-export/engines/tokenizer_decoder/code2wav"),
+    _first_existing_dir(
+        os.path.expanduser("~/qwen3-tts-trt-edge-llm-export/engines/tokenizer_decoder_vocoder100_compat/code2wav"),
+        os.path.expanduser("~/qwen3-tts-trt-edge-llm-export/engines/tokenizer_decoder_vocoder50_compat/code2wav"),
+        os.path.join(_TTS_DEFAULT_ROOT, "engines", "code2wav"),
+        os.path.expanduser("~/qwen3-tts-trt-edge-llm-export/engines/tokenizer_decoder/code2wav"),
+    ),
 )
 TTS_TOKENIZER_DIR = os.environ.get(
     "EDGE_LLM_TTS_TOKENIZER_DIR",
