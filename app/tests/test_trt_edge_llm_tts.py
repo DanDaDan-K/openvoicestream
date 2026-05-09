@@ -2,6 +2,7 @@ import json
 import subprocess
 import io
 import wave
+import types
 
 
 def _make_wav_bytes(frame_count: int, sample_rate: int = 24000) -> bytes:
@@ -187,7 +188,8 @@ def test_segmented_tts_concatenates_one_shot_wavs(monkeypatch):
     assert len(calls) > 1
     assert meta["segmented"] is True
     assert meta["segment_count"] == len(calls)
-    assert meta["samples"] == 240 * len(calls)
+    assert meta["samples"] > 240 * len(calls)
+    assert meta["segment_pauses_ms"] == [120, 80]
     assert calls[0][1]["codec_eos_logit_offset"] == 0
     assert calls[0][1]["talker_top_k"] == 50
     assert calls[0][1]["talker_top_p"] == 1.0
@@ -196,4 +198,339 @@ def test_segmented_tts_concatenates_one_shot_wavs(monkeypatch):
     assert calls[0][1]["min_audio_length"] == 30
     with wave.open(io.BytesIO(wav), "rb") as reader:
         assert reader.getframerate() == 24000
-        assert reader.getnframes() == 240 * len(calls)
+        assert reader.getnframes() == meta["samples"]
+
+
+def test_cjk_default_segmentation_prefers_sentence_boundary(monkeypatch):
+    import backends.trt_edge_llm_tts as tts_mod
+
+    monkeypatch.delenv("EDGE_LLM_TTS_CJK_SEGMENT_MAX_CHARS", raising=False)
+    text = "你好，今天我们继续验证语音合成的稳定性。这个版本应该保持清晰自然，不应该出现逐渐变沙、吞音或者明显的噪声积累。"
+    parts = tts_mod._split_tts_text(text)
+
+    assert parts == [
+        "你好，今天我们继续验证语音合成的稳定性。",
+        "这个版本应该保持清晰自然，不应该出现逐渐变沙、吞音或者明显的噪声积累。",
+    ]
+
+
+def test_product_backend_bypasses_generic_segmentation(monkeypatch):
+    import backends.trt_edge_llm_tts as tts_mod
+
+    calls = []
+
+    class FakeProductBackend:
+        def synthesize(self, text, **kwargs):
+            calls.append((text, kwargs.get("seed")))
+            return _make_wav_bytes(240), {"backend": "product_explicit_kv"}
+
+    monkeypatch.setenv("JETSON_VOICE_TTS_SEED", "42")
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+    backend._ready = True
+    backend._product_backend = FakeProductBackend()
+
+    text = "你好，今天我们继续验证语音合成的稳定性。这个版本应该保持清晰自然，不应该出现逐渐变沙、吞音或者明显的噪声积累。"
+    _, meta = backend.synthesize(text, seed=42)
+
+    assert meta["backend"] == "product_explicit_kv"
+    assert calls == [(text, 42)]
+
+
+def test_qwen3_trt_caps_trt_vocoder_frames_and_passes_seed(monkeypatch):
+    import backends.qwen3_trt as qwen3_mod
+
+    captured = {}
+
+    class FakeTokenizer:
+        def encode(self, text):
+            return types.SimpleNamespace(ids=[1, 2, 3])
+
+    class FakeEngine:
+        def synthesize(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "wav_bytes": _make_wav_bytes(240),
+                "duration": 0.01,
+                "rtf": 0.5,
+                "n_frames": 100,
+                "per_step_ms": 1.0,
+            }
+
+    monkeypatch.setenv("TTS_VOCODER_TRT", "1")
+    monkeypatch.setenv("TTS_TRT_VOCODER_MAX_FRAMES", "100")
+    backend = qwen3_mod.Qwen3TRTBackend()
+    backend._ready = True
+    backend._tokenizer = FakeTokenizer()
+    backend._engine = FakeEngine()
+
+    _, meta = backend.synthesize("你好", max_audio_length=200, seed=42)
+
+    assert captured["max_frames"] == 100
+    assert captured["seed"] == 42
+    assert meta["seed"] == 42
+
+
+def test_qwen3_trt_collects_streaming_for_long_offline_requests(monkeypatch):
+    import backends.qwen3_trt as qwen3_mod
+
+    class FakeTokenizer:
+        def encode(self, text):
+            return types.SimpleNamespace(ids=list(range(60)))
+
+    class FakeEngine:
+        def synthesize(self, **kwargs):
+            raise AssertionError("long offline requests should use streaming collection")
+
+    monkeypatch.setenv("TTS_VOCODER_TRT", "1")
+    monkeypatch.setenv("TTS_TRT_VOCODER_MAX_FRAMES", "100")
+    backend = qwen3_mod.Qwen3TRTBackend()
+    backend._ready = True
+    backend._tokenizer = FakeTokenizer()
+    backend._engine = FakeEngine()
+
+    calls = []
+
+    def fake_streaming(text, **kwargs):
+        calls.append((text, kwargs))
+        yield b"\x01\x00" * 240
+        yield b"\x02\x00" * 240
+
+    monkeypatch.setattr(backend, "generate_streaming", fake_streaming)
+
+    wav, meta = backend.synthesize("这是一段比较长的文本", max_audio_length=200, seed=42)
+
+    assert calls[0][1]["max_frames"] == 200
+    assert calls[0][1]["seed"] == 42
+    assert meta["offline_collected_streaming"] is True
+    assert meta["samples"] == 480
+    with wave.open(io.BytesIO(wav), "rb") as reader:
+        assert reader.getframerate() == 24000
+        assert reader.getnframes() == 480
+
+
+def test_qwen3_trt_product_segments_cjk_punctuation(monkeypatch):
+    import backends.qwen3_trt as qwen3_mod
+
+    class FakeTokenizer:
+        def encode(self, text):
+            return types.SimpleNamespace(ids=[1, 2, 3])
+
+    class FakeEngine:
+        def __init__(self):
+            self.calls = []
+
+        def synthesize(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "wav_bytes": _make_wav_bytes(240),
+                "duration": 0.01,
+                "rtf": 0.5,
+                "n_frames": 10,
+                "per_step_ms": 1.0,
+            }
+
+    fake_engine = FakeEngine()
+    monkeypatch.setenv("TTS_VOCODER_TRT", "1")
+    monkeypatch.setenv("TTS_TRT_VOCODER_MAX_FRAMES", "100")
+    monkeypatch.setenv("QWEN3_TTS_PRODUCT_SEGMENT_TEXT", "1")
+    backend = qwen3_mod.Qwen3TRTBackend()
+    backend._ready = True
+    backend._tokenizer = FakeTokenizer()
+    backend._engine = fake_engine
+
+    wav, meta = backend.synthesize("今天天气很好，我们一起测试语音合成。", max_audio_length=100, seed=42)
+
+    assert meta["product_segmented"] is True
+    assert [call["text"] for call in fake_engine.calls] == ["今天天气很好，", "我们一起测试语音合成。"]
+    assert all(call["seed"] == 42 for call in fake_engine.calls)
+    assert meta["segment_pauses_ms"] == [120]
+    with wave.open(io.BytesIO(wav), "rb") as reader:
+        assert reader.getnframes() == 480 + int(24000 * 0.12)
+
+
+def test_qwen3_trt_product_segmentation_keeps_ascii_words_and_punctuation():
+    import backends.qwen3_trt as qwen3_mod
+
+    text = "今天我们继续验证千问语音合成在 Jetson 上的稳定性。"
+    parts = qwen3_mod._split_product_tts_text(text, max_chars=20)
+
+    assert "".join(parts) == text
+    assert parts == ["今天我们继续验证千问语音合成在 ", "Jetson 上的稳定性。"]
+    assert all(part not in "。！？!?；;，,、：" for part in parts)
+    assert all("Jets" != part and "on 上的稳定性。" != part for part in parts)
+
+
+def test_product_explicit_kv_backend_is_selected_explicitly(monkeypatch, tmp_path):
+    import backends.trt_edge_llm_tts as tts_mod
+
+    calls = []
+
+    class FakeProductBackend:
+        def preload(self):
+            calls.append(("preload", None))
+
+        def synthesize(self, text, **kwargs):
+            calls.append(("synthesize", text, kwargs))
+            return b"wav", {"backend": "product_explicit_kv"}
+
+    fake_module = types.SimpleNamespace(Qwen3TRTBackend=FakeProductBackend)
+    monkeypatch.setenv("JETSON_VOICE_TTS_BACKEND", "product_explicit_kv")
+    monkeypatch.setenv("JETSON_VOICE_TTS_MODEL_BASE", str(tmp_path / "models" / "qwen3-tts"))
+    monkeypatch.setenv("JETSON_VOICE_TTS_NATIVE_MODULE_DIR", str(tmp_path / "app_overlay"))
+    monkeypatch.setattr(tts_mod.importlib, "import_module", lambda name: fake_module)
+    monkeypatch.setattr(tts_mod.importlib, "reload", lambda module: module)
+
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+    backend.preload()
+    wav, meta = backend.synthesize("你好")
+
+    assert backend.is_ready()
+    assert wav == b"wav"
+    assert meta["backend"] == "product_explicit_kv"
+    assert calls[0] == ("preload", None)
+    assert calls[1][0] == "synthesize"
+    assert calls[1][1] == "你好"
+
+
+def test_old_native_fallback_env_no_longer_changes_backend(monkeypatch, tmp_path):
+    import backends.trt_edge_llm_tts as tts_mod
+
+    required = [
+        tmp_path / "worker",
+        tmp_path / "plugin.so",
+        tmp_path / "talker" / "config.json",
+        tmp_path / "talker" / "llm.engine",
+        tmp_path / "tokenizer" / "tokenizer.json",
+    ]
+    for path in required:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+    monkeypatch.setenv("EDGE_LLM_TTS_NATIVE_FALLBACK", "1")
+    monkeypatch.delenv("JETSON_VOICE_TTS_BACKEND", raising=False)
+    monkeypatch.delenv("EDGE_LLM_TTS_BACKEND", raising=False)
+    monkeypatch.setattr(tts_mod, "TTS_WORKER_BINARY", str(tmp_path / "worker"))
+    monkeypatch.setattr(tts_mod, "PLUGIN_PATH", str(tmp_path / "plugin.so"))
+    monkeypatch.setattr(tts_mod, "TTS_TALKER_DIR", str(tmp_path / "talker"))
+    monkeypatch.setattr(tts_mod, "TTS_TOKENIZER_DIR", str(tmp_path / "tokenizer"))
+    monkeypatch.setattr(tts_mod.TRTEdgeLLMTTSBackend, "_ensure_worker", lambda self: None)
+
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+    backend.preload()
+
+    assert backend.is_ready()
+    assert backend._product_backend is None
+
+
+def test_edgellm_worker_defaults_match_dual_resident_streaming_profile(monkeypatch):
+    import backends.trt_edge_llm_tts as tts_mod
+
+    captured = {}
+
+    class FakeWorker:
+        stdin = None
+        stdout = None
+
+    monkeypatch.delenv("EDGE_LLM_TTS_CUDA_GRAPH", raising=False)
+    monkeypatch.delenv("EDGE_LLM_TTS_FIRST_CHUNK_FRAMES", raising=False)
+    monkeypatch.delenv("EDGE_LLM_TTS_CHUNK_FRAMES", raising=False)
+    monkeypatch.delenv("EDGE_LLM_TTS_MAX_CHUNK_FRAMES", raising=False)
+    monkeypatch.delenv("EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES", raising=False)
+
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+    env = backend._worker_env()
+
+    def fake_ensure_worker():
+        backend._worker = FakeWorker()
+        backend._worker.stdin = types.SimpleNamespace(
+            write=lambda data: captured.setdefault("request", json.loads(data)),
+            flush=lambda: None,
+        )
+        backend._worker.stdout = types.SimpleNamespace(
+            readline=lambda: json.dumps({"event": "done", "ok": True}) + "\n"
+        )
+
+    monkeypatch.setattr(backend, "_ensure_worker", fake_ensure_worker)
+    backend._ready = True
+
+    assert list(backend.generate_streaming("你好")) == []
+    assert env["EDGE_LLM_TTS_CUDA_GRAPH"] == "0"
+    assert env["EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES"] == "3"
+    assert captured["request"]["first_chunk_frames"] == 50
+    assert captured["request"]["chunk_frames"] == 97
+    assert captured["request"]["max_chunk_frames"] == 97
+    assert captured["request"]["adaptive_chunks"] is False
+
+
+def test_edgellm_worker_v2v_profile_uses_first_frame_fast_window(monkeypatch):
+    import backends.trt_edge_llm_tts as tts_mod
+
+    captured = {}
+
+    class FakeWorker:
+        stdin = None
+        stdout = None
+
+    monkeypatch.delenv("EDGE_LLM_TTS_FIRST_CHUNK_FRAMES", raising=False)
+    monkeypatch.delenv("EDGE_LLM_TTS_CHUNK_FRAMES", raising=False)
+    monkeypatch.delenv("EDGE_LLM_TTS_MAX_CHUNK_FRAMES", raising=False)
+
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+
+    def fake_ensure_worker():
+        backend._worker = FakeWorker()
+        backend._worker.stdin = types.SimpleNamespace(
+            write=lambda data: captured.setdefault("request", json.loads(data)),
+            flush=lambda: None,
+        )
+        backend._worker.stdout = types.SimpleNamespace(
+            readline=lambda: json.dumps({"event": "done", "ok": True}) + "\n"
+        )
+
+    monkeypatch.setattr(backend, "_ensure_worker", fake_ensure_worker)
+    backend._ready = True
+
+    assert list(backend.generate_streaming("你好", streaming_profile="v2v")) == []
+    assert captured["request"]["first_chunk_frames"] == 1
+    assert captured["request"]["chunk_frames"] == 97
+    assert captured["request"]["max_chunk_frames"] == 97
+    assert captured["request"]["adaptive_chunks"] is False
+
+
+def test_edgellm_worker_stateful_profile_uses_small_continuous_chunks(monkeypatch):
+    import backends.trt_edge_llm_tts as tts_mod
+
+    captured = {}
+
+    class FakeWorker:
+        stdin = None
+        stdout = None
+
+    monkeypatch.setenv("EDGE_LLM_TTS_STATEFUL_CODE2WAV", "1")
+    monkeypatch.delenv("EDGE_LLM_TTS_FIRST_CHUNK_FRAMES", raising=False)
+    monkeypatch.delenv("EDGE_LLM_TTS_CHUNK_FRAMES", raising=False)
+    monkeypatch.delenv("EDGE_LLM_TTS_MAX_CHUNK_FRAMES", raising=False)
+    monkeypatch.delenv("EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES", raising=False)
+
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+    env = backend._worker_env()
+
+    def fake_ensure_worker():
+        backend._worker = FakeWorker()
+        backend._worker.stdin = types.SimpleNamespace(
+            write=lambda data: captured.setdefault("request", json.loads(data)),
+            flush=lambda: None,
+        )
+        backend._worker.stdout = types.SimpleNamespace(
+            readline=lambda: json.dumps({"event": "done", "ok": True}) + "\n"
+        )
+
+    monkeypatch.setattr(backend, "_ensure_worker", fake_ensure_worker)
+    backend._ready = True
+
+    assert list(backend.generate_streaming("你好")) == []
+    assert env["EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES"] == "0"
+    assert captured["request"]["first_chunk_frames"] == 8
+    assert captured["request"]["chunk_frames"] == 10
+    assert captured["request"]["max_chunk_frames"] == 10
+    assert captured["request"]["adaptive_chunks"] is False

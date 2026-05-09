@@ -39,6 +39,13 @@ from backends.trt_edge_llm_ipc import (
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() not in ("0", "false", "no", "off")
+
+
 def _detect_language(text: str) -> str:
     """Simple language detection — returns config-compatible language strings."""
     for ch in text:
@@ -306,13 +313,17 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
                 f"{mode!r}; expected edgellm_worker or product_explicit_kv"
             )
 
+        explicit_talker_engine = os.environ.get("EDGE_LLM_TTS_TALKER_ENGINE")
         required = [
             (TTS_WORKER_BINARY if self._use_worker() else TTS_BINARY, "TTS binary"),
             (PLUGIN_PATH, "TRT-Edge-LLM plugin"),
             (os.path.join(TTS_TALKER_DIR, "config.json"), "talker config"),
-            (os.path.join(TTS_TALKER_DIR, "llm.engine"), "talker engine"),
             (os.path.join(TTS_TOKENIZER_DIR, "tokenizer.json"), "tokenizer"),
         ]
+        if explicit_talker_engine:
+            required.append((explicit_talker_engine, "explicit Talker engine"))
+        else:
+            required.append((os.path.join(TTS_TALKER_DIR, "llm.engine"), "talker engine"))
         missing = []
         for path, label in required:
             if not os.path.exists(path):
@@ -353,7 +364,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         env.setdefault("EDGE_LLM_TTS_LAZY_CODE2WAV", "0")
         # Keep each streaming Code2Wav invocation within the vocoder100 fast
         # profile: first chunk 50 frames, then 97 new frames + 3 context.
-        env.setdefault("EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES", "3")
+        env.setdefault("EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES", "0" if _env_flag("EDGE_LLM_TTS_STATEFUL_CODE2WAV") else "3")
         return env
 
     def _worker_stderr_snip(self) -> str:
@@ -490,7 +501,13 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         streaming_profile = str(
             kwargs.get("streaming_profile", os.environ.get("EDGE_LLM_TTS_STREAMING_PROFILE", "continuous_playback"))
         ).lower()
-        if streaming_profile in ("instant_feedback", "low_latency"):
+        if streaming_profile in ("v2v", "voice_to_voice", "eos_to_first_audio"):
+            default_first_chunk_frames = 1
+            default_chunk_frames = 97
+            default_chunk_growth_frames = 0
+            default_max_chunk_frames = 97
+            default_adaptive_chunks = False
+        elif streaming_profile in ("instant_feedback", "low_latency"):
             default_first_chunk_frames = 1
             default_chunk_frames = 25
             default_chunk_growth_frames = 50
@@ -507,6 +524,12 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             default_chunk_frames = 97
             default_chunk_growth_frames = 0
             default_max_chunk_frames = 97
+            default_adaptive_chunks = False
+        if _env_flag("EDGE_LLM_TTS_STATEFUL_CODE2WAV"):
+            default_first_chunk_frames = 8
+            default_chunk_frames = 10
+            default_chunk_growth_frames = 0
+            default_max_chunk_frames = 10
             default_adaptive_chunks = False
         request = {
             "id": req_id,
