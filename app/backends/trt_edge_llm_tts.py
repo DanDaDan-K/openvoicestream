@@ -347,8 +347,13 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
     def _worker_env(self) -> dict:
         env = os.environ.copy()
         env["EDGELLM_PLUGIN_PATH"] = PLUGIN_PATH
-        env.setdefault("EDGE_LLM_TTS_CUDA_GRAPH", "1")
+        # On the current W8A16 Talker path CUDA graph has not shown measurable
+        # RTF gain, while it costs extra resident memory during dual ASR+TTS.
+        env.setdefault("EDGE_LLM_TTS_CUDA_GRAPH", "0")
         env.setdefault("EDGE_LLM_TTS_LAZY_CODE2WAV", "0")
+        # Keep each streaming Code2Wav invocation within the vocoder100 fast
+        # profile: first chunk 50 frames, then 97 new frames + 3 context.
+        env.setdefault("EDGE_LLM_TTS_CODE2WAV_CONTEXT_FRAMES", "3")
         return env
 
     def _worker_stderr_snip(self) -> str:
@@ -498,10 +503,10 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             default_max_chunk_frames = 120
             default_adaptive_chunks = True
         else:
-            default_first_chunk_frames = 25
-            default_chunk_frames = 25
+            default_first_chunk_frames = 50
+            default_chunk_frames = 97
             default_chunk_growth_frames = 0
-            default_max_chunk_frames = 25
+            default_max_chunk_frames = 97
             default_adaptive_chunks = False
         request = {
             "id": req_id,
