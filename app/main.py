@@ -90,7 +90,7 @@ async def startup():
         from profile_loader import apply_profile_from_env
         apply_profile_from_env()
     except Exception as exc:
-        logger.error("Failed to apply Jetson Voice profile: %s", exc)
+        logger.error("Failed to apply Seeed Local Voice profile: %s", exc)
         raise
 
     # Log language mode configuration

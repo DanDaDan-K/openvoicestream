@@ -337,7 +337,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         module = importlib.reload(module)
         backend = module.Qwen3TRTBackend()
         logger.info(
-            "Using Jetson Voice product_explicit_kv TTS backend (model_base=%s, talker=%s)",
+            "Using Seeed Local Voice product_explicit_kv TTS backend (model_base=%s, talker=%s)",
             model_base,
             os.environ.get("QWEN3_TALKER_ENGINE"),
         )

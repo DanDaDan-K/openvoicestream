@@ -1,4 +1,4 @@
-# Jetson Voice — GPU-accelerated speech service
+# Seeed Local Voice — GPU-accelerated speech service (Jetson Orin)
 # Models are NOT baked in — downloaded on first start based on LANGUAGE_MODE.
 # zh_en (default): Matcha TTS + Paraformer ASR (~930 MB)
 # en:              Kokoro TTS + Zipformer ASR  (~590 MB)

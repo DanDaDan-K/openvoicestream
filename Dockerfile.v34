@@ -1,4 +1,4 @@
-# Jetson Voice v3.4 — Clean rebuild for ASR1 streaming (multilanguage mode)
+# Seeed Local Voice v3.4 — Clean rebuild for ASR1 streaming (multilanguage mode)
 # Removes sherpa-onnx, librosa, and their transitive deps (scipy, numba, etc.)
 # that are dead code under LANGUAGE_MODE=multilanguage.
 # Base: dustynv onnxruntime with CUDAExecutionProvider (JP6.x, CUDA 12.6)

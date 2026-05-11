@@ -1,4 +1,4 @@
-# Jetson Voice — production deployment.
+# Seeed Local Voice — production deployment.
 #
 # Usage:
 #   LANGUAGE_MODE=en docker compose -f deploy/docker-compose.yml up -d

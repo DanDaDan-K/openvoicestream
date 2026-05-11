@@ -1,6 +1,6 @@
 # EdgeLLM Voice Workers
 
-This directory owns the Jetson Voice product worker protocol for TensorRT-Edge-LLM based ASR/TTS.
+This directory owns the Seeed Local Voice product worker protocol for TensorRT-Edge-LLM based ASR/TTS.
 
 TensorRT-Edge-LLM remains the inference framework dependency. The workers here are product glue:
 
@@ -8,19 +8,19 @@ TensorRT-Edge-LLM remains the inference framework dependency. The workers here a
 - stdin/stdout JSONL request protocol
 - streaming TTS chunk policy
 - PCM/base64/file transport
-- Jetson Voice error and metric fields
+- Seeed Local Voice error and metric fields
 
 The intended layering is:
 
 ```text
-Jetson Voice worker
+Seeed Local Voice worker
   -> references our EdgeLLM baseline build
      -> tracks NVIDIA EdgeLLM upstream plus minimal local patches
 ```
 
-Do not put Jetson Voice product protocol into the EdgeLLM baseline. If Qwen3-TTS needs a local framework patch to run correctly on Jetson, keep the patch in the EdgeLLM baseline and document whether it is an upstream PR candidate or an NVIDIA issue reference.
+Do not put Seeed Local Voice product protocol into the EdgeLLM baseline. If Qwen3-TTS needs a local framework patch to run correctly on Jetson, keep the patch in the EdgeLLM baseline and document whether it is an upstream PR candidate or an NVIDIA issue reference.
 
-Build the EdgeLLM baseline first, then build the workers from the Jetson Voice repo:
+Build the EdgeLLM baseline first, then build the workers from the Seeed Local Voice repo:
 
 ```bash
 CUDACXX=/usr/local/cuda-12.6/bin/nvcc cmake \

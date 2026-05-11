@@ -1,4 +1,4 @@
-# Jetson Voice + Qwen3 highperf — slim multi-stage build (NX experiment)
+# Seeed Local Voice + Qwen3 highperf — slim multi-stage build (Jetson Orin NX experiment)
 #
 # Goal: shed the 18.2 GB v3.5-clean image down to ~1.5 GB by:
 #   1. multi-stage builder (existing v3.5-clean is the source of Python pkgs)
@@ -51,7 +51,7 @@ COPY --from=builder /usr/local/lib/python3.10/dist-packages/safetensors \
 RUN ln -sf /usr/local/lib/python3.10/dist-packages/onnxruntime/capi/libonnxruntime.so.1.20.0 \
            /usr/local/lib/python3.10/dist-packages/onnxruntime/capi/libonnxruntime.so.1
 
-# Application code — copy from build context (jetson-voice tree)
+# Application code — copy from build context (seeed-local-voice tree)
 COPY app/ /opt/speech/app/
 COPY configs/ /opt/speech/configs/
 COPY voices/ /opt/speech/voices/

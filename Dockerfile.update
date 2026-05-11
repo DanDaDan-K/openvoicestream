@@ -1,4 +1,4 @@
-# Jetson Voice v2.0 — lightweight, models downloaded on demand
+# Seeed Local Voice v2.0 — lightweight, models downloaded on demand
 # Based on v1.0 but strips baked-in models via multi-stage copy
 FROM sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:v1.0 AS base
 

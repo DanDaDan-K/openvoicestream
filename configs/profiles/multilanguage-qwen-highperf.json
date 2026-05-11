@@ -1,6 +1,6 @@
 {
   "name": "multilanguage-qwen-highperf",
-  "description": "Qwen3 ASR + Qwen3 TTS high-performance dual-resident profile for Jetson Voice. Engine paths use ${QWEN3_ARTIFACT_ROOT} for portability when /opt/models needs sudo.",
+  "description": "Qwen3 ASR + Qwen3 TTS high-performance dual-resident profile for Seeed Local Voice. Engine paths use ${QWEN3_ARTIFACT_ROOT} for portability when /opt/models needs sudo.",
   "artifact_set": "orin-nano-highperf-2026-05-10",
   "env": {
     "LANGUAGE_MODE": "multilanguage",

@@ -66,7 +66,7 @@ def _download_and_extract(url: str, dest_dir: str) -> None:
         logger.info("  Fetching %s ...", url)
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp_path = tmp.name
-            req = urllib.request.Request(url, headers={"User-Agent": "jetson-voice/1.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "seeed-local-voice/1.0"})
             resp = urllib.request.urlopen(req, timeout=600)
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
@@ -176,7 +176,7 @@ def _ensure_qwen3_artifacts() -> None:
         logger.warning(
             "Qwen3 artifact deploy script missing at %s. Clone "
             "https://github.com/suharvest/qwen3-edgellm-jetson.git as a sibling "
-            "of jetson-voice or set QWEN3_EDGELLM_JETSON_ROOT to point at it.",
+            "of seeed-local-voice or set QWEN3_EDGELLM_JETSON_ROOT to point at it.",
             script,
         )
         return

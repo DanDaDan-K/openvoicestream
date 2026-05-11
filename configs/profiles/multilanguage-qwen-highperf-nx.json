@@ -1,6 +1,6 @@
 {
   "name": "multilanguage-qwen-highperf-nx",
-  "description": "Qwen3 ASR + Qwen3 TTS high-performance dual-resident profile for Jetson Voice on Orin NX. Engine paths use ${QWEN3_ARTIFACT_ROOT} so the operator can override the artifact location (e.g. fallback to ~/qwen3-models when /opt/models needs sudo).",
+  "description": "Qwen3 ASR + Qwen3 TTS high-performance dual-resident profile for Seeed Local Voice on Jetson Orin NX. Engine paths use ${QWEN3_ARTIFACT_ROOT} so the operator can override the artifact location (e.g. fallback to ~/qwen3-models when /opt/models needs sudo).",
   "artifact_set": "orin-nx-highperf-2026-05-11",
   "env": {
     "LANGUAGE_MODE": "multilanguage",
