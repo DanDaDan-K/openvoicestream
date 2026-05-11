@@ -87,11 +87,17 @@ async def startup():
     global _asr_backend
 
     try:
-        from profile_loader import apply_profile_from_env
+        from app.core.profile_loader import apply_profile_from_env, current_profile
         apply_profile_from_env()
     except Exception as exc:
         logger.error("Failed to apply Seeed Local Voice profile: %s", exc)
         raise
+
+    # Initialise the execution coordinator from the loaded profile's
+    # execution_policy block. Default to concurrent (no lock) when the
+    # profile does not declare one — matches the previous behaviour.
+    from app.core.coordinator import init_coordinator, get_coordinator
+    init_coordinator(current_profile().get("execution_policy", {"mode": "concurrent"}))
 
     # Log language mode configuration
     language_mode = os.environ.get("LANGUAGE_MODE", "zh_en")
@@ -103,14 +109,14 @@ async def startup():
         logger.info("  → Using Sherpa TTS + ASR (zh/en mode)")
     logger.info("=" * 60)
 
-    import model_downloader
+    from app.core import model_downloader
     model_dir = os.environ.get("MODEL_DIR", "/opt/models")
     model_downloader.ensure_models(language_mode, model_dir)
 
     # ASR backend (load before TTS to avoid ORT session conflicts)
     # Note: create_asr_backend() will auto-select based on LANGUAGE_MODE
     try:
-        from asr_backend import create_asr_backend
+        from app.core.asr_backend import create_asr_backend
         _asr_backend = create_asr_backend()  # Let it auto-detect from LANGUAGE_MODE
         logger.info("Pre-loading ASR (%s)...", _asr_backend.name)
         _asr_backend.preload()
@@ -142,7 +148,7 @@ async def startup():
     except Exception as e:
         logger.warning("ASR backend failed: %s", e)
 
-    import tts_service
+    from app.core import tts_service
     if os.environ.get("LAZY_TTS", "").lower() in ("1", "true", "yes"):
         logger.info("TTS preload skipped (LAZY_TTS set); will load on first request.")
     else:
@@ -158,7 +164,7 @@ async def startup():
         logger.info("TTS streaming warmup skipped (LAZY_TTS).")
     else:
       try:
-        from tts_backend import TTSCapability
+        from app.core.tts_backend import TTSCapability
         if tts_service.has_capability(TTSCapability.STREAMING):
             backend = tts_service.get_backend()
             executor = _get_tts_stream_executor()
@@ -183,6 +189,17 @@ async def startup():
       except Exception as exc:  # pragma: no cover
         logger.warning("TTS streaming executor warm-up skipped: %s", exc)
 
+    # Register backend getters with the coordinator so 'exclusive' policy can
+    # call unload() on the dormant slot. Lambdas resolve lazily so they cope
+    # with backends loaded after this point (LAZY_TTS).
+    try:
+        from app.core import tts_service as _tts_service_mod
+        coord = get_coordinator()
+        coord.register_backend("asr", lambda: _asr_backend)
+        coord.register_backend("tts", lambda: _tts_service_mod._backend)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Coordinator backend registration skipped: %s", exc)
+
     logger.info("Speech service ready.")
 
 
@@ -190,7 +207,7 @@ async def startup():
 
 @app.get("/health")
 async def health():
-    import tts_service
+    from app.core import tts_service
 
     result = {
         "tts": tts_service.is_ready(),
@@ -200,7 +217,7 @@ async def health():
 
     # ASR
     try:
-        from asr_backend import create_asr_backend
+        from app.core.asr_backend import create_asr_backend
         asr_be = _get_asr_backend()
         result["asr"] = asr_be.is_ready() if asr_be else False
         result["asr_backend"] = asr_be.name if asr_be and asr_be.is_ready() else None
@@ -234,7 +251,7 @@ async def asr_capabilities():
 @app.get("/tts/capabilities")
 async def tts_capabilities():
     """Return TTS backend info and supported capabilities."""
-    import tts_service
+    from app.core import tts_service
     if not tts_service.is_ready():
         return JSONResponse({"error": "TTS not ready"}, status_code=503)
     return {
@@ -248,15 +265,17 @@ async def tts_capabilities():
 
 @app.post("/tts")
 async def tts(req: TTSRequest):
-    import tts_service
+    from app.core import tts_service
+    from app.core.coordinator import get_coordinator
 
-    wav_bytes, meta = tts_service.synthesize(
-        text=req.text,
-        speaker_id=req.sid,
-        speed=req.speed,
-        pitch_shift=req.pitch,
-        language=req.language,
-    )
+    async with get_coordinator().acquire("tts"):
+        wav_bytes, meta = tts_service.synthesize(
+            text=req.text,
+            speaker_id=req.sid,
+            speed=req.speed,
+            pitch_shift=req.pitch,
+            language=req.language,
+        )
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
@@ -278,8 +297,8 @@ async def tts_stream(req: TTSRequest):
     """Stream TTS as raw PCM: first 4 bytes = sample_rate (uint32 LE), then int16 PCM chunks."""
     import asyncio
     import struct
-    import tts_service
-    from tts_backend import TTSCapability
+    from app.core import tts_service
+    from app.core.tts_backend import TTSCapability
 
     if not tts_service.has_capability(TTSCapability.STREAMING):
         return JSONResponse(
@@ -290,32 +309,34 @@ async def tts_stream(req: TTSRequest):
 
     sr = tts_service.get_sample_rate()
     backend = tts_service.get_backend()
+    from app.core.coordinator import get_coordinator
 
     async def stream():
-        yield struct.pack("<I", sr)
-        loop = asyncio.get_event_loop()
-        queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        async with get_coordinator().acquire("tts"):
+            yield struct.pack("<I", sr)
+            loop = asyncio.get_event_loop()
+            queue: asyncio.Queue[bytes | None] = asyncio.Queue()
 
-        def _run():
-            try:
-                for chunk in backend.generate_streaming(
-                    req.text,
-                    speaker_id=req.sid,
-                    speed=req.speed,
-                    pitch_shift=req.pitch,
-                    language=req.language,
-                ):
-                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
+            def _run():
+                try:
+                    for chunk in backend.generate_streaming(
+                        req.text,
+                        speaker_id=req.sid,
+                        speed=req.speed,
+                        pitch_shift=req.pitch,
+                        language=req.language,
+                    ):
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
 
-        loop.run_in_executor(_get_tts_stream_executor(), _run)
+            loop.run_in_executor(_get_tts_stream_executor(), _run)
 
-        while True:
-            chunk = await queue.get()
-            if chunk is None:
-                break
-            yield chunk
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                yield chunk
 
     return StreamingResponse(stream(), media_type="application/octet-stream")
 
@@ -326,8 +347,8 @@ async def tts_stream(req: TTSRequest):
 async def tts_clone(req: CloneRequest):
     """Synthesize with voice cloning. Requires voice_clone capability."""
     import base64
-    import tts_service
-    from tts_backend import TTSCapability
+    from app.core import tts_service
+    from app.core.tts_backend import TTSCapability
 
     if not tts_service.has_capability(TTSCapability.VOICE_CLONE):
         return JSONResponse(
@@ -342,11 +363,13 @@ async def tts_clone(req: CloneRequest):
     except Exception:
         return JSONResponse({"error": "Invalid base64 speaker_embedding_b64"}, status_code=400)
 
-    wav_bytes, meta = tts_service.clone_voice(
-        text=req.text,
-        speaker_embedding=speaker_embedding,
-        language=req.language,
-    )
+    from app.core.coordinator import get_coordinator
+    async with get_coordinator().acquire("tts"):
+        wav_bytes, meta = tts_service.clone_voice(
+            text=req.text,
+            speaker_embedding=speaker_embedding,
+            language=req.language,
+        )
     return Response(
         content=wav_bytes,
         media_type="audio/wav",
@@ -366,8 +389,8 @@ async def tts_extract_embedding(file: UploadFile = File(...)):
     across multiple /tts/clone calls.
     """
     import base64
-    import tts_service
-    from tts_backend import TTSCapability
+    from app.core import tts_service
+    from app.core.tts_backend import TTSCapability
 
     if not tts_service.has_capability(TTSCapability.VOICE_CLONE):
         return JSONResponse(
@@ -378,7 +401,9 @@ async def tts_extract_embedding(file: UploadFile = File(...)):
         )
 
     audio_bytes = await file.read()
-    embedding = tts_service.extract_speaker_embedding(audio_bytes)
+    from app.core.coordinator import get_coordinator
+    async with get_coordinator().acquire("tts"):
+        embedding = tts_service.extract_speaker_embedding(audio_bytes)
     return {
         "speaker_embedding_b64": base64.b64encode(embedding).decode(),
         "embedding_size": len(embedding),
@@ -395,8 +420,8 @@ async def tts_clone_stream(req: CloneStreamRequest):
     import asyncio
     import struct
     import base64
-    import tts_service
-    from tts_backend import TTSCapability
+    from app.core import tts_service
+    from app.core.tts_backend import TTSCapability
 
     if not tts_service.has_capability(TTSCapability.VOICE_CLONE):
         return JSONResponse(
@@ -420,36 +445,38 @@ async def tts_clone_stream(req: CloneStreamRequest):
 
     sr = tts_service.get_sample_rate()
     backend = tts_service.get_backend()
+    from app.core.coordinator import get_coordinator
 
     async def stream():
-        yield struct.pack("<I", sr)
-        loop = asyncio.get_event_loop()
-        queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-        stream_kwargs = {
-            "speaker_embedding": speaker_embedding,
-            "language": req.language,
-        }
-        if req.first_chunk_frames is not None:
-            stream_kwargs["first_chunk_frames"] = req.first_chunk_frames
-        if req.chunk_frames is not None:
-            stream_kwargs["chunk_frames"] = req.chunk_frames
-        if req.streaming_profile is not None:
-            stream_kwargs["streaming_profile"] = req.streaming_profile
+        async with get_coordinator().acquire("tts"):
+            yield struct.pack("<I", sr)
+            loop = asyncio.get_event_loop()
+            queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+            stream_kwargs = {
+                "speaker_embedding": speaker_embedding,
+                "language": req.language,
+            }
+            if req.first_chunk_frames is not None:
+                stream_kwargs["first_chunk_frames"] = req.first_chunk_frames
+            if req.chunk_frames is not None:
+                stream_kwargs["chunk_frames"] = req.chunk_frames
+            if req.streaming_profile is not None:
+                stream_kwargs["streaming_profile"] = req.streaming_profile
 
-        def _run():
-            try:
-                for chunk in backend.generate_streaming(req.text, **stream_kwargs):
-                    loop.call_soon_threadsafe(queue.put_nowait, chunk)
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
+            def _run():
+                try:
+                    for chunk in backend.generate_streaming(req.text, **stream_kwargs):
+                        loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
 
-        loop.run_in_executor(_get_tts_stream_executor(), _run)
+            loop.run_in_executor(_get_tts_stream_executor(), _run)
 
-        while True:
-            chunk = await queue.get()
-            if chunk is None:
-                break
-            yield chunk
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                yield chunk
 
     return StreamingResponse(stream(), media_type="application/octet-stream")
 
@@ -463,9 +490,11 @@ async def asr(
 ):
     audio_bytes = await file.read()
 
+    from app.core.coordinator import get_coordinator
     asr_be = _get_asr_backend()
     if asr_be and asr_be.is_ready():
-        result = asr_be.transcribe(audio_bytes, language=language)
+        async with get_coordinator().acquire("asr"):
+            result = asr_be.transcribe(audio_bytes, language=language)
         return {
             "text": result.text,
             "language": result.language,
@@ -495,7 +524,7 @@ async def asr_stream(
     """
     import asyncio
     import numpy as np
-    from asr_backend import ASRCapability
+    from app.core.asr_backend import ASRCapability
 
     await ws.accept()
 
@@ -508,7 +537,9 @@ async def asr_stream(
     )
 
     if use_backend_stream:
-        await _asr_stream_backend(ws, asr_be, language, sample_rate)
+        from app.core.coordinator import get_coordinator
+        async with get_coordinator().acquire("asr"):
+            await _asr_stream_backend(ws, asr_be, language, sample_rate)
     else:
         await ws.send_json({"error": "no streaming ASR available"})
         await ws.close()
