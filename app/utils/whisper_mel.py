@@ -1,10 +1,10 @@
-"""Whisper log-mel feature extractor implemented with librosa + numpy.
+"""Whisper log-mel feature extractor implemented with numpy only.
 
 This is a drop-in equivalent of the path used by
 ``transformers.WhisperFeatureExtractor`` for Qwen3 ASR (feature_size=128,
 sampling_rate=16000, n_fft=400, hop_length=160). It is intentionally a
 narrow port of the Whisper feature pipeline so we can drop the
-``transformers`` runtime dependency.
+``transformers`` and ``librosa/scipy`` runtime dependencies.
 
 Spec: docs/plans/asr-mel-librosa-2026-04-27.md
 """
@@ -23,32 +23,61 @@ FMAX = 8000.0
 MEL_FLOOR = 1e-10
 
 
+def _hz_to_mel(freq: np.ndarray) -> np.ndarray:
+    freq = np.asarray(freq, dtype=np.float64)
+    f_min = 0.0
+    f_sp = 200.0 / 3
+    mels = (freq - f_min) / f_sp
+    min_log_hz = 1000.0
+    min_log_mel = (min_log_hz - f_min) / f_sp
+    logstep = np.log(6.4) / 27.0
+    mask = freq >= min_log_hz
+    mels[mask] = min_log_mel + np.log(freq[mask] / min_log_hz) / logstep
+    return mels
+
+
+def _mel_to_hz(mels: np.ndarray) -> np.ndarray:
+    mels = np.asarray(mels, dtype=np.float64)
+    f_min = 0.0
+    f_sp = 200.0 / 3
+    freqs = f_min + f_sp * mels
+    min_log_hz = 1000.0
+    min_log_mel = (min_log_hz - f_min) / f_sp
+    logstep = np.log(6.4) / 27.0
+    mask = mels >= min_log_mel
+    freqs[mask] = min_log_hz * np.exp(logstep * (mels[mask] - min_log_mel))
+    return freqs
+
+
+def _build_mel_filterbank() -> np.ndarray:
+    n_freqs = N_FFT // 2 + 1
+    fftfreqs = np.linspace(0.0, SAMPLE_RATE / 2, n_freqs, dtype=np.float64)
+    min_mel = _hz_to_mel(np.array([FMIN], dtype=np.float64))[0]
+    max_mel = _hz_to_mel(np.array([FMAX], dtype=np.float64))[0]
+    mel_f = _mel_to_hz(np.linspace(min_mel, max_mel, N_MELS + 2, dtype=np.float64))
+
+    fdiff = np.diff(mel_f)
+    ramps = mel_f[:, np.newaxis] - fftfreqs[np.newaxis, :]
+    lower = -ramps[:-2] / fdiff[:-1, np.newaxis]
+    upper = ramps[2:] / fdiff[1:, np.newaxis]
+    weights = np.maximum(0.0, np.minimum(lower, upper))
+    enorm = 2.0 / (mel_f[2:N_MELS + 2] - mel_f[:N_MELS])
+    weights *= enorm[:, np.newaxis]
+    return weights.astype(np.float32)
+
+
 def _get_mel_state(cache: dict, chunk_length: int) -> dict:
     """Return cached mel filter state, building it lazily.
 
-    The mel filter matrix only depends on (sr, n_fft, n_mels, fmin, fmax),
-    not on chunk_length. We still key by ("librosa", chunk_length) so this
-    cache slot does not collide with the transformers fallback path which
-    keys by ("transformers", chunk_length) (or legacy bare chunk_length).
+    The mel filter matrix only depends on (sr, n_fft, n_mels, fmin, fmax).
+    Keep chunk_length in the key to avoid colliding with older cache entries.
     """
-    import librosa
-
-    key = ("librosa", chunk_length)
+    key = ("numpy_slaney", chunk_length)
     state = cache.get(key)
-    if state is not None and state.get("backend") == "librosa":
+    if state is not None and state.get("backend") == "numpy_slaney":
         return state
 
-    mel_basis = librosa.filters.mel(
-        sr=SAMPLE_RATE,
-        n_fft=N_FFT,
-        n_mels=N_MELS,
-        fmin=FMIN,
-        fmax=FMAX,
-        htk=False,
-        norm="slaney",
-        dtype=np.float32,
-    )
-    state = {"backend": "librosa", "mel_basis": mel_basis}
+    state = {"backend": "numpy_slaney", "mel_basis": _build_mel_filterbank()}
     cache[key] = state
     return state
 
@@ -69,8 +98,6 @@ def compute_whisper_log_mel(
       * Slaney mel filter bank, base-10 log, floor ``1e-10``
       * Whisper dynamic range clamp + ``(x + 4) / 4`` normalization
     """
-    import librosa
-
     audio = np.asarray(audio, dtype=np.float32)
     if audio.ndim != 1:
         audio = audio.reshape(-1)
@@ -90,17 +117,17 @@ def compute_whisper_log_mel(
     mel_basis = state["mel_basis"]
 
     # Centered STFT, periodic Hann window, reflect padding to match
-    # transformers (numpy path uses spectrogram(center=True, pad_mode="reflect")).
-    stft = librosa.stft(
-        y=audio,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH,
-        win_length=N_FFT,
-        window="hann",
-        center=True,
-        dtype=np.complex64,
-        pad_mode="reflect",
+    # transformers/librosa behavior without importing scipy/librosa.
+    audio = np.pad(audio, (N_FFT // 2, N_FFT // 2), mode="reflect")
+    n_frames = 1 + (len(audio) - N_FFT) // HOP_LENGTH
+    frames = np.lib.stride_tricks.as_strided(
+        audio,
+        shape=(n_frames, N_FFT),
+        strides=(audio.strides[0] * HOP_LENGTH, audio.strides[0]),
+        writeable=False,
     )
+    window = np.hanning(N_FFT + 1)[:-1].astype(np.float32)
+    stft = np.fft.rfft(frames * window[np.newaxis, :], n=N_FFT, axis=1).T
 
     # Drop final frame to match transformers torch path (stft[..., :-1]).
     magnitudes = np.abs(stft[:, :-1]).astype(np.float32) ** 2.0
