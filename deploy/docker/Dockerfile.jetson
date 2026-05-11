@@ -58,43 +58,40 @@ RUN pip3 install --no-cache-dir --index-url https://pypi.org/simple \
 # ----------------------------------------------------------------------------
 # Mode-specific layer: zh_en (sherpa-onnx + librosa) — Paraformer + Matcha
 # ----------------------------------------------------------------------------
-FROM base AS mode-zh_en
-
-RUN pip3 install --no-cache-dir --index-url https://pypi.org/simple \
-        librosa \
-        'sherpa-onnx==1.12.28'
-
-# Patch sherpa-onnx to use system onnxruntime 1.20 (CUDA 12.6)
-COPY scripts/patch_sherpa_ort.py /tmp/
-RUN python3 /tmp/patch_sherpa_ort.py && rm /tmp/patch_sherpa_ort.py
-
-# Install patched sherpa-onnx .so files (Paraformer streaming EOF fix)
-COPY patches/sherpa-onnx-lib/ /tmp/sherpa-onnx-lib/
-RUN SITE_LIB=/usr/local/lib/python3.10/dist-packages/sherpa_onnx/lib && \
-    cp /tmp/sherpa-onnx-lib/*.so "$SITE_LIB/" && \
-    rm -rf /tmp/sherpa-onnx-lib && \
-    python3 -c "import sherpa_onnx; print(f'sherpa_onnx {sherpa_onnx.__version__} patched OK')"
-
-ENV SEEED_LOCAL_VOICE_PROFILE_DEFAULT=jetson-zh-en
-
+# Final stage: single FROM with LANGUAGE_MODE-conditional RUN so this Dockerfile
+# works under both buildx (which prunes unused FROM ... AS stages) and the
+# legacy builder (which builds every declared FROM unconditionally — that breaks
+# a multi-stage `mode-zh_en` / `mode-multilanguage` pattern on Jetson Orin Nano,
+# where the multilanguage stage clones multi-GB external repos).
 # ----------------------------------------------------------------------------
-# Mode-specific layer: multilanguage (Qwen3 TRT, no sherpa/librosa)
-# ----------------------------------------------------------------------------
-FROM base AS mode-multilanguage
+FROM base AS final
 
-# Qwen3-TTS/ASR TensorRT backend (prebuilt .so for Jetson Orin)
-RUN pip3 install --no-cache-dir \
-        git+https://github.com/suharvest/jetson-qwen3-speech.git@v0.1.0
-
-ENV SEEED_LOCAL_VOICE_PROFILE_DEFAULT=jetson-multilang-highperf
-
-# ----------------------------------------------------------------------------
-# Final stage: select mode via build-arg LANGUAGE_MODE
-# ----------------------------------------------------------------------------
-FROM mode-${LANGUAGE_MODE} AS final
-
-ARG LANGUAGE_MODE
+ARG LANGUAGE_MODE=zh_en
 ENV LANGUAGE_MODE=${LANGUAGE_MODE}
+
+# Always copy the small patch sources — using them is gated on LANGUAGE_MODE.
+COPY scripts/patch_sherpa_ort.py /tmp/patch_sherpa_ort.py
+COPY patches/sherpa-onnx-lib/ /tmp/sherpa-onnx-lib/
+
+RUN set -eux; \
+    if [ "$LANGUAGE_MODE" = "zh_en" ]; then \
+        pip3 install --no-cache-dir --index-url https://pypi.org/simple \
+            librosa \
+            'sherpa-onnx==1.12.28'; \
+        python3 /tmp/patch_sherpa_ort.py; \
+        SITE_LIB=/usr/local/lib/python3.10/dist-packages/sherpa_onnx/lib; \
+        cp /tmp/sherpa-onnx-lib/*.so "$SITE_LIB/"; \
+        python3 -c "import sherpa_onnx; print(f'sherpa_onnx {sherpa_onnx.__version__} patched OK')"; \
+        echo "SEEED_LOCAL_VOICE_PROFILE_DEFAULT=jetson-zh-en" >> /etc/seeed-local-voice.env; \
+    elif [ "$LANGUAGE_MODE" = "multilanguage" ]; then \
+        pip3 install --no-cache-dir \
+            git+https://github.com/suharvest/jetson-qwen3-speech.git@v0.1.0; \
+        echo "SEEED_LOCAL_VOICE_PROFILE_DEFAULT=jetson-multilang-highperf" >> /etc/seeed-local-voice.env; \
+    else \
+        echo "Unknown LANGUAGE_MODE=$LANGUAGE_MODE (expected zh_en|multilanguage)" >&2; \
+        exit 1; \
+    fi; \
+    rm -rf /tmp/patch_sherpa_ort.py /tmp/sherpa-onnx-lib
 
 # Clean up build-only tools to keep image lean
 RUN apt-get purge -y patchelf 2>/dev/null || true && \
@@ -122,7 +119,11 @@ LABEL org.opencontainers.image.title="Seeed Local Voice" \
       org.opencontainers.image.source="https://github.com/suharvest/seeed-local-voice" \
       org.opencontainers.image.description="GPU-accelerated speech service for Jetson Orin"
 
-WORKDIR /opt/speech/app
+# Workdir is /opt/speech so the `app.core.profile_loader` style imports in
+# app/main.py resolve against /opt/speech/app/. Running uvicorn as a module
+# adds CWD to sys.path automatically.
+WORKDIR /opt/speech
+ENV PYTHONPATH=/opt/speech
 EXPOSE 8000
 
-CMD ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
