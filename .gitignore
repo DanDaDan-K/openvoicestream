@@ -43,3 +43,21 @@ benchmark/cpp/prebuilt/
 
 # Local archive of process WAV/JSON outputs (not tracked)
 archive/
+
+# Local experiment scratch (calibration, v2v, results)
+bench/
+logs/
+
+# Internal handover / planning notes (not for repo)
+docs/plans/
+docs/superpowers/
+
+# Large ASR eval datasets (download on demand)
+tests/asr_real_wav_eval/dev-clean.tar.gz
+tests/asr_real_wav_eval/librispeech/
+
+# RK3576 large binaries / dumps (to be removed in seeed-voice refactor Step 4)
+rk3576/engine/
+rk3576/*.so
+rk3576/scripts/*.wav
+rk3576/scripts/*.npz
