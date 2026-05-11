@@ -28,12 +28,12 @@ def _profile_path(name_or_path: str) -> Path:
 
 
 def apply_profile_from_env() -> dict:
-    """Apply JETSON_VOICE_PROFILE(_JSON) environment defaults.
+    """Apply SEEED_LOCAL_VOICE_PROFILE(_JSON) environment defaults.
 
     Returns the parsed profile dict, or an empty dict when no profile was
     requested. Environment variables already set by the operator are preserved.
     """
-    profile_ref = os.environ.get("JETSON_VOICE_PROFILE_JSON") or os.environ.get("JETSON_VOICE_PROFILE")
+    profile_ref = os.environ.get("SEEED_LOCAL_VOICE_PROFILE_JSON") or os.environ.get("SEEED_LOCAL_VOICE_PROFILE")
     if not profile_ref:
         return {}
 
@@ -52,10 +52,10 @@ def apply_profile_from_env() -> dict:
             os.environ[key] = os.path.expandvars(str(value))
             applied.append(key)
 
-    os.environ.setdefault("JETSON_VOICE_PROFILE_NAME", profile.get("name", path.stem))
+    os.environ.setdefault("SEEED_LOCAL_VOICE_PROFILE_NAME", profile.get("name", path.stem))
     logger.info(
         "Applied profile %s from %s (%d env defaults; explicit env wins)",
-        os.environ.get("JETSON_VOICE_PROFILE_NAME"),
+        os.environ.get("SEEED_LOCAL_VOICE_PROFILE_NAME"),
         path,
         len(applied),
     )

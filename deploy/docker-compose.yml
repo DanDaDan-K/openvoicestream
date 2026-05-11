@@ -2,11 +2,11 @@
 #
 # Usage:
 #   LANGUAGE_MODE=en docker compose -f deploy/docker-compose.yml up -d
-#   JETSON_VOICE_PROFILE=multilanguage-qwen-highperf docker compose -f deploy/docker-compose.yml up -d
+#   SEEED_LOCAL_VOICE_PROFILE=multilanguage-qwen-highperf docker compose -f deploy/docker-compose.yml up -d
 #
 # Models auto-download on first start (~1-2 min) and persist in a Docker volume.
 # Set LANGUAGE_MODE to "zh_en" (default, Chinese+English), "en" (English only),
-# or JETSON_VOICE_PROFILE=multilanguage-qwen-highperf for Qwen3 ASR/TTS.
+# or SEEED_LOCAL_VOICE_PROFILE=multilanguage-qwen-highperf for Qwen3 ASR/TTS.
 
 services:
   speech:
@@ -17,8 +17,8 @@ services:
       - "8621:8000"
     environment:
       - LANGUAGE_MODE=${LANGUAGE_MODE:-zh_en}
-      - JETSON_VOICE_PROFILE=${JETSON_VOICE_PROFILE:-}
-      - JETSON_VOICE_PROFILE_JSON=${JETSON_VOICE_PROFILE_JSON:-}
+      - SEEED_LOCAL_VOICE_PROFILE=${SEEED_LOCAL_VOICE_PROFILE:-}
+      - SEEED_LOCAL_VOICE_PROFILE_JSON=${SEEED_LOCAL_VOICE_PROFILE_JSON:-}
       # Manifest + deploy script live in the sibling qwen3-edgellm-jetson repo.
       # Mount that repo into the container (e.g. -v ~/project/qwen3-edgellm-jetson:/opt/qej:ro)
       # and set QWEN3_EDGELLM_JETSON_ROOT=/opt/qej; QWEN3_ARTIFACT_MANIFEST then resolves
