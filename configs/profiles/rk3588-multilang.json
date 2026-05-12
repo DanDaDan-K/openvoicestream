@@ -1,0 +1,31 @@
+{
+  "name": "rk3588-multilang",
+  "description": "Multilang preset on Rockchip RK3588: Qwen3 ASR (RKNN encoder + RKLLM decoder fp16) + Matcha TTS (RKNN). Models from rkvoice-stream host paths; this profile ships the env wiring that drives rkvoice-stream's qwen3_asr_rk backend to load the RK3588 variants instead of its default rk3576/w8a8.",
+  "asr_backend": "rk.asr",
+  "tts_backend": "rk.tts",
+  "execution_policy": {
+    "mode": "serialized",
+    "shared_resource": "npu"
+  },
+  "env": {
+    "LANGUAGE_MODE": "rk",
+    "RK_PLATFORM": "rk3588",
+    "ASR_BACKEND": "qwen3_asr_rk",
+    "ASR_DECODER_TYPE": "rkllm",
+    "ASR_PLATFORM": "rk3588",
+    "ASR_DECODER_QUANT": "fp16",
+    "ASR_NPU_CORE_MASK": "NPU_CORE_AUTO",
+    "ASR_MODEL_DIR": "/opt/asr/models",
+    "RKLLM_LIB_PATH": "/opt/asr/lib/librkllmrt.so",
+    "QWEN3_ASR_STREAM_TRUE": "1",
+    "TTS_BACKEND": "matcha_rknn",
+    "TTS_MODEL_DIR": "/opt/tts/models",
+    "MODEL_DIR": "/opt/tts/models",
+    "MATCHA_USE_ORT": "1",
+    "MATCHA_MODEL": "matcha-s64.rknn",
+    "MATCHA_MAX_PHONEMES": "64",
+    "MATCHA_MODEL_SEQ_LEN": "80",
+    "VOCOS_MODEL": "vocos-16khz-600.rknn",
+    "VOCOS_FRAMES": "600"
+  }
+}

@@ -166,9 +166,13 @@ PRESET_TABLE: dict[tuple[str, str], str] = {
     # rpi5-lite-zh-en would add Matcha TTS on top when validated.
     (TIER_RPI5, "asr_zh_en"): "rpi4-asr-zh-en",
 
-    # RK / RPi5-lite entries TODO once their profiles are authored and validated:
-    #   (TIER_RK3576, "multilang"):  "rk3576-multilang",
-    #   (TIER_RK3588, "multilang"):  "rk3588-multilang",
+    # RK — multilang preset (Qwen3 ASR via RKNN/RKLLM + Matcha TTS via RKNN).
+    # Backed by rkvoice-stream submodule; needed env to drive its backend
+    # away from the rk3576/w8a8 defaults is set in the profile JSON.
+    (TIER_RK3576, "multilang"): "rk3576-multilang",
+    (TIER_RK3588, "multilang"): "rk3588-multilang",
+
+    # Future entries (profiles not yet authored):
     #   (TIER_RK3576, "lite_zh_en"): "rk3576-lite-zh-en",
     #   (TIER_RK3588, "lite_zh_en"): "rk3588-lite-zh-en",
     #   (TIER_RPI5,   "lite_zh_en"): "rpi5-lite-zh-en",
