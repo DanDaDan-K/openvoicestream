@@ -15,6 +15,7 @@
     "ASR_PLATFORM": "rk3588",
     "ASR_DECODER_QUANT": "fp16",
     "ASR_NPU_CORE_MASK": "NPU_CORE_AUTO",
+    "ASR_ENABLED_CPUS": "4",
     "ASR_MODEL_DIR": "/opt/asr/models",
     "RKLLM_LIB_PATH": "/opt/asr/lib/librkllmrt.so",
     "QWEN3_ASR_STREAM_TRUE": "1",
@@ -22,10 +23,11 @@
     "TTS_MODEL_DIR": "/opt/tts/models",
     "MODEL_DIR": "/opt/tts/models",
     "MATCHA_USE_ORT": "1",
+    "MATCHA_ONNX_PATH": "/home/radxa/matcha-data/model-steps-3.onnx",
     "MATCHA_MODEL": "matcha-s64.rknn",
     "MATCHA_MAX_PHONEMES": "64",
     "MATCHA_MODEL_SEQ_LEN": "80",
     "VOCOS_MODEL": "vocos-16khz-600.rknn",
-    "VOCOS_FRAMES": "600"
+    "VOCOS_FRAMES": "256"
   }
 }
