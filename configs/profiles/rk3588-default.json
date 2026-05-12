@@ -8,6 +8,7 @@
     "shared_resource": "npu"
   },
   "env": {
+    "LANGUAGE_MODE": "rk",
     "RK_PLATFORM": "rk3588",
     "ASR_BACKEND": "qwen3_asr_rk",
     "ASR_DECODER_TYPE": "rkllm",

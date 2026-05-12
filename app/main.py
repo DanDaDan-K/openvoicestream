@@ -151,6 +151,15 @@ async def startup():
             _executor = _get_asr_executor()
 
             def _warm_asr():
+                # Some backends (e.g. SherpaASRBackend) don't expose a
+                # transcribe_audio convenience method; their warmup is
+                # implicit in preload(). Skip silently to avoid log noise.
+                if not hasattr(_asr_backend, "transcribe_audio"):
+                    logger.info(
+                        "ASR warmup skipped: %s has no transcribe_audio (preload already warmed).",
+                        type(_asr_backend).__name__,
+                    )
+                    return
                 try:
                     import numpy as _np
                     silence = _np.zeros(16000, dtype=_np.float32)
