@@ -44,12 +44,33 @@ def _profile_path(name_or_path: str) -> Path:
 
 
 def apply_profile_from_env() -> dict:
-    """Apply SEEED_LOCAL_VOICE_PROFILE(_JSON) environment defaults.
+    """Apply profile environment defaults selected by env.
 
-    Returns the parsed profile dict, or an empty dict when no profile was
-    requested. Environment variables already set by the operator are preserved.
+    Resolution order:
+      1. ``SEEED_LOCAL_VOICE_PROFILE_JSON`` — explicit path to a profile JSON.
+      2. ``SEEED_LOCAL_VOICE_PROFILE``      — explicit profile *name* (looked
+         up in configs/profiles/).
+      3. ``SEEED_LOCAL_VOICE_PRESET``       — high-level preset
+         (voice_clone / multilang / lite_zh_en / ...) resolved via
+         ``profile_selector`` against the auto-detected device tier.
+
+    Returns the parsed profile dict, or an empty dict when none was requested.
+    Environment variables already set by the operator are preserved.
     """
-    profile_ref = os.environ.get("SEEED_LOCAL_VOICE_PROFILE_JSON") or os.environ.get("SEEED_LOCAL_VOICE_PROFILE")
+    profile_ref = (
+        os.environ.get("SEEED_LOCAL_VOICE_PROFILE_JSON")
+        or os.environ.get("SEEED_LOCAL_VOICE_PROFILE")
+    )
+    if not profile_ref:
+        preset = os.environ.get("SEEED_LOCAL_VOICE_PRESET")
+        if preset:
+            from app.core.profile_selector import resolve_profile_name, UnsupportedPreset
+            try:
+                profile_ref = resolve_profile_name(preset)
+            except UnsupportedPreset as exc:
+                logger.error("preset %r not supported on this device: %s", preset, exc)
+                raise
+            logger.info("preset %r → profile %r", preset, profile_ref)
     if not profile_ref:
         return {}
 
