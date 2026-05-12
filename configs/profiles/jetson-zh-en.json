@@ -12,5 +12,34 @@
     "MODEL_DIR": "/opt/models",
     "PARAFORMER_MODEL_DIR": "/opt/models/paraformer-streaming",
     "MATCHA_MODEL_BASE": "/opt/models/matcha-icefall-zh-en"
-  }
+  },
+  "required_engines": [
+    {
+      "model_id": "paraformer-streaming",
+      "engine_file": "paraformer_encoder_dp4_400.plan",
+      "engine_path": "/opt/models/paraformer-streaming/engines/paraformer_encoder_dp4_400.plan",
+      "env_var": "PARAFORMER_ENC_ENGINE",
+      "onnx_input": "encoder.onnx",
+      "build_script": "scripts/build_paraformer_trt.sh",
+      "build_env": {
+        "ENGINE_NAME": "paraformer_encoder_dp4_400.plan",
+        "MODEL_DIR": "/opt/models/paraformer-streaming"
+      },
+      "hf_only": false,
+      "required": true
+    },
+    {
+      "model_id": "matcha-icefall-zh-en",
+      "engine_file": "vocos_fp16.engine",
+      "engine_path": "/opt/models/matcha-icefall-zh-en/engines/vocos_fp16.engine",
+      "env_var": "VOCOS_ENGINE",
+      "onnx_input": "vocos_m600_trt.onnx",
+      "build_script": "scripts/build_matcha_engines.sh",
+      "build_env": {
+        "VOCOS_NAME": "vocos_fp16.engine"
+      },
+      "hf_only": false,
+      "required": true
+    }
+  ]
 }

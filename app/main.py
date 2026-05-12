@@ -113,6 +113,21 @@ async def startup():
     model_dir = os.environ.get("MODEL_DIR", "/opt/models")
     model_downloader.ensure_models(language_mode, model_dir)
 
+    # Resolve any TRT engines declared by the active profile. Must run
+    # AFTER model_downloader (ONNX inputs may be needed for fallback
+    # compile) and BEFORE any backend module is imported by the factories
+    # (backends read engine paths from env vars at module import time).
+    try:
+        from app.core.engine_resolver import resolve_all
+        resolved = resolve_all(current_profile())
+        if resolved:
+            logger.info("engine_resolver: resolved %d engine(s)", len(resolved))
+            for env_var, path in resolved.items():
+                logger.info("  %s → %s", env_var, path)
+    except Exception as exc:
+        logger.error("engine_resolver failed: %s", exc)
+        raise
+
     # ASR backend (load before TTS to avoid ORT session conflicts)
     # Note: create_asr_backend() will auto-select based on LANGUAGE_MODE
     try:
