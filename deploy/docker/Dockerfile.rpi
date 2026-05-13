@@ -17,6 +17,11 @@ FROM debian:12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 
+# Build-time PyPI mirror. Default = Tsinghua (CN-fast); override for non-CN:
+#   docker build --build-arg PIP_INDEX=https://pypi.org/simple ...
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV PIP_INDEX_URL=${PIP_INDEX}
+
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv \
@@ -24,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps (CPU-only stack)
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN pip3 install --no-cache-dir --break-system-packages --index-url ${PIP_INDEX} \
         fastapi \
         "uvicorn[standard]" \
         soundfile \

@@ -36,13 +36,18 @@ FROM dustynv/onnxruntime:1.20-r36.4.0 AS base
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 
+# Build-time PyPI mirror. Default = Tsinghua (CN-fast); override for non-CN:
+#   docker build --build-arg PIP_INDEX=https://pypi.org/simple ...
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV PIP_INDEX_URL=${PIP_INDEX}
+
 # System deps (patchelf only needed for sherpa-onnx patching in zh_en mode)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libasound2 libsndfile1 sox patchelf curl \
     && rm -rf /var/lib/apt/lists/*
 
 # FastAPI + runtime deps (shared by both modes)
-RUN pip3 install --no-cache-dir --index-url https://pypi.org/simple \
+RUN pip3 install --no-cache-dir --index-url ${PIP_INDEX} \
         fastapi \
         "uvicorn[standard]" \
         soundfile \
@@ -75,7 +80,7 @@ COPY patches/sherpa-onnx-lib/ /tmp/sherpa-onnx-lib/
 
 RUN set -eux; \
     if [ "$LANGUAGE_MODE" = "zh_en" ]; then \
-        pip3 install --no-cache-dir --index-url https://pypi.org/simple \
+        pip3 install --no-cache-dir --index-url ${PIP_INDEX} \
             librosa \
             'sherpa-onnx==1.12.28'; \
         python3 /tmp/patch_sherpa_ort.py; \

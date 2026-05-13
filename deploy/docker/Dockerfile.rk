@@ -35,18 +35,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Build-time PyPI mirror. Default = Tsinghua (CN-fast); override for non-CN:
+#   docker build --build-arg PIP_INDEX=https://pypi.org/simple ...
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV PIP_INDEX_URL=${PIP_INDEX}
+
 # Python venv (matches rkvoice-stream base)
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Core scientific + audio deps
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
         'numpy<2' \
         soundfile \
         librosa
 
 # FastAPI stack
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
         fastapi \
         'uvicorn[standard]' \
         python-multipart \
@@ -54,18 +59,18 @@ RUN pip install --no-cache-dir \
         requests
 
 # Model / tokenizer deps
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
         transformers \
         tokenizers \
         pybind11
 
 # CPU ASR/TTS fallback (sherpa-onnx) + onnxruntime
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
         sherpa-onnx \
         onnxruntime
 
 # RKNN toolkit lite2 (aarch64 wheel from PyPI)
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
         rknn-toolkit-lite2
 
 RUN ldconfig
