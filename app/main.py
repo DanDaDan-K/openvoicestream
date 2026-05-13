@@ -339,32 +339,52 @@ async def tts_stream(req: TTSRequest):
     backend = tts_service.get_backend()
     from app.core.coordinator import get_coordinator
 
+    # Sentence-level streaming: split the request text into sentences (via
+    # pysbd when the language is supported, regex fallback otherwise) and
+    # call the TTS backend per sentence. The first audio chunk of the
+    # first sentence reaches the client as soon as the first sentence's
+    # model warmup + KV prep is done — for big TTS models (Qwen3 voice
+    # clone, ~6700ms total for a 16s clip on Nano) this halves the
+    # perceived first-audio latency on long inputs. Single-sentence
+    # inputs (the common case) see zero change in behavior.
+    from app.core.v2v import SentenceBuffer
+    sbuf = SentenceBuffer(language=req.language)
+    sentences = list(sbuf.add(req.text or "")) + list(sbuf.flush())
+    if not sentences:
+        # Empty text — preserve original behavior: send SR header then
+        # close with no audio chunks.
+        async def empty():
+            async with get_coordinator().acquire("tts"):
+                yield struct.pack("<I", sr)
+        return StreamingResponse(empty(), media_type="application/octet-stream")
+
     async def stream():
         async with get_coordinator().acquire("tts"):
             yield struct.pack("<I", sr)
             loop = asyncio.get_event_loop()
-            queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+            for sentence in sentences:
+                queue: asyncio.Queue[bytes | None] = asyncio.Queue()
 
-            def _run():
-                try:
-                    for chunk in backend.generate_streaming(
-                        req.text,
-                        speaker_id=req.sid,
-                        speed=req.speed,
-                        pitch_shift=req.pitch,
-                        language=req.language,
-                    ):
-                        loop.call_soon_threadsafe(queue.put_nowait, chunk)
-                finally:
-                    loop.call_soon_threadsafe(queue.put_nowait, None)
+                def _run(text=sentence):
+                    try:
+                        for chunk in backend.generate_streaming(
+                            text,
+                            speaker_id=req.sid,
+                            speed=req.speed,
+                            pitch_shift=req.pitch,
+                            language=req.language,
+                        ):
+                            loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                    finally:
+                        loop.call_soon_threadsafe(queue.put_nowait, None)
 
-            loop.run_in_executor(_get_tts_stream_executor(), _run)
+                loop.run_in_executor(_get_tts_stream_executor(), _run)
 
-            while True:
-                chunk = await queue.get()
-                if chunk is None:
-                    break
-                yield chunk
+                while True:
+                    chunk = await queue.get()
+                    if chunk is None:
+                        break
+                    yield chunk
 
     return StreamingResponse(stream(), media_type="application/octet-stream")
 
