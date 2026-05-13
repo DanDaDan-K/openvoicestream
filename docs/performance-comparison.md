@@ -145,6 +145,24 @@ duration before they hear anything.
 
 ---
 
+## Devices not yet measured
+
+- **Jetson Orin NX 16GB** — running the same v1.12 image we ship for
+  Nano causes the TTS worker to hang in pre-init (binary works on
+  Nano, hangs on NX). A separate "slim" packaging (host-mounted worker
+  binaries) is known to work on NX with the same backend, but it
+  uses a different model bundle (`multilang-highperf-nx`) so its
+  numbers aren't directly comparable to the Nano `voice_clone`
+  baseline in this doc. NX measurements are deferred until the v1.12
+  TTS worker bake is fixed. Expected from architecture: latency ~equal
+  to Nano, concurrency 2-3× better (more SMs, more RAM).
+- **Jetson AGX Orin 32GB** — supports all presets, including the
+  largest multilang model. Not on the bench rack yet.
+- **Raspberry Pi 4 / CM4** — only `asr_zh_en` preset (no TTS). Smaller
+  Cortex-A72; expect 2-3× slower than RPi5.
+- **RK3576 multilingual smoke** (ja/ko/es/de/fr) — corpus is in place
+  but a full multilingual run hasn't been done yet on RK3576.
+
 ## Methodology
 
 - **Corpus**: 20 short + long Chinese & English clips from Google

@@ -300,7 +300,7 @@ EOS → first TTS audio chunk, `--llm-delay=0` (forced EOS):
 |---|---|---|---|---|---|---|---|---|
 | Jetson Orin Nano | sm87 8GB | voice_clone | 0.42 | **0.084** | **0.063** | 5.3% | **0.0%** | 3.14 GB (v1.11/v1.12) |
 | Jetson Orin Nano | sm87 8GB | multilang | TBD | TBD | TBD | TBD | TBD | 3.14 GB |
-| Jetson Orin NX | sm87 16GB | voice_clone | TBD | TBD | TBD | TBD | TBD | 3.14 GB |
+| Jetson Orin NX | sm87 16GB | voice_clone | ⚠️ blocked¹ | — | — | — | — | 3.14 GB |
 | RK3588 (Radxa ROCK 5T) | rk3588 16GB | multilang | **0.071** | 0.220 | **0.030** | **2.6%** | 10.0% | 1.38 GB (rk-v1.2) |
 | RK3576 (cat-remote) | rk3576 8GB | multilang | **0.163** | 0.397 | 0.538 | 5.3% | 13.1% | 1.38 GB (rk-v1.2) |
 | RPi5 | BCM2712 8GB | lite_zh_en | **0.078** | **0.000** | **0.000** | 10.5% | 35.7% | 560 MB (rpi-v1.1) |
@@ -308,6 +308,8 @@ EOS → first TTS audio chunk, `--llm-delay=0` (forced EOS):
 | RPi4 / CM4 | BCM2711 4GB | asr_zh_en | — | TBD | TBD | TBD | TBD | 560 MB |
 
 Measured 2026-05-13 (local mode, 5 warmup + 10 runs); see "Measured ASR perf" section above for full breakdown.
+
+¹ **NX v1.12 deploy blocked (2026-05-13)** — running the same image we ship for Nano causes the baked TTS worker binary (`/root/project/seeed-local-voice/build/edgellm_voice_worker/workers/qwen3_tts_worker`) to hang in pre-init (99% CPU, no progress, no exit, no OOM). The host-mounted "slim" worker binaries on NX (`/opt/edgellm-bin/.../qwen3_tts_worker` + `/opt/jv-workers/qwen3_asr_worker`) work fine with the same engine bundle. **Action item next session**: diff the two binaries (md5 + `ldd`); also investigate the `Code2Wav not found at .../code2wav.engine` warning — filename mismatch with `code2wav_stateful.engine` shouldn't hang TTS load but is suspicious. Until fixed, NX numbers stay TBD; existing `jetson_voice_slim` container on `:18092` keeps serving the multilang stack.
 
 ## Common gotchas
 

@@ -200,6 +200,7 @@
     <li><a href="#metrics">指标解释（对用户的实际意义）</a></li>
     <li><a href="#numbers">实测数据</a></li>
     <li><a href="#usecase">按场景选型</a></li>
+    <li><a href="#not-yet">尚未测量的设备</a></li>
     <li><a href="#method">测试方法</a></li>
     <li><a href="#caveats">坦诚说明</a></li>
   </ol>
@@ -375,6 +376,15 @@
 </div>
 
 </div>
+
+<h2 id="not-yet">尚未测量的设备</h2>
+
+<ul>
+  <li><b>Jetson Orin NX 16GB</b> — 跟 Nano 同一份 v1.12 镜像，TTS worker 在预加载阶段 hang（Nano 上正常，NX 上卡死）。另一套"slim"包装（host-mount worker binary）在 NX 上能跑，但用的是 <code>multilang-highperf-nx</code> 模型包，跟 Nano voice_clone baseline 不可直接对比。NX 实测延后到 v1.12 TTS worker 包装问题修好之后。架构上预期：延迟 ≈ Nano，并发 2-3× 强于 Nano（更多 SM + 更多 RAM）</li>
+  <li><b>Jetson AGX Orin 32GB</b> — 旗舰，支持全部 preset 含最大 multilang。还没上测试台</li>
+  <li><b>Raspberry Pi 4 / CM4</b> — 只支持 <code>asr_zh_en</code> preset（无 TTS）。Cortex-A72 较小，预计比 RPi5 慢 2-3×</li>
+  <li><b>RK3576 多语言（ja/ko/es/de/fr）实测</b> — 多语言 corpus 已准备好，但 RK3576 上还未跑完整多语言一轮</li>
+</ul>
 
 <h2 id="method">测试方法</h2>
 
