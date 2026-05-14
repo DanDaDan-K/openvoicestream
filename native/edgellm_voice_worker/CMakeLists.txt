@@ -136,32 +136,44 @@ target_include_directories(
                           ${COMMON_INCLUDE_DIRS})
 target_link_libraries(voiceWorkerUtils PRIVATE edgellmCore commonLibraryExt)
 
+# ---------------------------------------------------------------------------
+# Worker source canonically lives in the sibling qwen3-edgellm-jetson repo.
+# Defined relative to this CMakeLists; reproducer guarantees sibling layout.
+# ---------------------------------------------------------------------------
+set(WORKER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../qwen3-edgellm-jetson/native/edgellm_voice_worker"
+    CACHE PATH "Worker C++ source root (canonical home: qwen3-edgellm-jetson)")
+
+if(NOT EXISTS "${WORKER_SRC_DIR}/qwen3_asr_worker.cpp")
+  message(FATAL_ERROR "Canonical worker source missing at ${WORKER_SRC_DIR}. "
+                      "Clone https://github.com/suharvest/qwen3-edgellm-jetson next to jetson-voice.")
+endif()
+
 # -----------------------------------------------------------------------------
 # kissfft (vendored, fp64 mode) + MelExtractor — C++ port of upstream
 # `WhisperFeatureExtractor` for the streaming ASR worker's PCM→mel path.
 # Validated against golden tensors by test_mel_extractor (≤ 1e-3 tol).
 # -----------------------------------------------------------------------------
 add_library(kissfft_double STATIC
-            "${CMAKE_CURRENT_SOURCE_DIR}/kissfft/kiss_fft.c"
-            "${CMAKE_CURRENT_SOURCE_DIR}/kissfft/kiss_fftr.c")
+            "${WORKER_SRC_DIR}/kissfft/kiss_fft.c"
+            "${WORKER_SRC_DIR}/kissfft/kiss_fftr.c")
 target_include_directories(kissfft_double PUBLIC
-                           "${CMAKE_CURRENT_SOURCE_DIR}/kissfft")
+                           "${WORKER_SRC_DIR}/kissfft")
 target_compile_definitions(kissfft_double PUBLIC kiss_fft_scalar=double)
 set_target_properties(kissfft_double PROPERTIES
                       POSITION_INDEPENDENT_CODE ON
                       C_STANDARD 99)
 
 add_library(melExtractor STATIC
-            "${CMAKE_CURRENT_SOURCE_DIR}/mel_extractor.cpp")
+            "${WORKER_SRC_DIR}/mel_extractor.cpp")
 target_include_directories(melExtractor PUBLIC
-                           "${CMAKE_CURRENT_SOURCE_DIR}"
+                           "${WORKER_SRC_DIR}"
                            ${EDGE_LLM_SOURCE_DIR}/3rdParty/nlohmannJson/include)
 target_link_libraries(melExtractor PUBLIC kissfft_double)
 set_target_properties(melExtractor PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 set(VOICE_WORKER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/workers")
 
-add_executable(qwen3_tts_worker qwen3_tts_worker.cpp)
+add_executable(qwen3_tts_worker ${WORKER_SRC_DIR}/qwen3_tts_worker.cpp)
 target_include_directories(
   qwen3_tts_worker PRIVATE ${COMMON_INCLUDE_DIRS}
                            ${EDGE_LLM_SOURCE_DIR}/examples/utils)
@@ -173,7 +185,7 @@ set_target_properties(qwen3_tts_worker PROPERTIES RUNTIME_OUTPUT_DIRECTORY
                                                   LINKER_LANGUAGE CUDA
                                                   CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
-add_executable(qwen3_asr_worker qwen3_asr_worker.cpp)
+add_executable(qwen3_asr_worker ${WORKER_SRC_DIR}/qwen3_asr_worker.cpp)
 target_include_directories(
   qwen3_asr_worker PRIVATE ${COMMON_INCLUDE_DIRS}
                            ${EDGE_LLM_SOURCE_DIR}/examples/utils)
@@ -187,7 +199,7 @@ set_target_properties(qwen3_asr_worker PROPERTIES RUNTIME_OUTPUT_DIRECTORY
 
 # Standalone CPU-only test binary for MelExtractor parity vs golden tensors.
 add_executable(test_mel_extractor
-               "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mel_extractor.cpp")
+               "${WORKER_SRC_DIR}/tests/test_mel_extractor.cpp")
 target_link_libraries(test_mel_extractor PRIVATE melExtractor)
 target_include_directories(test_mel_extractor PRIVATE
                            ${EDGE_LLM_SOURCE_DIR}/3rdParty/nlohmannJson/include)
