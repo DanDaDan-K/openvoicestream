@@ -1,23 +1,19 @@
 # syntax=docker/dockerfile:1.6
 #
-# Seeed Local Voice — Rockchip RK3576 / RK3588 NPU edition
+# Seeed Local Voice — Rockchip RK3576 / RK3588 NPU edition (slim).
 #
-# Based on third_party/rkvoice-stream/docker/Dockerfile (system deps + RKNN runtime).
-# Adds the seeed-local-voice FastAPI front-end on top, with rkvoice-stream installed
-# as an editable package so the RK backend adapter (app/backends/rk/) can import it.
+# Target: ~950 MB (down from 1.4 GB). Removes only the two heaviest unused
+# dependency chains: librosa (pulls numba/scipy/scikit-learn ~400 MB) and
+# transformers (pulls safetensors/huggingface_hub ~100 MB).
+#
+# Keeps: Kokoro/Matcha CPU fallback (sherpa-onnx + espeak-ng), Silero VAD
+# (onnxruntime), webrtcvad, tokenizers, rknn-toolkit-lite2.
 #
 # Build (from repo root):
 #   docker build -f deploy/docker/Dockerfile.rk -t seeed-local-voice:rk .
 #
-# Run (RK3576 or RK3588 — profile env switches platform):
-#   docker run --privileged --network=host \
-#     -v /dev:/dev \
-#     -v /home/cat/models:/opt/tts/models:ro \
-#     -v /home/cat/qwen3-asr-models:/opt/asr/models:ro \
-#     -v /home/cat/rknn-matmul-parallel:/opt/rknn-matmul-parallel:ro \
-#     -e PYTHONPATH=/opt/rknn-matmul-parallel \
-#     -e SEEED_LOCAL_VOICE_PROFILE=rk3576-default \
-#     seeed-local-voice:rk
+# Run:
+#   docker compose -f deploy/docker-compose.rk.yml up -d
 #
 # Models are NOT baked in — bind-mount via -v at runtime.
 
@@ -26,7 +22,11 @@ FROM debian:12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 
-# System deps (mirrors rkvoice-stream/docker/Dockerfile)
+# System deps.
+# libsndfile1  : soundfile audio I/O
+# libgomp1     : OpenMP runtime (onnxruntime, numpy)
+# espeak-ng    : phonemization for Kokoro/Matcha CPU TTS (sherpa-onnx)
+# curl         : health checks, model downloader
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv \
         libsndfile1 \
@@ -40,65 +40,54 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV PIP_INDEX_URL=${PIP_INDEX}
 
-# Python venv (matches rkvoice-stream base)
+# Python venv
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Core scientific + audio deps
+# ── Runtime dependencies ───────────────────────────────────────────────
+# Core:          numpy<2, soundfile, pysbd
+# VAD:           webrtcvad-wheels, onnxruntime (Silero VAD + Matcha ORT)
+# ASR tokenizer: tokenizers (Rust, lightweight — NOT full transformers)
+# NPU runtime:   rknn-toolkit-lite2
+# CPU TTS:       sherpa-onnx (Kokoro / Matcha fallback)
+# Web:           fastapi, uvicorn[standard], python-multipart, websockets, requests
 RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
         'numpy<2' \
         soundfile \
-        librosa \
         "pysbd>=0.3.4" \
-        "webrtcvad-wheels>=2.0.14"
-
-# FastAPI stack
-RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
+        "webrtcvad-wheels>=2.0.14" \
+        onnxruntime \
+        tokenizers \
+        rknn-toolkit-lite2 \
+        sherpa-onnx \
         fastapi \
         'uvicorn[standard]' \
         python-multipart \
         websockets \
-        requests
+        requests \
+    && ldconfig
 
-# Model / tokenizer deps
-RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
-        transformers \
-        tokenizers \
-        pybind11
+# ── Application code ──────────────────────────────────────────────────
 
-# CPU ASR/TTS fallback (sherpa-onnx) + onnxruntime
-RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
-        sherpa-onnx \
-        onnxruntime
-
-# RKNN toolkit lite2 (aarch64 wheel from PyPI)
-RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
-        rknn-toolkit-lite2
-
-RUN ldconfig
-
-# Copy seeed-local-voice tree + rkvoice-stream submodule into image
 COPY app/                          /opt/speech/app/
 COPY configs/                      /opt/speech/configs/
 COPY voices/                       /opt/speech/voices/
 COPY scripts/                      /opt/speech/scripts/
 COPY third_party/rkvoice-stream/   /opt/speech/third_party/rkvoice-stream/
 
-# Install rkvoice-stream as editable so app/backends/rk/ can import it.
+# Install rkvoice-stream as editable.
 RUN pip install --no-cache-dir -e /opt/speech/third_party/rkvoice-stream
 
 # Model dirs (bind-mounted at runtime, not baked)
 RUN mkdir -p /opt/tts/models /opt/asr/models /opt/models
 
+# Strip bytecode caches
+RUN find /opt/speech /opt/venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; :
+
 ENV MODEL_DIR=/opt/models \
     TTS_MODEL_DIR=/opt/tts/models \
     ASR_MODEL_DIR=/opt/asr/models \
     LD_LIBRARY_PATH=/usr/lib
-# NOTE: do NOT bake SEEED_LOCAL_VOICE_PROFILE here. Operator picks via
-# SEEED_LOCAL_VOICE_PRESET at docker run time (auto-resolves via
-# profile_selector). A baked PROFILE default would silently override
-# the operator's PRESET choice because profile_loader resolves PROFILE
-# before PRESET.
 
 LABEL org.opencontainers.image.title="Seeed Local Voice (Rockchip)" \
       org.opencontainers.image.source="https://github.com/suharvest/seeed-local-voice" \
