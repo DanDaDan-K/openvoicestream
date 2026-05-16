@@ -1,0 +1,33 @@
+[project]
+name = "openvoicestream-agent"
+version = "0.1.0"
+description = "Agent-layer client that wires OpenVoiceStream (SLV /v2v/stream) to an OpenAI-compatible LLM."
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "websockets>=12",
+    "sounddevice>=0.4",
+    "numpy>=1.24",
+    "openai>=1.40",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+ovs-agent = "openvoicestream_agent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openvoicestream_agent"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
