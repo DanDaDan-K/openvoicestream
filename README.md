@@ -20,16 +20,18 @@ OpenVoiceStream is a local voice stack for products that need real-time ASR and 
 
 ## Why This Matters
 
-| Tier | What you can build | Hardware cost signal |
-|---|---|---|
-| **Real-time voice I/O** | A Raspberry Pi-class board can handle local streaming ASR + TTS for simple voice input/output. | Starts around **tens of dollars** for the board class. |
-| **Human-like local speech** | A Jetson Orin Nano-class board can run the more expressive Qwen3 / voice-clone path locally. | Around **a few hundred dollars** for a dev-kit class board. |
-| **Voice + local LLM** | An Orin NX-class edge box can host the voice stack plus a compact OpenAI-compatible local LLM service for fully local dialogue. | Still edge-device scale, not a GPU server. |
-| **No per-call cloud bill** | ASR, TTS, and the optional LLM path can run on the device after artifacts are cached. | No speech API key, no token meter, no runtime internet dependency. |
+OpenVoiceStream is meant to make local voice practical at product scale: start
+with low-cost real-time voice I/O, then move up to human-like speech or a fully
+local voice + LLM loop without changing the client API.
 
-Board prices vary by region and kit contents. The useful point is the order of
-magnitude: low-cost boards can do real-time voice I/O, and small edge AI boards
-can do the full spoken assistant loop locally.
+<p align="center">
+  <img src="media/solution-lineup.png" alt="OpenVoiceStream solution lineup: recommended hardware paths for real-time voice I/O, production edge voice, human-like local speech, and voice plus local LLM" width="900" />
+</p>
+
+Board prices vary by region and kit contents. The point is the order of
+magnitude: simple Raspberry Pi-class boards can handle real-time voice input and
+output, while Jetson-class edge AI boards can run expressive speech and local LLM
+dialogue without a per-call speech API bill.
 
 ## Quick Start
 
@@ -102,21 +104,10 @@ target device. The Jetson default stays on the lightweight `zh_en` path because
 it is the fastest path to reproduce. Set a `jetson-multilang-*` profile when
 you want the Qwen3 TensorRT-EdgeLLM route.
 
-## Choose A Path
-
-| Need | Recommended path | Why |
-|---|---|---|
-| Lowest-latency bilingual dialogue | Jetson Orin NX, `jetson-zh-en` | Paraformer + Matcha with native TRT engines reaches 58 ms EOS-to-audio p50. |
-| 52-language ASR/TTS with voice clone | Jetson Orin NX/Nano, `jetson-multilang-highperf*` | Qwen3-ASR + Qwen3-TTS via TensorRT-EdgeLLM under the same API. |
-| Multilingual ASR with faster TTS | Jetson Qwen3 ASR + Matcha profile | Keeps Qwen3 ASR while using the lighter Matcha TTS path. |
-| Rockchip NPU deployment | RK3588 before RK3576 | Both run the validated hybrid Matcha path; RK3588 has much lower ASR finalize latency. |
-| Lowest-cost CPU deployment | Raspberry Pi 5 / CM5 class | CPU-only ONNX path with small image and no accelerator runtime dependency. |
-
 ## Table of Contents
 
 - [Why This Matters](#why-this-matters)
 - [Quick Start](#quick-start)
-- [Choose A Path](#choose-a-path)
 - [Key Features](#key-features)
 - [Architecture](#architecture)
 - [API Reference](#api-reference)
