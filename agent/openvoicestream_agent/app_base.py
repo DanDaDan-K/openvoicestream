@@ -614,10 +614,15 @@ class BaseApp:
                                 await self._llm_turn_task
                             except (asyncio.CancelledError, Exception):
                                 pass
-                        try:
-                            await self.slv.abort()
-                        except Exception:
-                            pass
+                        # NOTE: deliberately do NOT call slv.abort() here.
+                        # abort kills SLV's ASR session too, which truncates
+                        # the user's barge-in utterance to whatever Paraformer
+                        # had decoded so far ('不知道怎' instead of '不知道怎么办').
+                        # Local stop_playback already silences the speaker;
+                        # SLV's in-flight TTS audio that keeps streaming over
+                        # the WS is harmlessly discarded by the client. ASR
+                        # then finalises the user's full utterance via the
+                        # normal VAD speech_end → asr_eos → asr_final path.
                         await self.audio.stop_playback()
                         self._first_tts_seen = False
                     else:
@@ -721,10 +726,8 @@ class BaseApp:
                         await self._llm_turn_task
                     except (asyncio.CancelledError, Exception):
                         pass
-                try:
-                    await self.slv.abort()
-                except Exception:  # pragma: no cover
-                    pass
+                # See VAD-driven barge-in branch above: no slv.abort() —
+                # it would truncate the user's barge-in utterance.
                 await self.audio.stop_playback()
                 # Re-arm first-TTS-frame detector so the NEXT turn re-emits
                 # the THINKING→SPEAKING transition; otherwise the dashboard
