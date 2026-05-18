@@ -62,6 +62,9 @@ class DebugDashboardPlugin(Plugin):
         self._tts_bytes_current: int = 0
         self._tts_bytes_last: int = 0
         self._tts_last_sample_rate: int = 24000
+        # ── idempotent start guard (avoids double-subscribe on EventBus
+        #    when the plugin is started twice without an intervening stop) ──
+        self._started: bool = False
 
     # ── lifecycle ─────────────────────────────────────────────────
 
@@ -74,11 +77,18 @@ class DebugDashboardPlugin(Plugin):
         return True
 
     async def start(self) -> None:
+        if self._started:
+            logger.warning(
+                "DebugDashboardPlugin.start() called twice without stop(); "
+                "ignoring duplicate start to avoid double EventBus subscribe"
+            )
+            return
         try:
             from aiohttp import web
         except ImportError:
             logger.error("aiohttp not installed -- debug_dashboard disabled")
             return
+        self._started = True
 
         web_app = web.Application()
         web_app.router.add_get("/", self._handle_index)
@@ -138,6 +148,9 @@ class DebugDashboardPlugin(Plugin):
         await super().start()
 
     async def stop(self) -> None:
+        if not self._started:
+            return
+        self._started = False
         bus = getattr(self.app, "events", None)
         if bus is not None:
             try:
@@ -856,11 +869,36 @@ class DebugDashboardPlugin(Plugin):
         except Exception:
             s = ""
         msg = s if s else repr(exc)
-        entry = {"ts": int(time.time() * 1000), "msg": msg}
+        # Detect TypedLLMError-style payloads (or any exception that
+        # exposes a dict-like ``.payload``). Browser clients prefer the
+        # richer dict so they can colour-code by ``type``; the persistent
+        # error log keeps both for snapshot-replay to late clients.
+        payload_attr = getattr(exc, "payload", None)
+        if isinstance(payload_attr, dict):
+            # Build a defensive copy so plugin modifications can't leak
+            # back into the original exception.
+            data: dict = {
+                "type": str(payload_attr.get("type") or "unknown"),
+                "message": str(payload_attr.get("message") or msg),
+                "exc_class": str(
+                    payload_attr.get("exc_class") or type(exc).__name__
+                ),
+                "timestamp": payload_attr.get("timestamp"),
+            }
+            for k, v in payload_attr.items():
+                data.setdefault(k, v)
+        else:
+            data = {
+                "type": "unknown",
+                "message": msg,
+                "exc_class": type(exc).__name__,
+                "timestamp": time.time(),
+            }
+        entry = {"ts": int(time.time() * 1000), "msg": data["message"], **data}
         self._errors.append(entry)
         if len(self._errors) > 50:
             self._errors.pop(0)
-        await self._broadcast("on_error", msg)
+        await self._broadcast("on_error", data)
 
     async def on_state_change(self, data: dict) -> None:
         await self._broadcast("on_state_change", data)

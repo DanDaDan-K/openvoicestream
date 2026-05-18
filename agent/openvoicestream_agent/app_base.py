@@ -16,7 +16,35 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 from typing import TYPE_CHECKING
+
+
+class TypedLLMError(RuntimeError):
+    """RuntimeError subclass carrying a structured payload for the dashboard.
+
+    Keeps full backward compatibility with the old on_error contract
+    (``isinstance(exc, RuntimeError)`` + ``str(exc)`` continue to work),
+    but exposes ``.payload`` so plugins like debug_dashboard can render
+    typed/coloured errors instead of opaque strings.
+    """
+
+    def __init__(
+        self,
+        type_: str,
+        message: str,
+        *,
+        exc_class: str = "",
+        **extra,
+    ) -> None:
+        super().__init__(message)
+        self.payload: dict = {
+            "type": type_,
+            "message": message,
+            "exc_class": exc_class,
+            "timestamp": time.time(),
+            **extra,
+        }
 
 from .app_mode import LLMTimeoutError
 from .audio_io import AudioIO
@@ -774,7 +802,14 @@ class BaseApp:
 
         if isinstance(evt, SLVError):
             old_state = getattr(self, "_state", ConvState.IDLE)
-            await self._broadcast("on_error", RuntimeError(evt.message))
+            await self._broadcast(
+                "on_error",
+                TypedLLMError(
+                    "slv_error",
+                    evt.message,
+                    exc_class="SLVError",
+                ),
+            )
             # Don't leave the FSM stuck in THINKING/SPEAKING after a transport
             # error — cancel any in-flight LLM turn.
             if self._llm_turn_task is not None and not self._llm_turn_task.done():
@@ -817,7 +852,14 @@ class BaseApp:
             # to the dashboard and return to IDLE immediately.
             logger.warning("LLM unavailable, fail-fast: %s", e)
             try:
-                await self._broadcast("on_error", RuntimeError(f"LLM 不可用：{e}"))
+                await self._broadcast(
+                    "on_error",
+                    TypedLLMError(
+                        "llm_unavailable",
+                        f"LLM 不可用：{e}",
+                        exc_class=type(e).__name__,
+                    ),
+                )
             except Exception:
                 pass
             self._set_state(ConvState.IDLE)
@@ -844,7 +886,16 @@ class BaseApp:
                 "可能 edge-llm 服务挂了或输入太长。"
             )
             try:
-                await self._broadcast("on_error", RuntimeError(msg))
+                await self._broadcast(
+                    "on_error",
+                    TypedLLMError(
+                        "llm_timeout",
+                        msg,
+                        exc_class="LLMTimeoutError",
+                        kind=e.kind,
+                        timeout_s=e.timeout_s,
+                    ),
+                )
             except Exception:
                 pass
             self._set_state(ConvState.IDLE)
@@ -875,8 +926,17 @@ class BaseApp:
             # RuntimeError (the on_error contract already accepts a
             # BaseException and prefers str()).
             try:
-                msg = f"LLM 调用失败（{type(e).__name__}）：{e}"
-                await self._broadcast("on_error", RuntimeError(msg))
+                exc_class = type(e).__name__
+                msg = f"LLM 调用失败（{exc_class}）：{e}"
+                err_type = (
+                    "llm_stream_error"
+                    if isinstance(e, LLMStreamError)
+                    else "llm_failure"
+                )
+                await self._broadcast(
+                    "on_error",
+                    TypedLLMError(err_type, msg, exc_class=exc_class),
+                )
             except Exception:
                 pass
             self._set_state(ConvState.IDLE)

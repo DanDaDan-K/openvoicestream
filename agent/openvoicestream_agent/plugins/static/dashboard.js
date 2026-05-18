@@ -624,8 +624,30 @@
 
   // ── errors ───────────────────────────────────────────────────────
   let errors = [];
-  function pushError(ts, msg, stack) {
-    errors.push({ ts, msg, stack });
+  // Map typed-error categories to CSS modifier classes that drive colour.
+  // Falls back to "error-gray" for unknown / legacy string payloads.
+  const ERROR_TYPE_COLOR = {
+    llm_timeout:       "error-orange",
+    degraded:          "error-orange",
+    llm_failure:       "error-red",
+    llm_unavailable:   "error-red",
+    llm_stream_error:  "error-red",
+    slv_error:         "error-red",
+    input_too_long:    "error-yellow",
+  };
+  // Pretty labels for the type pill so operators don't see snake_case.
+  const ERROR_TYPE_LABEL = {
+    llm_timeout:       "TIMEOUT",
+    degraded:          "DEGRADED",
+    llm_failure:       "LLM",
+    llm_unavailable:   "UNAVAILABLE",
+    llm_stream_error:  "STREAM",
+    slv_error:         "SLV",
+    input_too_long:    "INPUT",
+    unknown:           "ERROR",
+  };
+  function pushError(ts, msg, stack, type, exc_class) {
+    errors.push({ ts, msg, stack, type, exc_class });
     if (errors.length > 50) errors.shift();
     renderErrors();
   }
@@ -636,12 +658,33 @@
     for (let i = errors.length - 1; i >= 0; i--) {
       const e = errors[i];
       const div = document.createElement("div");
-      div.className = "err-item";
-      div.innerHTML = '<span class="ts">' + fmtTs(e.ts) + '</span>' + escape(e.msg) +
+      const colorCls = ERROR_TYPE_COLOR[e.type] || "error-gray";
+      div.className = "err-item " + colorCls;
+      const label = ERROR_TYPE_LABEL[e.type] || ERROR_TYPE_LABEL.unknown;
+      const typeChip = '<span class="err-type">' + escape(label) + '</span>';
+      div.innerHTML = '<span class="ts">' + fmtTs(e.ts) + '</span>' +
+        typeChip + escape(e.msg) +
+        (e.exc_class ? '<span class="err-cls">' + escape(e.exc_class) + '</span>' : "") +
         (e.stack ? '<div class="stack">' + escape(e.stack) + '</div>' : "");
       div.addEventListener("click", () => div.classList.toggle("expanded"));
       errList.appendChild(div);
     }
+  }
+  // Normalise both legacy (string) and typed (dict) error payloads into
+  // a single {msg, type, exc_class} shape for pushError.
+  function normaliseErrorPayload(data) {
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      return {
+        msg: String(data.message || data.msg || JSON.stringify(data)),
+        type: String(data.type || "unknown"),
+        exc_class: String(data.exc_class || ""),
+      };
+    }
+    return {
+      msg: typeof data === "string" ? data : String(data),
+      type: "unknown",
+      exc_class: "",
+    };
   }
 
   // ── uptime ───────────────────────────────────────────────────────
@@ -805,7 +848,11 @@
       if (Array.isArray(d.errors) && d.errors.length) {
         // Seed errors panel with anything that happened before this client connected.
         errors = d.errors.slice(-50).map((e) => ({
-          ts: e.ts || Date.now(), msg: e.msg || String(e), stack: e.stack,
+          ts: e.ts || Date.now(),
+          msg: e.message || e.msg || String(e),
+          stack: e.stack,
+          type: e.type || "unknown",
+          exc_class: e.exc_class || "",
         }));
         renderErrors();
       }
@@ -840,7 +887,8 @@
     }
 
     if (ev === "on_error" || ev === "error") {
-      pushError(ts, typeof data === "string" ? data : JSON.stringify(data));
+      const n = normaliseErrorPayload(data);
+      pushError(ts, n.msg, undefined, n.type, n.exc_class);
       return;
     }
   }

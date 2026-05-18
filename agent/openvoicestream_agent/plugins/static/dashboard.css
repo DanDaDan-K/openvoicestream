@@ -291,6 +291,24 @@ canvas.spark { display: block; }
 .err-item .ts { color: var(--muted); margin-right: 6px; }
 .err-item .stack { display: none; white-space: pre-wrap; color: var(--muted); padding: 4px 0 4px 12px; }
 .err-item.expanded .stack { display: block; }
+/* typed-error colours (see ERROR_TYPE_COLOR in dashboard.js) */
+.err-item .err-type {
+  display: inline-block; font-size: 10px; font-weight: 600;
+  padding: 1px 6px; border-radius: 3px; margin-right: 6px;
+  letter-spacing: 0.5px; vertical-align: middle;
+  background: rgba(255,255,255,0.05); color: var(--muted);
+}
+.err-item .err-cls {
+  font-size: 10px; color: var(--muted); margin-left: 6px; font-style: italic;
+}
+.err-item.error-red    { border-left: 3px solid #ef5350; padding-left: 6px; }
+.err-item.error-red    .err-type { background: rgba(239,83,80,0.18); color: #ef5350; }
+.err-item.error-orange { border-left: 3px solid #ffa726; padding-left: 6px; }
+.err-item.error-orange .err-type { background: rgba(255,167,38,0.18); color: #ffa726; }
+.err-item.error-yellow { border-left: 3px solid #ffee58; padding-left: 6px; }
+.err-item.error-yellow .err-type { background: rgba(255,238,88,0.18); color: #ffee58; }
+.err-item.error-gray   { border-left: 3px solid #78909c; padding-left: 6px; }
+.err-item.error-gray   .err-type { background: rgba(120,144,156,0.18); color: #b0bec5; }
 
 /* toast */
 .toast {
