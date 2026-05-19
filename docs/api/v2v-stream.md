@@ -76,8 +76,25 @@ right after the endpoint is latched and precedes the resulting
 `asr_final`. Clients that don't care about these events can ignore
 unknown frame types — emission is unconditional whenever VAD is active.
 
-Plus: **binary frames** = int16 PCM TTS output. The first binary frame is
-a 4-byte little-endian uint32 = sample rate (matches `/tts/stream`).
+Plus: **binary frames** = int16 little-endian PCM TTS output.
+
+**Sample-rate header** (exactly once per WebSocket session): the very
+first binary frame the server sends after the WS handshake is a 4-byte
+little-endian uint32 carrying the TTS sample rate (matches the format
+used by `/tts/stream`). All subsequent binary frames on the same WS
+connection are raw int16 LE PCM at that fixed sample rate — there is
+**no** header on subsequent frames.
+
+The header is **not** re-emitted on utterance boundaries, sentence
+boundaries, `tts_done`, barge-in, `abort`, ASR endpointing, or any
+other state transition. Only a fresh WebSocket connection resets the
+latch and produces a new header. Clients should parse the header once
+on connect and treat every later binary frame as pure PCM payload.
+
+(Implementation reference: `app/main.py:1214,1246-1253` — the
+`sr_header_sent` flag lives in `tts_out_task` scope, is initialized
+`False` on WS connect, set `True` on the first successful synth, and
+never reset for the lifetime of the connection.)
 
 ## Sentence boundaries (TTS input)
 
@@ -170,7 +187,9 @@ async def v2v_session(transcribe_partial_cb, llm_token_stream):
             "vad_silence_ms": 400,
         }))
 
-        sample_rate = None        # parsed from first binary frame
+        sample_rate = None        # parsed once from the first binary
+                                  # frame of the session; all later
+                                  # binary frames are raw PCM
 
         async def upstream():
             # Stream mic PCM up to the server
