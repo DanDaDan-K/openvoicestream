@@ -94,8 +94,11 @@ docker compose -f deploy/docker-compose.yml up -d
 # English only on Jetson.
 LANGUAGE_MODE=en docker compose -f deploy/docker-compose.yml up -d
 
-# Experimental Kokoro TensorRT split path on Jetson Orin Nano.
+# Kokoro TensorRT TTS on Jetson Orin (TTS only, English, 53 speakers).
 OVS_PROFILE=jetson-kokoro-trt docker compose -f deploy/docker-compose.yml up -d
+
+# Paraformer ASR + Kokoro TTS on Jetson Orin (bilingual ASR, English TTS).
+OVS_PROFILE=jetson-paraformer-kokoro docker compose -f deploy/docker-compose.yml up -d
 
 # Qwen3 multilingual ASR/TTS on Jetson Orin NX.
 OVS_PROFILE=jetson-multilang-highperf-nx \
@@ -103,9 +106,10 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 `deploy/install.sh --pull --verify` auto-detects Jetson/RK/RPi when run on the
-target device. The Jetson default stays on the lightweight `zh_en` path because
-it is the fastest path to reproduce. Set a `jetson-multilang-*` profile when
-you want the Qwen3 TensorRT-EdgeLLM route.
+target device. The Jetson default stays on the lightweight `zh_en` path (Paraformer +
+Matcha) because it is the fastest path to reproduce. Use `jetson-paraformer-kokoro`
+for bilingual ASR with expressive English TTS, `jetson-kokoro-trt` for TTS-only,
+or a `jetson-multilang-*` profile for the Qwen3 TensorRT-EdgeLLM route.
 
 ## Table of Contents
 
@@ -170,6 +174,7 @@ Models are selected automatically based on `LANGUAGE_MODE`:
 | Backend | Speed control | Pitch shift | Voice clone | Languages | Streaming |
 |---------|--------------|-------------|-------------|-----------|-----------|
 | Sherpa (zh_en/en) | ✅ | ✅ | ❌ | 2 (zh+en) | ✅ |
+| Kokoro TRT (Jetson) | ❌ | ❌ | ❌ | 1 (en) | ✅ |
 | Qwen3 (multilingual) | ❌ | ❌ | ✅ (x-vector) | 52 | ✅ |
 | RKNN (Rockchip) | ✅ | ✅ | ❌ | 2 (zh+en) | ✅ |
 
@@ -222,6 +227,29 @@ Parameters: `text` (required), `sid` (speaker ID, default 52), `speed` (rate, de
 (Sherpa/Matcha/RKNN). Qwen3-TTS (`multilanguage` profiles) does not currently
 support reliable speed or pitch adjustment, so clients should treat those
 parameters as unsupported on Qwen3.
+
+### Speaker Management
+
+Endpoints for listing, registering, and deleting TTS speakers. Speaker IDs are
+scoped to the active TTS model.
+
+```bash
+# List all speakers for the active TTS model
+curl http://device:8621/tts/speakers
+# {"model_id": "kokoro-multi-lang-v1_0", "default_speaker_id": 52, "speakers": [...]}
+
+# Register a voice-clone embedding (requires VOICE_CLONE capability)
+curl -X POST http://device:8621/tts/speakers/register \
+  -H "Content-Type: application/json" \
+  -d '{"speaker_embedding_b64": "...", "label": "my-voice"}'
+
+# Delete a registered speaker (preset speakers cannot be deleted)
+curl -X DELETE http://device:8621/tts/speakers/42
+```
+
+Kokoro exposes 53 preset speakers (ids 0-52) with per-language voice labels
+(`af_heart`, `bm_george`, `zf_xiaobei`, etc.). Qwen3-TTS exposes voice-clone
+capability via `/tts/clone/embedding` plus persistent registration.
 
 ### TTS Streaming (HTTP)
 
@@ -380,9 +408,10 @@ Additional Kokoro profiles share the same artifact set:
 
 | Profile | Segment tokens | Use |
 |---|---:|---|
-| `jetson-kokoro-trt` / `jetson-kokoro-trt-perf` | 64 | Default performance path. |
+| `jetson-kokoro-trt` / `jetson-kokoro-trt-perf` | 64 | Default performance path (TTS only). |
 | `jetson-kokoro-trt-quality` | 48 | Conservative long-text quality gate. |
 | `jetson-kokoro-trt-long` | 96 | Longer segments, more 256-512 bucket coverage. |
+| `jetson-paraformer-kokoro` | 64 | Paraformer ASR + Kokoro TTS combined (bilingual input, English output). |
 
 The corresponding artifact layout is produced with:
 
@@ -489,6 +518,14 @@ Clone with `--recurse-submodules` to pull `third_party/*`, or run `git submodule
 
 See the 2026-05-18 benchmark report for image size, model volume,
 resident memory, startup time, and concurrency results.
+
+### v2.3
+
+- **Paraformer + Kokoro combined profile** — new `jetson-paraformer-kokoro` profile pairs bilingual Paraformer ASR with Kokoro TensorRT TTS (53 English speakers) on Jetson Orin.
+- **Model-scoped speaker registry** — speaker tables are now per-TTS-model; Kokoro exposes all 53 labeled voices (`af_heart`, `bm_george`, `zf_xiaobei`, etc.).
+- **Speaker management API** — `GET /tts/speakers`, `POST /tts/speakers/register`, `DELETE /tts/speakers/{id}` for listing, registering, and deleting speakers.
+- **Profile loader hardening** — operator-set env keys are preserved across profile reloads; stale keys are cleaned on profile switch.
+- **TTS speaker resolution** — `speaker_kwargs_for_id()` resolves speakers against the active model, unifying the code path across Kokoro, Qwen3, Matcha, and sherpa backends.
 
 ### v2.2
 
