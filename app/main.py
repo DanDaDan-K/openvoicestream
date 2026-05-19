@@ -1793,7 +1793,7 @@ async def v2v_stream(ws: WebSocket):
             stop_event = _threading.Event()
             state["current_tts_stop"] = stop_event
 
-            def _run_synth(s):
+            def _run_synth(s, synth_be):
                 try:
                     stream_kwargs = {"language": tts_language_norm}
                     if tts_speaker_kwargs:
@@ -1801,7 +1801,9 @@ async def v2v_stream(ws: WebSocket):
                     elif tts_voice is not None:
                         stream_kwargs["voice"] = tts_voice  # deprecated
                     if tts_speed is not None:    stream_kwargs["speed"] = tts_speed
-                    for chunk in tts_be.generate_streaming(s, **stream_kwargs):
+                    # FIX_C: use the manager-acquired backend so a reload
+                    # waiting for drain sees this request as inflight.
+                    for chunk in synth_be.generate_streaming(s, **stream_kwargs):
                         if stop_event.is_set():
                             break
                         loop.call_soon_threadsafe(audio_queue.put_nowait, chunk)
@@ -1813,25 +1815,48 @@ async def v2v_stream(ws: WebSocket):
 
             async def drain():
                 nonlocal sr_header_sent
-                # Coord lock per-sentence: cheap on concurrent profiles;
-                # serializes sentences against ASR on serialized profiles.
-                async with coord.acquire("tts"):
-                    if not sr_header_sent:
-                        sr = tts_service.get_sample_rate() if hasattr(tts_service, "get_sample_rate") else 16000
-                        await send_bytes(struct.pack("<I", sr))
-                        sr_header_sent = True
-                    await send_json({"type": v2v_proto.SERVER_TTS_STARTED, "sentence": sentence})
-                    loop.run_in_executor(_get_tts_stream_executor(), _run_synth, sentence)
-                    state["tts_started"] = True
-                    while True:
-                        item = await audio_queue.get()
-                        if item is None:
-                            break
-                        if isinstance(item, tuple) and item[0] == "__error__":
-                            await send_error(f"tts: {item[1]}")
-                            break
-                        await send_bytes(item)
-                    await send_json({"type": v2v_proto.SERVER_TTS_SENTENCE_DONE, "sentence": sentence})
+                # PR5 / FIX_C: take BackendManager.acquire() *per utterance*
+                # so admin reload's drain logic sees this synth as inflight.
+                # Per-utterance (vs per-session) is intentional: v2v sessions
+                # can run for minutes; holding acquire across the whole
+                # session would block every reload until the user hangs up.
+                # _v2v_tts_mgr is captured from the enclosing scope (set
+                # earlier from _try_tts_manager()); fall back to the
+                # already-bound tts_be when manager wiring is absent (partial
+                # config / tests).
+                tts_mgr_local = _v2v_tts_mgr
+                if tts_mgr_local is not None:
+                    acquire_cm = tts_mgr_local.acquire()
+                    synth_backend = await acquire_cm.__aenter__()
+                else:
+                    acquire_cm = None
+                    synth_backend = tts_be
+                try:
+                    # Coord lock per-sentence: cheap on concurrent profiles;
+                    # serializes sentences against ASR on serialized profiles.
+                    async with coord.acquire("tts"):
+                        if not sr_header_sent:
+                            sr = tts_service.get_sample_rate() if hasattr(tts_service, "get_sample_rate") else 16000
+                            await send_bytes(struct.pack("<I", sr))
+                            sr_header_sent = True
+                        await send_json({"type": v2v_proto.SERVER_TTS_STARTED, "sentence": sentence})
+                        loop.run_in_executor(_get_tts_stream_executor(), _run_synth, sentence, synth_backend)
+                        state["tts_started"] = True
+                        while True:
+                            item = await audio_queue.get()
+                            if item is None:
+                                break
+                            if isinstance(item, tuple) and item[0] == "__error__":
+                                await send_error(f"tts: {item[1]}")
+                                break
+                            await send_bytes(item)
+                        await send_json({"type": v2v_proto.SERVER_TTS_SENTENCE_DONE, "sentence": sentence})
+                finally:
+                    if acquire_cm is not None:
+                        try:
+                            await acquire_cm.__aexit__(None, None, None)
+                        except Exception:
+                            logger.exception("v2v tts acquire exit failed")
 
             task = asyncio.create_task(drain())
             state["current_tts_task"] = task
