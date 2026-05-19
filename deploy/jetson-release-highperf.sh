@@ -37,6 +37,8 @@ done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+
 case "$ARTIFACT_SET" in
   orin-nano-*)
     ASR_ENGINE_DIR="$ARTIFACT_ROOT/engines/orin-nano/highperf/asr_thinker_full_fp8embed"
@@ -69,8 +71,6 @@ if [ -z "$PROFILE" ]; then
   esac
   log "auto-selected verify profile: $PROFILE (from artifact set $ARTIFACT_SET)"
 fi
-
-log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 log "build $IMAGE"
 docker build --network=host \
