@@ -206,10 +206,6 @@ def _env_overrides() -> dict[int, SpeakerSpec]:
     return result
 
 
-# Parsed once at module load — env var is immutable after startup.
-_ENV_OVERRIDES: dict[int, SpeakerSpec] = _env_overrides()
-
-
 def _parse_speaker_entry(sid: int, value: Any) -> SpeakerSpec:
     if isinstance(value, dict):
         typ = str(value.get("type", "preset")).strip().lower()
@@ -225,6 +221,11 @@ def _parse_speaker_entry(sid: int, value: Any) -> SpeakerSpec:
         payload = str(value.get("speaker", value.get("name", "")))
         return SpeakerSpec(id=sid, type="preset", label=label, payload=payload)
     return SpeakerSpec(id=sid, type="preset", label=str(value), payload=str(value))
+
+
+# Parsed once at module load — env var is immutable after startup. Must come
+# after _parse_speaker_entry's definition because _env_overrides() calls it.
+_ENV_OVERRIDES: dict[int, SpeakerSpec] = _env_overrides()
 
 
 def _load_speaker_map(model_id: str) -> dict[int, SpeakerSpec]:
