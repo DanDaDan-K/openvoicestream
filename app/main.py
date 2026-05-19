@@ -947,6 +947,13 @@ async def v2v_stream(ws: WebSocket):
         "asr_session_closed": False,   # client explicitly ended ASR (asr_eos or ws close)
         "endpoint_pending":   None,    # ("vad" | "client_eos"), set by dispatcher,
                                        # consumed by asr_out_task
+        "endpoint_pending_gen": None,  # generation tag for endpoint_pending;
+                                       # if it no longer matches asr_active_gen
+                                       # by the time asr_out_task observes it,
+                                       # the endpoint belongs to a preempted
+                                       # utterance and must NOT fire finalize
+                                       # against the new one (gen-race fix,
+                                       # codex root-cause 2026-05-19).
         "tts_flush":        False,   # set when client tts_flush
         "current_tts_task": None,    # running TTS synth task (cancellable)
         "current_tts_stop": None,    # threading.Event to signal synth thread
@@ -1028,6 +1035,15 @@ async def v2v_stream(ws: WebSocket):
                                 stop.set()
                             async with coord.acquire("asr"):
                                 new_gen = await asr_manager.on_speech_start()
+                            # Clear any stale endpoint from the previous
+                            # utterance — a VAD speech-end that was pending
+                            # finalize while this new speech-start preempted
+                            # it must NOT cause asr_out_task to call
+                            # finalize() against the fresh generation
+                            # (codex root-cause 2026-05-19: stale endpoint
+                            # firing on the wrong generation).
+                            state["endpoint_pending"] = None
+                            state["endpoint_pending_gen"] = None
                             state["asr_active"] = True
                             state["asr_active_gen"] = new_gen
                             speech_started_now = True
@@ -1042,6 +1058,8 @@ async def v2v_stream(ws: WebSocket):
                     if vad is None and not state["asr_active"]:
                         async with coord.acquire("asr"):
                             new_gen = await asr_manager.on_speech_start()
+                        state["endpoint_pending"] = None
+                        state["endpoint_pending_gen"] = None
                         state["asr_active"] = True
                         state["asr_active_gen"] = new_gen
                     if state["asr_active"]:
@@ -1053,6 +1071,7 @@ async def v2v_stream(ws: WebSocket):
                     # poll and call finalize().
                     if speech_ended_now:
                         state["endpoint_pending"] = "vad"
+                        state["endpoint_pending_gen"] = state["asr_active_gen"]
                         if not multi_utterance:
                             state["asr_session_closed"] = True
                         # Notify client of VAD speech_end so it can update
@@ -1084,6 +1103,7 @@ async def v2v_stream(ws: WebSocket):
                     state["tts_flush"] = True
                 elif typ == v2v_proto.CLIENT_ASR_EOS:
                     state["endpoint_pending"] = "client_eos"
+                    state["endpoint_pending_gen"] = state["asr_active_gen"]
                     if not multi_utterance:
                         state["asr_session_closed"] = True
                 elif typ == v2v_proto.CLIENT_ABORT:
@@ -1137,6 +1157,23 @@ async def v2v_stream(ws: WebSocket):
                                      "text": partial, "is_stable": bool(is_endpoint)})
 
             endpoint_reason = state["endpoint_pending"]
+            # Gen-race gate: if endpoint_pending was stamped against a
+            # generation that has since been preempted (VAD speech-start
+            # of a new utterance, or post-worker-restart on_speech_start),
+            # drop it on the floor instead of firing finalize against the
+            # *new* active utterance. Without this gate the new utterance
+            # gets finalized too early and the manager rejects the result
+            # with "finalize result discarded (state=ACTIVE)"
+            # (codex root-cause 2026-05-19).
+            if (
+                endpoint_reason
+                and state.get("endpoint_pending_gen") is not None
+                and state.get("endpoint_pending_gen") != state["asr_active_gen"]
+            ):
+                state["endpoint_pending"] = None
+                state["endpoint_pending_gen"] = None
+                endpoint_reason = None
+
             endpoint_fired = (
                 bool(endpoint_reason)
                 or (is_endpoint and state["asr_active"])
@@ -1145,6 +1182,7 @@ async def v2v_stream(ws: WebSocket):
             if endpoint_fired:
                 # Drain pending flag now to avoid double-firing.
                 state["endpoint_pending"] = None
+                state["endpoint_pending_gen"] = None
                 # Emit asr_endpoint only for VAD / backend endpoints,
                 # not client-driven eos.
                 if endpoint_reason != "client_eos":

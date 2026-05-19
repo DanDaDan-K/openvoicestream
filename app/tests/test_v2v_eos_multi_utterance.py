@@ -442,6 +442,7 @@ def test_asr_eos_branch_has_multi_utterance_guard():
     needle = (
         "CLIENT_ASR_EOS:\n"
         "                    state[\"endpoint_pending\"] = \"client_eos\"\n"
+        "                    state[\"endpoint_pending_gen\"] = state[\"asr_active_gen\"]\n"
         "                    if not multi_utterance:\n"
         "                        state[\"asr_session_closed\"] = True"
     )
