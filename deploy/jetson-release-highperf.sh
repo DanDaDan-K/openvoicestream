@@ -12,7 +12,7 @@ ARTIFACT_SET="${QWEN3_ARTIFACT_SET:-orin-nano-highperf-2026-05-10}"
 ARTIFACT_ROOT="${QWEN3_ARTIFACT_ROOT:-/opt/models/qwen3-edgellm}"
 SERVICE_PORT="${SERVICE_PORT:-18621}"
 CONTAINER="${CONTAINER:-ovs-highperf-verify}"
-PROFILE="${OVS_PROFILE:-jetson-multilang-highperf}"
+PROFILE="${OVS_PROFILE:-}"
 PUSH=0
 EXPORT_TAR=""
 
@@ -55,6 +55,20 @@ case "$ARTIFACT_SET" in
     exit 2
     ;;
 esac
+
+# Pick the default verify profile from the artifact set when the caller
+# did not pass --profile / OVS_PROFILE. The verify container reads
+# OVS_PROFILE to know which artifact set + engine paths to look for, so
+# building for orin-nx with the orin-nano default profile makes the
+# runtime ensure_models() step look for the wrong artifact set.
+if [ -z "$PROFILE" ]; then
+  case "$ARTIFACT_SET" in
+    orin-nx-*)   PROFILE="jetson-multilang-highperf-nx" ;;
+    orin-nano-*) PROFILE="jetson-multilang-highperf" ;;
+    *)           PROFILE="jetson-multilang-highperf" ;;
+  esac
+  log "auto-selected verify profile: $PROFILE (from artifact set $ARTIFACT_SET)"
+fi
 
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
