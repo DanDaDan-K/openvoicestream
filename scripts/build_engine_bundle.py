@@ -5,8 +5,9 @@ HuggingFace manifest for upload.
 Workflow:
   1. Detect host signature (same logic as app/core/engine_resolver).
   2. For each engine declared in a profile's required_engines:
-       - call its build_script via env (WS auto-picked per device tier)
-       - read the produced .engine / .plan
+       - call its build_script via env (WS auto-picked per device tier), unless
+         --skip-build is set
+       - read the produced or pre-existing .engine / .plan
   3. Pack engines per-model into models/<m>/engines/<host_sig>.tar.gz
   4. Compute SHA-256 of each artifact + write models/<m>/manifest.json
 
@@ -77,6 +78,7 @@ def _bundle_per_model(
     profile: dict,
     host: engine_resolver.HostSignature,
     out_root: Path,
+    skip_build: bool,
 ) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
     by_model: dict[str, list[engine_resolver.EngineSpec]] = {}
@@ -90,8 +92,13 @@ def _bundle_per_model(
         engines_dir.mkdir(parents=True, exist_ok=True)
 
         # ── Build each engine in-place (target path = profile.engine_path) ──
-        for spec in specs:
-            _compile_one(spec, host)
+        if not skip_build:
+            for spec in specs:
+                _compile_one(spec, host)
+        else:
+            missing = [str(spec.engine_path) for spec in specs if not spec.hf_only and not spec.engine_path.exists()]
+            if missing:
+                raise FileNotFoundError(f"--skip-build requested but engine(s) missing: {missing}")
 
         # ── Tar.gz the engines belonging to this model ──
         bundle_path = engines_dir / f"{host.key}.tar.gz"
@@ -102,7 +109,7 @@ def _bundle_per_model(
             for spec in specs:
                 if spec.hf_only or not spec.engine_path.exists():
                     continue
-                for engine_path in _bundle_engine_paths(spec):
+                for engine_path in [*_bundle_engine_paths(spec), *_bundle_extra_paths(spec)]:
                     if not engine_path.exists() or engine_path in added:
                         continue
                     tf.add(engine_path, arcname=engine_path.name)
@@ -122,14 +129,8 @@ def _bundle_per_model(
         }
         # Also include ONNX inputs if present and requested.
         for spec in specs:
-            for rel_onnx, onnx_src in _bundle_onnx_paths(spec):
-                onnx_dst = model_dir / rel_onnx
-                onnx_dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(onnx_src, onnx_dst)
-                files[rel_onnx] = {
-                    "sha256": _sha256(onnx_dst),
-                    "size": onnx_dst.stat().st_size,
-                }
+            for rel_onnx, onnx_src in [*_bundle_onnx_paths(spec), *_bundle_extra_manifest_paths(spec)]:
+                _copy_manifest_file(model_dir, files, rel_onnx, onnx_src)
 
         manifest = {
             "model_id": model_id,
@@ -210,10 +211,35 @@ def _bundle_onnx_paths(spec: engine_resolver.EngineSpec) -> list[tuple[str, Path
     return result
 
 
+def _bundle_extra_paths(spec: engine_resolver.EngineSpec) -> list[Path]:
+    return [path for path in engine_resolver._extra_file_paths(spec) if path.exists()]
+
+
+def _bundle_extra_manifest_paths(spec: engine_resolver.EngineSpec) -> list[tuple[str, Path]]:
+    root = spec.engine_path.parent.parent
+    result: list[tuple[str, Path]] = []
+    for path in _bundle_extra_paths(spec):
+        rel = engine_resolver._path_under(path, root)
+        if rel is not None:
+            result.append((rel.as_posix(), path))
+    return result
+
+
+def _copy_manifest_file(model_dir: Path, files: dict[str, dict], rel_path: str, src: Path) -> None:
+    dst = model_dir / rel_path
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    files[rel_path] = {
+        "sha256": _sha256(dst),
+        "size": dst.stat().st_size,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", required=True, help="profile JSON path")
     ap.add_argument("--out", required=True, help="output root for the artifact tree")
+    ap.add_argument("--skip-build", action="store_true", help="package existing engines without rebuilding")
     args = ap.parse_args()
 
     profile = json.loads(Path(args.profile).read_text())
@@ -221,7 +247,7 @@ def main() -> int:
     logger.info("host signature: %s", host.key)
     logger.info("profile: %s", profile.get("name"))
 
-    _bundle_per_model(profile, host, Path(args.out))
+    _bundle_per_model(profile, host, Path(args.out), skip_build=args.skip_build)
     logger.info("done")
     return 0
 

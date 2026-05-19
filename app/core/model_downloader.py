@@ -48,7 +48,7 @@ _REQUIRED_FILES = {
     "matcha-icefall-zh-en": ("model-steps-3.onnx", "tokens.txt", "lexicon.txt"),
     "paraformer-streaming": ("encoder.onnx", "tokens.txt"),
     "zipformer-en": ("encoder.int8.onnx", "tokens.txt"),
-    "kokoro-multi-lang-v1_0": ("model.onnx",),
+    "kokoro-multi-lang-v1_0": ("model.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt"),
     "sensevoice": ("model.int8.onnx",),
 }
 
@@ -107,7 +107,17 @@ def _download_and_extract(url: str, dest_dir: str) -> None:
 
 def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") -> None:
     """Ensure all required models for the given language mode are present."""
-    if language_mode == "rk":
+    try:
+        from app.core.profile_loader import current_profile
+        tts_backend = (current_profile() or {}).get("tts_backend")
+    except Exception:
+        tts_backend = None
+
+    if tts_backend == "jetson.kokoro_trt":
+        kokoro = MODELS.get("en", {}).get("kokoro-multi-lang-v1_0")
+        required = {"kokoro-multi-lang-v1_0": kokoro} if kokoro else {}
+
+    elif language_mode == "rk":
         _ensure_rk_artifacts()
         if os.environ.get("RK_ENSURE_MATCHA_RESOURCES", "1").lower() in ("0", "false", "no"):
             return
@@ -120,11 +130,6 @@ def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") 
         # Some multilanguage profiles pair Qwen3 ASR with Matcha TTS. Only
         # those need the Matcha acoustic ONNX + lexicon; pure Qwen3 profiles
         # should not download or validate Matcha assets during startup.
-        try:
-            from app.core.profile_loader import current_profile
-            tts_backend = (current_profile() or {}).get("tts_backend")
-        except Exception:
-            tts_backend = None
         matcha = MODELS.get("zh_en", {}).get("matcha-icefall-zh-en")
         if tts_backend == "jetson.matcha_trt" and matcha:
             required = {"matcha-icefall-zh-en": matcha}
@@ -163,7 +168,7 @@ def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") 
 
     if not missing:
         logger.info("All models for mode '%s' are ready.", language_mode)
-        if language_mode == "en":
+        if language_mode == "en" or "kokoro-multi-lang-v1_0" in required:
             _patch_kokoro_voices(model_dir)
         return
 
@@ -179,7 +184,10 @@ def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") 
         if cdn_file.startswith("http"):
             url = cdn_file
         elif cdn_file == "kokoro-multi-lang-v1_0.tar.bz2":
-            url = f"https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/{cdn_file}"
+            url = os.environ.get(
+                "KOKORO_MODEL_URL",
+                f"https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/{cdn_file}",
+            )
         else:
             url = f"{CDN_BASE}/{cdn_file}"
         logger.info("Downloading %s ...", desc)
@@ -194,7 +202,7 @@ def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") 
             )
             sys.exit(1)
 
-    if language_mode == "en":
+    if language_mode == "en" or "kokoro-multi-lang-v1_0" in required:
         _patch_kokoro_voices(model_dir)
 
 

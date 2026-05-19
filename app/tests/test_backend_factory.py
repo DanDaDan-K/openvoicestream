@@ -100,3 +100,17 @@ def test_unknown_asr_backend_raises(monkeypatch, fresh_factory):
     _patch_profile(monkeypatch, {"asr_backend": "nonexistent.backend"})
     with pytest.raises(ValueError, match="Unknown asr_backend"):
         fresh_factory()
+
+
+def test_profile_selects_kokoro_trt_tts(monkeypatch):
+    cls = _inject_module(
+        monkeypatch, "app.backends.jetson.kokoro_trt", "KokoroTRTBackend"
+    )
+    _patch_profile(monkeypatch, {"tts_backend": "jetson.kokoro_trt"})
+
+    from app.core import tts_backend
+    importlib.reload(tts_backend)
+    result = tts_backend.create_tts_backend()
+
+    cls.assert_called_once()
+    assert result is cls.return_value

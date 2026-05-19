@@ -94,6 +94,9 @@ docker compose -f deploy/docker-compose.yml up -d
 # English only on Jetson.
 LANGUAGE_MODE=en docker compose -f deploy/docker-compose.yml up -d
 
+# Experimental Kokoro TensorRT split path on Jetson Orin Nano.
+OVS_PROFILE=jetson-kokoro-trt docker compose -f deploy/docker-compose.yml up -d
+
 # Qwen3 multilingual ASR/TTS on Jetson Orin NX.
 OVS_PROFILE=jetson-multilang-highperf-nx \
 docker compose -f deploy/docker-compose.yml up -d
@@ -354,6 +357,49 @@ This sets MAXN power mode, locks CPU/GPU clocks, and disables dynamic frequency 
 
 Copy `.env.example` to `.env` to customize.
 
+### Jetson Kokoro TensorRT Profile
+
+`OVS_PROFILE=jetson-kokoro-trt` enables the validated Kokoro split-generator
+runtime on Jetson Orin. The path is:
+
+```text
+TRT encoder prefix -> CPU length regulator -> TRT decoder backbone FP16
+-> TRT source BF16 -> TRT generator rest FP16 -> CPU post/ISTFT
+```
+
+The profile declares its TensorRT engines in `required_engines`, so startup
+uses the normal artifact resolver: cache hit, then prebuilt artifact bundle,
+then local Jetson build fallback via `scripts/build_kokoro_split_generator_trt.sh`.
+It ships two generator buckets: `64-256` frames and `256-512` frames. Streaming
+requests also have a backend-level phoneme-token splitter
+(`KOKORO_STREAM_MAX_SEGMENT_TOKENS`, default `64`) so long unpunctuated text is
+bounded before it reaches TensorRT; non-streaming `/tts` uses the same guard
+instead of silently truncating long input.
+
+Additional Kokoro profiles share the same artifact set:
+
+| Profile | Segment tokens | Use |
+|---|---:|---|
+| `jetson-kokoro-trt` / `jetson-kokoro-trt-perf` | 64 | Default performance path. |
+| `jetson-kokoro-trt-quality` | 48 | Conservative long-text quality gate. |
+| `jetson-kokoro-trt-long` | 96 | Longer segments, more 256-512 bucket coverage. |
+
+The corresponding artifact layout is produced with:
+
+```bash
+python3 scripts/build_engine_bundle.py \
+  --profile configs/profiles/jetson-kokoro-trt.json \
+  --out /tmp/seeed-local-voice-kokoro-artifacts \
+  --skip-build
+```
+
+The frozen artifact record is
+[`deploy/artifacts/kokoro_trt_manifest.json`](deploy/artifacts/kokoro_trt_manifest.json);
+the reproduction and TTS-to-ASR gate are documented in
+[`docs/kokoro-trt-reproduction.md`](docs/kokoro-trt-reproduction.md).
+Use `scripts/verify_tts_asr_roundtrip.py` when Kokoro TTS and the local ASR
+service are exposed on separate ports.
+
 ## Models
 
 Auto-downloaded on first start and cached in a Docker volume:
@@ -414,6 +460,7 @@ openvoicestream/
 ├── bench/                   # Streaming + V2V latency benchmarks (perf harness)
 ├── patches/                 # Paraformer EOF truncation fix
 ├── scripts/                 # Engine build, model download, diagnostics
+│   └── kokoro_experiments/  # Archived Kokoro graph-surgery investigations
 ├── examples/                # API usage examples (TTS streaming, V2V client)
 ├── tests/                   # Integration and E2E tests
 ├── deploy/

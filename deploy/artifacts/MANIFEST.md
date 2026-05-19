@@ -20,6 +20,19 @@ Validated image:
 The lightweight Jetson `zh_en` path still downloads official sherpa-onnx /
 Matcha assets at first boot and does not require Qwen3 artifacts.
 
+## Jetson Kokoro TensorRT Artifacts
+
+| Item | Location | Notes |
+|---|---|---|
+| Kokoro split TensorRT engines and CPU ONNX sidecars | [`harvestsu/seeed-local-voice-artifacts`](https://huggingface.co/harvestsu/seeed-local-voice-artifacts) | Consumed by `OVS_PROFILE=jetson-kokoro-trt*` profiles through the standard engine resolver. |
+| Frozen artifact record | `kokoro_trt_manifest.json` | Host signature, SHA-256, runtime path, compatible profiles, and Nano validation numbers. |
+| Reproduction guide | [`docs/kokoro-trt-reproduction.md`](../../docs/kokoro-trt-reproduction.md) | Build/repack command, profile matrix, and TTS-to-ASR verification flow. |
+
+Validated artifact:
+
+- `models/kokoro-multi-lang-v1_0/engines/sm87-trt10.3-jp6.2-cuda12.6.tar.gz`
+- SHA-256: `4e6e11099624e9900807851c8721fdd61179d0a6a3ebf9132a82765da199c0cb`
+
 ## Rockchip RK3576/RK3588 Artifacts
 
 | Item | Location | Notes |

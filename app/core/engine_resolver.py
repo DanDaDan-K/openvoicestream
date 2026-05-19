@@ -30,6 +30,7 @@ Per-engine schema in profile JSON::
     "onnx_input": "matcha_encoder_s64_trt.onnx", // omit if hf_only
     "build_script": "scripts/build_matcha_engines.sh",   // omit if hf_only
     "build_env": {"ENCODER_NAME": "matcha_encoder_s64_bf16.engine"},
+    "extra_files": ["engines/cpu_length_regulator.onnx"], // model-relative runtime files
     "hf_only": false,                            // true => no compile fallback
     "required": true                             // default true; false => skip on miss
   }
@@ -50,7 +51,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -288,6 +289,7 @@ class EngineSpec:
     build_env: dict
     hf_only: bool
     required: bool
+    extra_files: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "EngineSpec":
@@ -300,6 +302,7 @@ class EngineSpec:
             onnx_input=d.get("onnx_input"),
             build_script=d.get("build_script"),
             build_env=dict(d.get("build_env") or {}),
+            extra_files=list(d.get("extra_files") or []),
             hf_only=bool(d.get("hf_only", False)),
             required=bool(d.get("required", True)),
         )
@@ -369,6 +372,27 @@ def _onnx_manifest_candidates(spec: EngineSpec) -> list[tuple[str, Path]]:
     return rels
 
 
+def _extra_file_paths(spec: EngineSpec) -> list[Path]:
+    root = _model_root(spec)
+    out: list[Path] = []
+    for rel in spec.extra_files:
+        raw = Path(rel)
+        path = raw if raw.is_absolute() else root / raw
+        if _path_under(path, root) is None:
+            logger.warning("extra file for %s escapes model root: %s", spec.engine_file, path)
+            continue
+        out.append(path)
+    return out
+
+
+def _extra_files_exist(spec: EngineSpec) -> bool:
+    missing = [str(path) for path in _extra_file_paths(spec) if not path.exists()]
+    if missing:
+        logger.info("extra runtime files missing for %s: %s", spec.engine_file, missing)
+        return False
+    return True
+
+
 def _try_hf_resolve(spec: EngineSpec, host: HostSignature) -> bool:
     """Try to download a prebuilt bundle matching host_sig.
 
@@ -405,6 +429,12 @@ def _try_hf_resolve(spec: EngineSpec, host: HostSignature) -> bool:
         logger.warning(
             "HF bundle extracted but %s not found — engine name mismatch?",
             spec.engine_path,
+        )
+        return False
+    if not _extra_files_exist(spec):
+        logger.warning(
+            "HF bundle extracted but extra runtime files are missing for %s",
+            spec.engine_file,
         )
         return False
 
@@ -581,7 +611,7 @@ def resolve_all(profile: dict) -> dict[str, Path]:
 
 
 def _resolve_one(spec: EngineSpec, host: HostSignature, force_rebuild: bool) -> None:
-    if not force_rebuild and _meta_matches(spec.engine_path, host):
+    if not force_rebuild and _meta_matches(spec.engine_path, host) and _extra_files_exist(spec):
         logger.info("cache hit: %s (host=%s)", spec.engine_path.name, host.key)
         return
 
