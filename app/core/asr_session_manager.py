@@ -94,6 +94,15 @@ class ASRSessionManager:
         self._stream: Any = None
         self._generation: int = 0
         self._last_error: Optional[BaseException] = None
+        # Coalesce concurrent error notifications: while a recovery is
+        # in progress, further mark_error / _handle_error_locked calls
+        # for the same generation collapse to a no-op so we don't kick
+        # off N restart_worker() calls for one stuck worker.
+        self._recovery_in_progress: bool = False
+        # Shared future for coalescing concurrent _async_mark_error calls
+        # within one error window. While this is non-None, additional
+        # callers await it instead of triggering their own rebuild.
+        self._recovery_future: Optional[asyncio.Future] = None
 
     # ── public introspection ───────────────────────────────────────────
     @property
@@ -162,6 +171,12 @@ class ASRSessionManager:
         """Push a chunk of audio at the current stream.
 
         No-op outside ACTIVE. Failures route to ERROR_REBUILD.
+
+        Recovery note: the audio chunk that triggers ERROR_REBUILD is
+        dropped, not replayed. Callers are responsible for retransmit if
+        needed; in this codebase none do, which is acceptable because
+        VAD will re-trigger on the next speech burst and ASR backends
+        only need recent audio context, not the lost frame.
         """
         # Take the snapshot under the lock, then release before the long
         # IO call so other transitions (cancel/finalize) aren't blocked.
@@ -187,33 +202,78 @@ class ASRSessionManager:
         """Transition ACTIVE→FINALIZING→IDLE; return final text.
 
         Returns "" if not in a finalizable state (defensive — caller may
-        race with cancel).
+        race with cancel). For callers that need to guard shared state
+        against stale finalize completions (e.g. ``asr_active`` flags),
+        prefer :meth:`finalize_with_generation`.
+        """
+        _gen, text = await self.finalize_with_generation(reason)
+        return text
+
+    async def finalize_with_generation(self, reason: str = "vad_end") -> tuple[int, str]:
+        """Like :meth:`finalize` but returns ``(generation_id, text)``.
+
+        ``generation_id`` is the generation the finalize ran against.
+        Callers should compare against :attr:`current_generation` BEFORE
+        mutating shared state (e.g. clearing ``asr_active``): if a new
+        speech_start preempted us while finalize was in flight, the
+        current generation will already have advanced and the caller
+        must not clobber it.
+
+        Returns ``(gen, "")`` on no-op / discarded paths.
         """
         async with self._lock:
             if self._state not in (SessionState.ACTIVE,):
-                return ""
+                return self._generation, ""
+            gen = self._generation
             self._state = SessionState.FINALIZING
             stream = self._stream
         if stream is None:
             async with self._lock:
                 self._state = SessionState.IDLE
-            return ""
+            return gen, ""
         try:
             final_text = await self._run_sync(stream.finalize)
         except Exception as exc:  # noqa: BLE001
             async with self._lock:
                 await self._handle_error_locked(exc)
-            return ""
+            return gen, ""
         async with self._lock:
             # If a cancel raced past us (e.g. abort-during-FINALIZING),
             # the cancel routine will have moved us into CANCELLING and
             # already discarded the result. Honor that.
             if self._state != SessionState.FINALIZING:
                 logger.info("ASRSessionManager: finalize result discarded (state=%s)", self._state)
-                return ""
+                return gen, ""
+            # Also drop if the generation advanced (a new speech_start
+            # raced past us via _inner_cancel/preempt).
+            if self._generation != gen:
+                logger.info(
+                    "ASRSessionManager: finalize result discarded (stale gen %d != current %d)",
+                    gen, self._generation,
+                )
+                return gen, ""
             self._stream = None
             self._state = SessionState.IDLE
-            return final_text or ""
+            return gen, final_text or ""
+
+    async def get_partial_for_generation(self) -> tuple[int, str, bool]:
+        """Snapshot ``(generation, partial_text, is_endpoint)`` atomically.
+
+        Returns ``(generation, "", False)`` if there's no active stream.
+        Callers should compare ``generation`` against
+        :attr:`current_generation` before emitting partials downstream
+        to drop partials that leaked from a now-replaced stream.
+        """
+        async with self._lock:
+            gen = self._generation
+            stream = self._stream
+            if stream is None or self._state != SessionState.ACTIVE:
+                return gen, "", False
+        try:
+            partial, is_endpoint = await self._run_sync(stream.get_partial)
+        except Exception:  # noqa: BLE001
+            return gen, "", False
+        return gen, partial or "", bool(is_endpoint)
 
     async def cancel(self, reason: str = "bargein") -> None:
         async with self._lock:
@@ -281,15 +341,58 @@ class ASRSessionManager:
             asyncio.ensure_future(self._async_mark_error(exc), loop=loop)
 
     async def _async_mark_error(self, exc: BaseException) -> None:
-        async with self._lock:
-            await self._handle_error_locked(exc)
+        # Coalesce concurrent error notifications onto a single shared
+        # recovery future so 5 simultaneous mark_error calls produce one
+        # restart, not five. The lock check is cheap.
+        fut: Optional[asyncio.Future] = None
+        own_recovery = False
+        # Critical section to claim/observe the shared future. We can't
+        # use self._lock here because the recovery itself holds it; use
+        # a small synchronous check on a dedicated coalescing flag set
+        # transactionally with the future.
+        if self._recovery_future is not None and not self._recovery_future.done():
+            fut = self._recovery_future
+        else:
+            loop = self._get_loop()
+            self._recovery_future = loop.create_future()
+            own_recovery = True
+            fut = self._recovery_future
+
+        if not own_recovery:
+            try:
+                await fut
+            except Exception:
+                pass
+            return
+
+        try:
+            async with self._lock:
+                await self._handle_error_locked(exc)
+        finally:
+            if not fut.done():
+                fut.set_result(None)
+            self._recovery_future = None
 
     async def _handle_error_locked(self, exc: BaseException) -> None:
         self._last_error = exc
+        # Coalesce: if another recovery is already running for this
+        # session (e.g. 5 partial pollers all saw the same worker exit
+        # and called mark_error), let the first one drive recovery
+        # alone. Without this guard, each call would fire its own
+        # restart_worker() pass on top of the 3-attempt retry schedule.
+        if self._recovery_in_progress:
+            return
+        self._recovery_in_progress = True
         self._stream = None
         self._state = SessionState.ERROR_REBUILD
         if not _is_worker_protocol_error(exc):
             logger.info("ASRSessionManager: non-protocol error during ASR: %s", exc)
+        try:
+            await self._do_rebuild_locked()
+        finally:
+            self._recovery_in_progress = False
+
+    async def _do_rebuild_locked(self) -> None:
         for attempt, delay in enumerate(self._REBUILD_BACKOFF_S):
             await asyncio.sleep(delay)
             try:
@@ -322,8 +425,17 @@ class ASRSessionManager:
         fn = getattr(backend, "restart_worker", None)
         if fn is None:
             return
+        # IMPORTANT: do NOT submit to ``self._executor``. That executor is
+        # the single-thread ASR slot, which is exactly the thread that's
+        # currently wedged on a stuck worker request. Queuing restart
+        # behind it would deadlock. The default executor (``None``) is a
+        # multi-thread pool and is always free, which is what we need to
+        # forcibly kill the worker subprocess from outside the wedged
+        # thread. See trt_edge_llm_asr.restart_worker for why it must
+        # NOT acquire ``_worker_lock``.
+        loop = self._get_loop()
         try:
-            await self._run_sync(fn)
+            await loop.run_in_executor(None, fn)
             logger.info("ASRSessionManager: backend.restart_worker() completed")
         except Exception as exc:  # noqa: BLE001
             logger.warning("ASRSessionManager: restart_worker failed: %s", exc)
