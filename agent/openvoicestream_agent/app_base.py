@@ -73,6 +73,41 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ── Low-signal ASR final filter ─────────────────────────────────────
+# An open-mic always-on pipeline will, fairly often, emit ASR finals
+# that are just one Chinese character or one English letter — these
+# are almost always noise / ambient speech / breath the silero VAD
+# happened to clip out, NOT real intent. Routing them to the LLM
+# triggers a "safe fallback" reply ("我在这里呢…") that, after a few
+# repeats, locks a small quantised model into an echo loop where it
+# emits the same fallback forever no matter what you say next.
+_INTERJECTIONS: frozenset[str] = frozenset(
+    {
+        # Chinese: noncommittal acknowledgements / filler.
+        "嗯", "啊", "哦", "呃", "唉", "诶", "哎", "噢", "唔", "呀", "哈",
+        "哇", "呢", "吧", "吗", "呐", "嘛", "诶呀", "啊啊", "嗯嗯",
+        # English: same idea — too short to convey intent on a voice mic.
+        "uh", "um", "ah", "oh", "ok", "okay", "hmm", "huh", "yeah", "yep",
+        "you", "the", "and", "a", "i",
+    }
+)
+
+
+def _strip_for_signal(text: str) -> str:
+    """Return the input with whitespace + common punctuation removed,
+    lowercased, for low-signal comparison against ``_INTERJECTIONS``.
+    Keeps Chinese chars and ASCII alphanumerics as-is.
+    """
+    import unicodedata
+    out: list[str] = []
+    for ch in text:
+        cat = unicodedata.category(ch)
+        # Drop separators / punctuation; keep letters and digits.
+        if cat[0] in {"L", "N"}:
+            out.append(ch)
+    return "".join(out).lower()
+
+
 def _build_llm(config: Config) -> LLMBackend:
     backend = config.llm_backend.lower()
     if backend == "edge_llm":
@@ -174,6 +209,10 @@ class BaseApp:
         # on mic noise. Started in send_asr_eos_once, cancelled in the
         # ASRFinal / SLVError / reconnect paths.
         self._asr_watchdog_task: asyncio.Task | None = None
+        # Dashboard mic RMS is a best-effort visualization signal. Never let
+        # a slow browser/plugin backpressure the hot mic pump; at most one
+        # RMS hook fanout may be in flight and newer samples are dropped.
+        self._mic_rms_broadcast_task: asyncio.Task | None = None
         # Rate-limited stop-word matcher cache (compiled per Config update).
         self._stop_words_cache: tuple[list[str], list[str]] | None = None
 
@@ -266,6 +305,15 @@ class BaseApp:
             await self._broadcast("on_wake", {"source": source})
         except Exception:
             logger.exception("on_wake broadcast failed")
+        # Clear the playback discard latch sleep() armed — otherwise the
+        # first post-wake TTS (especially typed-text path with no ASRFinal)
+        # would be silently dropped.
+        try:
+            arm = getattr(self.audio, "arm_for_next_turn", None)
+            if callable(arm):
+                arm()
+        except Exception:  # pragma: no cover - defensive
+            pass
         self._set_state(ConvState.IDLE)
         self._reset_sleep_timer()
 
@@ -428,6 +476,53 @@ class BaseApp:
 
     # ── internal pumps ──────────────────────────────────────────────
 
+    async def _send_audio_nonblocking(self, pcm: bytes) -> None:
+        """Send a mic chunk to SLV with a short ceiling on how long the
+        send may block.
+
+        Why: ``SLVClient._send_lock`` serialises the send half of the WS,
+        and the dispatch loop's auto-reconnect (``slv.reconnect()``) holds
+        the same lock for the duration of a fresh ``ws_connect`` — which
+        can stall for several seconds on a network blip / DNS hiccup.
+        Without a ceiling here, every mic chunk during reconnect parks on
+        the lock, the mic_pump coroutine stops draining its input queue,
+        sounddevice's callback thread floods ``call_soon_threadsafe`` with
+        un-consumed PCM, and the log starts hemorrhaging
+        ``mic queue full -- dropping chunk`` for the entire outage —
+        which is exactly the "agent feels dead" symptom.
+
+        Bounded wait + drop is the right trade for a mic stream: the
+        chunks we drop while SLV is briefly unreachable would have been
+        useless anyway (the WS that would have carried them is closed),
+        and the post-reconnect first ASR utterance starts from fresh
+        chunks. Pre-roll is still preserved for the *current* speech
+        segment whose onset already won the VAD race.
+        """
+        try:
+            await asyncio.wait_for(self.slv.send_audio(pcm), timeout=0.5)
+        except asyncio.TimeoutError:
+            # SLV is mid-reconnect / unreachable; don't wedge the mic pump.
+            # Logged at debug to avoid floods during normal reconnect blips.
+            logger.debug("send_audio timed out (slv reconnecting?); dropping chunk")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("send_audio failed; dropping chunk", exc_info=True)
+
+    def _schedule_mic_rms_broadcast(self, data: dict) -> bool:
+        task = getattr(self, "_mic_rms_broadcast_task", None)
+        if task is not None and not task.done():
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        self._mic_rms_broadcast_task = loop.create_task(
+            self._broadcast("on_mic_rms", data),
+            name="mic-rms-broadcast",
+        )
+        return True
+
     async def _mic_pump(self) -> None:
         """Mic capture loop. When client VAD is enabled, only forwards audio
         to SLV during (and just before) actual speech — pre-roll buffer
@@ -474,16 +569,15 @@ class BaseApp:
                         else:
                             rms = 0.0
                         thr = float(getattr(self.config, "client_vad_threshold", None) or 0.012)
-                        await self._broadcast(
-                            "on_mic_rms",
-                            {"rms": rms, "threshold": thr, "state": self._vad_state},
+                        self._schedule_mic_rms_broadcast(
+                            {"rms": rms, "threshold": thr, "state": self._vad_state}
                         )
                     except Exception:  # pragma: no cover - defensive
                         pass
 
                 if self._client_vad is None:
                     # No VAD configured: stream everything (legacy behaviour).
-                    await self.slv.send_audio(chunk)
+                    await self._send_audio_nonblocking(chunk)
                     continue
 
                 # Update VAD first; it may transition idle→speech this chunk.
@@ -497,9 +591,9 @@ class BaseApp:
                     # this chunk plus subsequent ones in real time.
                     if preroll:
                         for buffered in preroll:
-                            await self.slv.send_audio(buffered)
+                            await self._send_audio_nonblocking(buffered)
                         preroll.clear()
-                    await self.slv.send_audio(chunk)
+                    await self._send_audio_nonblocking(chunk)
                 else:
                     # Idle: keep a short rolling buffer but don't transmit.
                     preroll.append(chunk)
@@ -545,6 +639,47 @@ class BaseApp:
             task.cancel()
         self._asr_watchdog_task = None
 
+    async def _interrupt_current_turn_for_barge_in(self) -> None:
+        """Stop the audible assistant turn before accepting barge-in audio.
+
+        Barge-in semantics are intentionally ordered:
+          1. cancel the local LLM streaming task so no more text is sent;
+          2. stop local speaker playback immediately;
+          3. send SLV's in-band abort control to cancel the already queued /
+             in-flight TTS synthesis;
+          4. keep the SLV WebSocket alive so the user's current speech keeps
+             flowing to ASR without a reconnect gap.
+
+        The current SLV protocol multiplexes ASR input and TTS output on one
+        connection. Closing/reconnecting it here also drops exactly the audio
+        we need for the barge-in utterance, which turns an immediate interrupt
+        into a multi-second delayed response. The right control is the in-band
+        `abort` frame: SLV cancels current TTS and drains queued sentences
+        without tearing down the WebSocket.
+        """
+        if self._llm_turn_task is not None and not self._llm_turn_task.done():
+            self._llm_turn_task.cancel()
+            try:
+                await self._llm_turn_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        try:
+            await self.audio.stop_playback()
+        except Exception:
+            logger.exception("stop_playback failed during barge-in")
+        try:
+            await asyncio.wait_for(self.slv.abort(), timeout=0.5)
+            logger.info("SLV abort sent during barge-in")
+        except asyncio.TimeoutError:
+            logger.warning("SLV abort timed out during barge-in")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("SLV abort failed during barge-in")
+        self._eos_sent_this_turn = False
+        self._cancel_asr_watchdog()
+        self._first_tts_seen = False
+
     async def _asr_final_watchdog(self) -> None:
         """Force state back to IDLE if asr_final never arrives after asr_eos.
 
@@ -564,6 +699,12 @@ class BaseApp:
         if not getattr(self, "_eos_sent_this_turn", False):
             return
         if getattr(self, "_state", ConvState.IDLE) != ConvState.THINKING:
+            logger.info(
+                "asr_final watchdog fired after state moved to %s; "
+                "clearing stale EOS latch",
+                getattr(self, "_state", ConvState.IDLE).value,
+            )
+            self._eos_sent_this_turn = False
             return
         logger.warning(
             "asr_final not received within %.1fs after asr_eos; "
@@ -598,6 +739,16 @@ class BaseApp:
                     self._vad_silence_ms = 0
                     self._vad_eos_sent = False
                     logger.info("client VAD: speech started")
+                    if (
+                        getattr(self, "_state", ConvState.IDLE) == ConvState.THINKING
+                        and getattr(self, "_eos_sent_this_turn", False)
+                    ):
+                        logger.info(
+                            "client VAD: new speech while waiting for asr_final; "
+                            "starting a fresh ASR turn"
+                        )
+                        self._eos_sent_this_turn = False
+                        self._cancel_asr_watchdog()
                     # If TTS is currently playing, this is a barge-in.
                     # Transition straight to BARGED_IN so the dispatch
                     # loop's later ASRPartial check (which races SLV's
@@ -605,26 +756,9 @@ class BaseApp:
                     # transition. mic_pump fires first because client
                     # VAD detects speech the moment we send chunks.
                     if self.audio.is_playing:
+                        logger.info("BARGE-IN fired (VAD-driven, state=%s)", self._state.value)
                         self._set_state(ConvState.BARGED_IN)
-                        # Also cancel + abort + stop immediately —
-                        # don't wait for the SLV partial roundtrip.
-                        if self._llm_turn_task is not None and not self._llm_turn_task.done():
-                            self._llm_turn_task.cancel()
-                            try:
-                                await self._llm_turn_task
-                            except (asyncio.CancelledError, Exception):
-                                pass
-                        # NOTE: deliberately do NOT call slv.abort() here.
-                        # abort kills SLV's ASR session too, which truncates
-                        # the user's barge-in utterance to whatever Paraformer
-                        # had decoded so far ('不知道怎' instead of '不知道怎么办').
-                        # Local stop_playback already silences the speaker;
-                        # SLV's in-flight TTS audio that keeps streaming over
-                        # the WS is harmlessly discarded by the client. ASR
-                        # then finalises the user's full utterance via the
-                        # normal VAD speech_end → asr_eos → asr_final path.
-                        await self.audio.stop_playback()
-                        self._first_tts_seen = False
+                        await self._interrupt_current_turn_for_barge_in()
                     else:
                         self._set_state(ConvState.LISTENING)
             else:
@@ -663,14 +797,60 @@ class BaseApp:
                 self._vad_silence_ms = 0
 
     async def _slv_dispatch(self) -> None:
-        try:
-            async for evt in self.slv.events():
+        """Drive SLV events into the FSM. Auto-reconnects whenever the
+        events() iterator returns naturally — SLV closes the WS after
+        every asr_eos round (even in multi_utterance mode), and an empty
+        / dropped final means no ASRFinal session_complete=True ever
+        fires the in-band reconnect at line ~768. Without this outer
+        loop the dispatch task silently dies after one bad turn and
+        every subsequent asr_eos hits a closed WS ("send_json: WS closed
+        mid-send" floods the log) — which also kills barge-in because
+        TTS never reaches the speaker again.
+        """
+        backoff = 0.5
+        while not getattr(self.slv, "_closed", False):
+            try:
+                async for evt in self.slv.events():
+                    try:
+                        await self._dispatch_one(evt)
+                    except Exception:
+                        logger.exception("dispatch error on %r", evt)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("slv events iterator crashed")
+            # events() returned: reader died (SLV closed the WS or net
+            # blip). Reconnect and resume — unless we're shutting down.
+            if getattr(self.slv, "_closed", False):
+                return
+            try:
+                logger.info("slv dispatch: reader exited, reconnecting...")
+                await asyncio.wait_for(self.slv.reconnect(), timeout=5.0)
+                self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
+                self._first_tts_seen = False
+                self._eos_sent_this_turn = False
+                self._cancel_asr_watchdog()
+                if getattr(self, "_state", ConvState.IDLE) in {
+                    ConvState.THINKING,
+                    ConvState.BARGED_IN,
+                }:
+                    self._set_state(ConvState.IDLE)
                 try:
-                    await self._dispatch_one(evt)
+                    await self._broadcast(
+                        "on_slv_reconnect", {"count": self._slv_reconnect_count}
+                    )
                 except Exception:
-                    logger.exception("dispatch error on %r", evt)
-        except asyncio.CancelledError:
-            raise
+                    pass
+                backoff = 0.5
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("auto-reconnect failed, sleeping %.1fs", backoff)
+                try:
+                    await asyncio.sleep(backoff)
+                except asyncio.CancelledError:
+                    raise
+                backoff = min(backoff * 2, 5.0)
 
     async def _dispatch_one(self, evt) -> None:  # noqa: ANN001
         # ── pipeline_mode SLEEPING gate ─────────────────────────────
@@ -726,13 +906,7 @@ class BaseApp:
                         await self._llm_turn_task
                     except (asyncio.CancelledError, Exception):
                         pass
-                # See VAD-driven barge-in branch above: no slv.abort() —
-                # it would truncate the user's barge-in utterance.
-                await self.audio.stop_playback()
-                # Re-arm first-TTS-frame detector so the NEXT turn re-emits
-                # the THINKING→SPEAKING transition; otherwise the dashboard
-                # state pill stays stuck after barge-in.
-                self._first_tts_seen = False
+                await self._interrupt_current_turn_for_barge_in()
             await self._broadcast("on_user_partial", evt.text)
             return
 
@@ -755,6 +929,16 @@ class BaseApp:
             # because the watchdog never even arms).
             self._eos_sent_this_turn = False
             if evt.duplicate_of_streamed:
+                # A duplicate final means there is no new utterance to route.
+                # If the duplicate is the only final after client-driven EOS,
+                # cancelling the watchdog and returning here would strand the
+                # FSM in THINKING forever.
+                if getattr(self, "_state", ConvState.IDLE) == ConvState.THINKING:
+                    logger.info(
+                        "duplicate asr_final ignored while THINKING; resetting to IDLE"
+                    )
+                    self._set_state(ConvState.IDLE)
+                    self._reset_sleep_timer()
                 return
             # SLV closes the WS after every asr_eos-triggered final
             # (session_complete=True), regardless of whether the final
@@ -778,15 +962,49 @@ class BaseApp:
             # Drop empty finals — clawd's proven pattern. SLV's server-side
             # VAD or a too-short utterance produces empty text. Treating
             # those as real utterances would call the LLM with no input.
-            if not (evt.text or "").strip():
-                logger.info("empty asr_final ignored (likely VAD noise trigger)")
+            # Also drop *low-signal* finals (1 visible char or pure
+            # interjection / filler): they're almost always ASR noise on
+            # an open mic, and feeding them to the LLM is the canonical
+            # trigger for an in-context echo loop — the model emits a
+            # short "safe" fallback, that fallback enters history, and
+            # after 3-4 such turns the small model latches onto the
+            # pattern and replies with the same canned line forever.
+            stripped_for_signal = _strip_for_signal(evt.text or "")
+            if (
+                not (evt.text or "").strip()
+                or len(stripped_for_signal) <= 1
+                or stripped_for_signal in _INTERJECTIONS
+            ):
+                logger.info(
+                    "low-signal asr_final ignored (text=%r, signal=%r)",
+                    (evt.text or "")[:30], stripped_for_signal,
+                )
                 # State must NOT stay stuck in THINKING when no real text
                 # arrives. Reset back to IDLE so the next user turn can
                 # transition cleanly via LISTENING.
+                # Also clear the discard latch: a prior barge-in may have
+                # set it, and the next intent (which might be typed text
+                # via the dashboard, with no ASRFinal) needs audible TTS.
+                try:
+                    arm = getattr(self.audio, "arm_for_next_turn", None)
+                    if callable(arm):
+                        arm()
+                except Exception:  # pragma: no cover - defensive
+                    pass
                 self._set_state(ConvState.IDLE)
                 self._reset_sleep_timer()
                 return
             logger.info("asr_final received: %r", evt.text)
+            # Re-enable speaker playback for the next turn. stop_playback
+            # latched discard=True on the prior barge-in / sleep so SLV's
+            # tail-end TTS didn't keep playing; clear that now so the new
+            # turn's TTS is actually audible.
+            try:
+                arm = getattr(self.audio, "arm_for_next_turn", None)
+                if callable(arm):
+                    arm()
+            except Exception:  # pragma: no cover - defensive
+                pass
             # New utterance round about to begin — clear client VAD state so
             # the next speech_start fires fresh. (getattr-guarded so tests
             # that build BaseApp via __new__ don't have to set every field.)
@@ -851,6 +1069,12 @@ class BaseApp:
             return
 
         if isinstance(evt, TTSAudio):
+            # If we're in BARGED_IN, the tail of SLV's prior-turn TTS is
+            # still draining over the WS. Don't reset state to SPEAKING or
+            # play the audio (audio.play() also drops it via the discard
+            # latch, but skip the state flip here too).
+            if self._state == ConvState.BARGED_IN:
+                return
             if not self._first_tts_seen:
                 self._first_tts_seen = True
                 self.audio.set_output_sample_rate(evt.sample_rate)
@@ -874,8 +1098,13 @@ class BaseApp:
             mark = getattr(self.audio, "mark_playback_done", None)
             if callable(mark):
                 mark()
-            self._set_state(ConvState.IDLE)
-            self._reset_sleep_timer()
+            # Don't override BARGED_IN: the user is mid-utterance and the
+            # VAD silence-end / ASRFinal path will drive state forward.
+            # Forcing IDLE here would also kick the auto-sleep timer in
+            # push_to_talk mode while the user is still speaking.
+            if self._state != ConvState.BARGED_IN:
+                self._set_state(ConvState.IDLE)
+                self._reset_sleep_timer()
             await self._broadcast("on_assistant_done")
             return
 

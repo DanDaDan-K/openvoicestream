@@ -19,7 +19,7 @@ slv_config:
 # automatically. Speech-end triggers an explicit asr_eos so Paraformer
 # only finalises once it has enough audio (>= ~610ms).
 client_vad_backend: "auto"
-client_vad_threshold: 0.005  # MacBook built-in mic has high noise floor
+client_vad_threshold: 0.03  # TEMP for noisy MacBook mic demo (was 0.005)
 client_vad_speech_min_ms: 200
 client_vad_silence_ms: 600
 client_vad_drive_eos: true  # SLVClient auto-reconnects per turn

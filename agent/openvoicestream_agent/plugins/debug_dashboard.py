@@ -99,6 +99,7 @@ class DebugDashboardPlugin(Plugin):
         web_app.router.add_post("/api/control/abort", self._api_abort)
         web_app.router.add_post("/api/control/send_text", self._api_send_text)
         web_app.router.add_get("/api/session/history", self._api_session_history)
+        web_app.router.add_post("/api/session/clear", self._api_session_clear)
         # AppMode framework endpoints.
         web_app.router.add_get("/api/modes", self._api_modes_list)
         web_app.router.add_post("/api/control/mode", self._api_mode_switch)
@@ -142,6 +143,7 @@ class DebugDashboardPlugin(Plugin):
                 bus.subscribe(
                     "on_prefix_cache_disabled", self._on_bus_prefix_cache_disabled
                 )
+                bus.subscribe("on_echo_recovery", self._on_bus_echo_recovery)
             except Exception:  # pragma: no cover - defensive
                 logger.debug("event bus subscribe failed", exc_info=True)
 
@@ -158,6 +160,7 @@ class DebugDashboardPlugin(Plugin):
                 bus.unsubscribe(
                     "on_prefix_cache_disabled", self._on_bus_prefix_cache_disabled
                 )
+                bus.unsubscribe("on_echo_recovery", self._on_bus_echo_recovery)
             except Exception:  # pragma: no cover - defensive
                 pass
 
@@ -278,6 +281,14 @@ class DebugDashboardPlugin(Plugin):
             except Exception:
                 pass
             await self.app.slv.reconnect()
+            # Fresh session: clear the discard latch stop_playback above
+            # armed, so the next turn's TTS isn't silently dropped.
+            try:
+                arm = getattr(self.app.audio, "arm_for_next_turn", None)
+                if callable(arm):
+                    arm()
+            except Exception:  # pragma: no cover - defensive
+                pass
             return web.json_response({"ok": True})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
@@ -306,6 +317,15 @@ class DebugDashboardPlugin(Plugin):
         text = (body or {}).get("text")
         if not isinstance(text, str) or not text.strip():
             return web.json_response({"ok": False, "error": "missing text"}, status=400)
+        # Typed-text bypasses ASR, so no ASRFinal will clear the playback
+        # discard latch a prior barge-in / abort / sleep may have armed.
+        # Clear it explicitly so this turn's TTS is actually audible.
+        try:
+            arm = getattr(self.app.audio, "arm_for_next_turn", None)
+            if callable(arm):
+                arm()
+        except Exception:  # pragma: no cover - defensive
+            pass
         try:
             await self.app.slv.send_text(text)
             return web.json_response({"ok": True})
@@ -691,6 +711,37 @@ class DebugDashboardPlugin(Plugin):
         items.extend(history)
         return web.json_response(items)
 
+    async def _api_session_clear(self, request):  # noqa: ANN001
+        """Drop accumulated conversation history.
+
+        Useful when in-context learning has latched onto a degenerate
+        echo pattern (e.g. several identical assistant turns make the
+        LLM keep repeating that same reply). Leaves the system prompt
+        and active mode untouched."""
+        from aiohttp import web
+        session = getattr(self.app, "session", None)
+        if session is None:
+            return web.json_response(
+                {"ok": False, "error": "no session"}, status=500
+            )
+        cleared = 0
+        try:
+            history = getattr(session, "history", None)
+            if isinstance(history, list):
+                cleared = len(history)
+                history.clear()
+            # Invalidate any cached prefix so the next turn doesn't
+            # try to resume from a (now-stale) KV warm-up.
+            for attr in ("cache_warmed", "_cache_warmed", "prefix_cache_disabled"):
+                if hasattr(session, attr):
+                    try:
+                        setattr(session, attr, False if "warmed" in attr else False)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        return web.json_response({"ok": True, "cleared": cleared})
+
     # ── broadcast helpers ────────────────────────────────────────
 
     def _schedule_broadcast(self, event: str, data: Any) -> None:
@@ -976,6 +1027,9 @@ class DebugDashboardPlugin(Plugin):
 
     def _on_bus_prefix_cache_disabled(self, data: Any) -> None:
         self._schedule_broadcast("on_prefix_cache_disabled", data)
+
+    def _on_bus_echo_recovery(self, data: Any) -> None:
+        self._schedule_broadcast("on_echo_recovery", data)
 
     async def _api_llm_probe(self, request):  # noqa: ANN001
         from aiohttp import web

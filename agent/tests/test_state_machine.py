@@ -82,9 +82,8 @@ async def test_barge_in_transition():
 @pytest.mark.asyncio
 async def test_barge_in_cancels_llm_turn():
     """ASRPartial during SPEAKING must cancel the in-flight LLM task,
-    stop playback, and re-arm _first_tts_seen. NOTE: it must NOT call
-    slv.abort() — abort kills SLV's ASR session and truncates the
-    barge-in utterance (see commit fa13846).
+    stop playback, abort SLV TTS without reconnecting, and re-arm
+    _first_tts_seen.
     """
     from openvoicestream_agent.slv_client import ASRPartial
 
@@ -99,8 +98,13 @@ async def test_barge_in_cancels_llm_turn():
             stop_calls.append(1)
 
     class _SLV:
+        reconnects = 0
+
         async def abort(self):
             abort_calls.append(1)
+
+        async def reconnect(self):
+            self.reconnects += 1
 
     app.audio = _Audio()
     app.slv = _SLV()
@@ -123,10 +127,8 @@ async def test_barge_in_cancels_llm_turn():
     await app._dispatch_one(ASRPartial(text="打断一下"))
 
     assert cancelled.is_set(), "LLM turn was not cancelled by barge-in"
-    # Deliberately NOT calling abort — see docstring.
-    assert abort_calls == [], (
-        "barge-in must not call slv.abort() — would truncate ASR"
-    )
+    assert abort_calls == [1]
+    assert app.slv.reconnects == 0
     assert stop_calls == [1]
     assert app._first_tts_seen is False
     assert app._state == ConvState.BARGED_IN

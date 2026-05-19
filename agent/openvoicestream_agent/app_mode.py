@@ -109,6 +109,8 @@ class ModeContext:
         self.session.add_user(text)
         chunks: list[str] = []
         first_token_received = False
+        stream = None
+        cancelled = False
         try:
             llm_kwargs = {"session": self.session}
             if temperature is not None:
@@ -142,12 +144,22 @@ class ModeContext:
                     pass
                 await self.broadcast("on_assistant_token", token)
                 await self.slv.send_text(token)
+        except asyncio.CancelledError:
+            cancelled = True
+            close = getattr(stream, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:  # pragma: no cover - best effort
+                    logger.debug("LLM stream aclose failed during cancel", exc_info=True)
+            raise
         finally:
-            try:
-                await self.slv.flush_tts()
-            except Exception:  # pragma: no cover - best effort
-                pass
-            if chunks:
+            if not cancelled:
+                try:
+                    await self.slv.flush_tts()
+                except Exception:  # pragma: no cover - best effort
+                    pass
+            if chunks and not cancelled:
                 self.session.add_assistant("".join(chunks))
             cm = getattr(self.llm, "last_cache_metrics", None)
             if cm:

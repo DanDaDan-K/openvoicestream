@@ -553,7 +553,17 @@
   function drawRms() {
     rafQueued = false;
     const ctx = rmsChart.getContext("2d");
-    const W = rmsChart.width, H = rmsChart.height;
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = rmsChart.clientWidth || rmsChart.width;
+    const cssH = rmsChart.clientHeight || rmsChart.height;
+    const nextW = Math.max(1, Math.round(cssW * dpr));
+    const nextH = Math.max(1, Math.round(cssH * dpr));
+    if (rmsChart.width !== nextW || rmsChart.height !== nextH) {
+      rmsChart.width = nextW;
+      rmsChart.height = nextH;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const W = cssW, H = cssH;
     ctx.clearRect(0, 0, W, H);
     const bw = W / rmsSamples.length;
     const thr = parseFloat(rmsThr.textContent) || 0.012;

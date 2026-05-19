@@ -177,6 +177,9 @@ class SLVClient:
                 await self._ws.send(json.dumps(payload))
             except websockets.ConnectionClosed:
                 logger.info("send_json: WS closed mid-send, dropping %s", payload.get("type"))
+                # Null the dead handle so the next caller triggers
+                # connect() instead of replaying onto the closed WS.
+                self._ws = None
 
     async def send_audio(self, pcm: bytes) -> None:
         async with self._send_lock:
@@ -191,7 +194,7 @@ class SLVClient:
                 # decide to reconnect. Audio chunks during reconnect are
                 # naturally dropped — first ASR utterance after reconnect
                 # picks up from the new chunks.
-                pass
+                self._ws = None
 
     async def send_text(self, text: str) -> None:
         await self._send_json({"type": CLIENT_TEXT, "text": text})
@@ -215,6 +218,18 @@ class SLVClient:
                 yield self._queue.get_nowait()
                 continue
             if self._reader_done.is_set() or self._closed:
+                if (
+                    not self._closed
+                    and self._reader_task is not None
+                    and not self._reader_task.done()
+                ):
+                    # A manual reconnect can cancel an old reader and start a
+                    # new one while this iterator is still alive. The old
+                    # reader's finally may set the shared event after the new
+                    # reader is already running; don't make dispatch exit and
+                    # reconnect a second time in that case.
+                    self._reader_done.clear()
+                    continue
                 return
             get_task = asyncio.create_task(self._queue.get())
             done_task = asyncio.create_task(self._reader_done.wait())
@@ -231,6 +246,13 @@ class SLVClient:
             if get_task in done:
                 yield get_task.result()
             else:
+                if (
+                    not self._closed
+                    and self._reader_task is not None
+                    and not self._reader_task.done()
+                ):
+                    self._reader_done.clear()
+                    continue
                 # Reader finished; flush any final items it pushed.
                 while not self._queue.empty():
                     yield self._queue.get_nowait()

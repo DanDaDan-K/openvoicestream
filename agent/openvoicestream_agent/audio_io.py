@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import AsyncIterator
 
 import numpy as np
@@ -46,11 +47,22 @@ class AudioIO:
         self._input_stream: "sd.RawInputStream | None" = None
         self._output_stream: "sd.RawOutputStream | None" = None
         self._playback_task: asyncio.Task | None = None
+        self._playback_buffer = bytearray()
+        self._playback_lock = threading.Lock()
         self._is_playing = False
+        # When True, play() drops incoming TTS pcm instead of queueing it.
+        # Set by stop_playback (barge-in / sleep / stop-intent) so that
+        # already-buffered TTS frames SLV keeps streaming over the WS
+        # don't resume audible playback after we've silenced the speaker.
+        # Cleared by arm_for_next_turn() at the start of the next utterance.
+        self._discard_playback = False
 
     @property
     def is_playing(self) -> bool:
-        return self._is_playing
+        self._ensure_playback_buffer()
+        with self._playback_lock:
+            has_buffered_audio = bool(self._playback_buffer)
+        return self._is_playing or has_buffered_audio
 
     # ── capture ─────────────────────────────────────────────────────
 
@@ -113,6 +125,25 @@ class AudioIO:
 
     # ── playback ────────────────────────────────────────────────────
 
+    def _ensure_playback_buffer(self) -> None:
+        if not hasattr(self, "_playback_buffer"):
+            self._playback_buffer = bytearray()
+        if not hasattr(self, "_playback_lock"):
+            self._playback_lock = threading.Lock()
+
+    def _output_callback(self, outdata, frames, time_info, status) -> None:  # noqa: ANN001
+        if status:
+            logger.debug("output status: %s", status)
+        self._ensure_playback_buffer()
+        needed = len(outdata)
+        with self._playback_lock:
+            n = min(needed, len(self._playback_buffer))
+            if n:
+                outdata[:n] = self._playback_buffer[:n]
+                del self._playback_buffer[:n]
+            if n < needed:
+                outdata[n:needed] = b"\x00" * (needed - n)
+
     def _ensure_output(self) -> None:
         if sd is None:  # pragma: no cover - hardware-dependent
             raise RuntimeError(
@@ -120,17 +151,16 @@ class AudioIO:
             )
         if self._output_stream is not None:
             return
+        self._ensure_playback_buffer()
         self._output_stream = sd.RawOutputStream(
             samplerate=self.output_sr,
-            blocksize=0,
+            blocksize=max(1, int(self.output_sr * 0.02)),
             device=self.output_device,
             channels=1,
             dtype="int16",
+            callback=self._output_callback,
         )
         self._output_stream.start()
-        if self._out_queue is None:
-            self._out_queue = asyncio.Queue()
-        self._playback_task = asyncio.create_task(self._playback_loop(), name="audio-playback")
 
     async def _playback_loop(self) -> None:
         assert self._out_queue is not None
@@ -150,22 +180,38 @@ class AudioIO:
                 #   barge-in / shutdown   → stop_playback() sets False
                 try:
                     if self._output_stream is not None:
-                        self._output_stream.write(pcm)
+                        await asyncio.to_thread(self._output_stream.write, pcm)
                 except Exception as e:  # pragma: no cover
                     logger.warning("playback write error: %s", e)
         except asyncio.CancelledError:
             raise
 
     def mark_playback_done(self) -> None:
-        """Called by BaseApp when SLV emits TTSDone; flips is_playing False
-        without dropping anything still queued."""
+        """Called by BaseApp when SLV emits TTSDone.
+
+        This marks the remote TTS stream done, but local PortAudio may still
+        have buffered PCM to play. `is_playing` therefore stays true until the
+        callback drains `_playback_buffer`; otherwise barge-in during audible
+        tail audio is missed.
+        """
         self._is_playing = False
 
     async def play(self, pcm: bytes) -> None:
+        # After barge-in (or sleep / stop-intent), SLV may keep streaming
+        # the rest of the in-flight TTS for several hundred ms. Drop those
+        # so the speaker actually stays silent until the next user turn.
+        if self._discard_playback:
+            return
         self._ensure_output()
-        assert self._out_queue is not None
+        self._ensure_playback_buffer()
         self._is_playing = True
-        await self._out_queue.put(pcm)
+        with self._playback_lock:
+            self._playback_buffer.extend(pcm)
+
+    def arm_for_next_turn(self) -> None:
+        """Re-enable playback for the next turn after a barge-in / sleep /
+        stop-intent.  Called from BaseApp when a new ASR final arrives."""
+        self._discard_playback = False
 
     def set_output_sample_rate(self, sr: int) -> None:
         if sr == self.output_sr and self._output_stream is not None:
@@ -183,16 +229,23 @@ class AudioIO:
             self._playback_task.cancel()
             self._playback_task = None
         self._out_queue = None
+        self._ensure_playback_buffer()
+        with self._playback_lock:
+            self._playback_buffer.clear()
 
     async def stop_playback(self) -> None:
-        """Drain queued audio (barge-in)."""
-        if self._out_queue is not None:
-            while not self._out_queue.empty():
-                try:
-                    self._out_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+        """Drain queued audio (barge-in / sleep / stop-intent).
+
+        Also arms `_discard_playback` so any TTS chunks SLV keeps streaming
+        over the WS for the rest of the in-flight utterance are dropped on
+        arrival instead of being re-queued by play().  arm_for_next_turn()
+        clears the latch at the start of the next user turn.
+        """
+        self._ensure_playback_buffer()
+        with self._playback_lock:
+            self._playback_buffer.clear()
         self._is_playing = False
+        self._discard_playback = True
 
     async def close(self) -> None:
         self._stop_input_stream()

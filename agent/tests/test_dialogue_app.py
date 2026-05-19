@@ -5,6 +5,7 @@ lives in ModeContext.run_default_dialogue_turn (invoked by ChatMode).
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -81,6 +82,45 @@ async def test_default_dialogue_turn_streams_tokens_directly_to_slv():
     assert llm.last_messages[-1] == {"role": "user", "content": "hi"}
     # session was passed through to LLM (for prefix-cache control).
     assert llm.last_session is session
+
+
+@pytest.mark.asyncio
+async def test_cancelled_dialogue_turn_closes_llm_stream_without_tts_flush():
+    """Barge-in cancels the dialogue task. That must close the upstream LLM
+    stream (edge-llm maps client disconnect to channel.cancel()), but must
+    not flush partial old tokens into TTS."""
+    cfg = Config(system_prompt="SYS")
+    slv = FakeSLV()
+    session = Session()
+    events = type("E", (), {"emit": lambda *a, **k: None})()
+    first_token_sent = asyncio.Event()
+    stream_closed = asyncio.Event()
+
+    class CancellableLLM(LLMBackend):
+        async def stream(self, messages, **kw):  # type: ignore[override]
+            try:
+                yield "old"
+                first_token_sent.set()
+                await asyncio.sleep(60)
+                yield "tail"  # pragma: no cover
+            finally:
+                stream_closed.set()
+
+    ctx = ModeContext(
+        config=cfg, slv=slv, llm=CancellableLLM(), session=session, audio=None,
+        events=events, broadcast=_noop_broadcast,
+    )
+
+    task = asyncio.create_task(ctx.run_default_dialogue_turn("hi"))
+    await asyncio.wait_for(first_token_sent.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert stream_closed.is_set()
+    assert slv.text_frames == ["old"]
+    assert slv.flushed == 0
+    assert session.history == [{"role": "user", "content": "hi"}]
 
 
 @pytest.mark.asyncio

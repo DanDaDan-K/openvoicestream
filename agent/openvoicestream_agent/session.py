@@ -121,6 +121,62 @@ class Session:
 
     def add_assistant(self, text: str) -> None:
         self.history.append({"role": "assistant", "content": text})
+        self._maybe_recover_from_echo()
+
+    # In-context learning latch: when the model (small / quantised) sees
+    # a few short identical assistant replies in history, it pattern-matches
+    # and keeps emitting that same canned response for every subsequent
+    # turn no matter what the user actually said. Detect and self-recover.
+    ECHO_WINDOW = 3
+    ECHO_MAX_LEN = 40
+
+    def _maybe_recover_from_echo(self) -> None:
+        """Wipe history when the assistant has just emitted the same short
+        reply ``ECHO_WINDOW`` times in a row — strong signal that an
+        in-context echo loop is locked in.
+
+        We restrict to short replies (``ECHO_MAX_LEN`` chars) because two
+        long natural answers being byte-identical is implausible in normal
+        conversation, but a hard cap is still nice insurance against very
+        long deterministic re-runs ever counting as 'real' history.
+        Keeps ``sid`` / ``metadata`` so dashboards don't get confused;
+        clears ``cache_warmed`` because we just invalidated the prefix.
+        """
+        if len(self.history) < self.ECHO_WINDOW:
+            return
+        assistant_turns = [
+            m for m in self.history if m.get("role") == "assistant"
+        ]
+        if len(assistant_turns) < self.ECHO_WINDOW:
+            return
+        last_n = assistant_turns[-self.ECHO_WINDOW:]
+        texts = [m.get("content", "") for m in last_n]
+        first = texts[0]
+        if len(first) > self.ECHO_MAX_LEN:
+            return
+        if any(t != first for t in texts):
+            return
+        logger.warning(
+            "echo loop detected: %d consecutive identical assistant turns "
+            "(text=%r); auto-clearing history",
+            self.ECHO_WINDOW, first[:60],
+        )
+        self.history.clear()
+        self.cache_warmed = False
+        self.prefix_cache_disabled = False
+        bus = getattr(self, "event_bus", None)
+        if bus is not None:
+            try:
+                bus.emit(
+                    "on_echo_recovery",
+                    {
+                        "window": self.ECHO_WINDOW,
+                        "echo_text": first[:120],
+                        "sid": self.sid,
+                    },
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("event_bus emit on_echo_recovery failed", exc_info=True)
 
     def messages(self, system_prompt: str) -> list[dict[str, str]]:
         """Return OpenAI-format messages with system prompt prepended.

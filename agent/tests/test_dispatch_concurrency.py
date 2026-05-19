@@ -2,9 +2,13 @@
 
 While `on_user_utterance` streams tokens, the dispatch loop must still
 process queued TTSAudio (so the speaker plays) and ASRPartial (so
-barge-in fires `slv.abort()` AND cancels the in-flight LLM turn — per
-HIGH-2 fix; otherwise streaming tokens immediately re-start TTS and
-undo the barge-in stop_playback).
+barge-in cancels the in-flight LLM turn, aborts SLV TTS, AND silences the speaker —
+per HIGH-2 + commit fa13846; otherwise streaming tokens immediately
+re-start TTS and undo the barge-in stop_playback).
+
+NB: barge-in deliberately does NOT reconnect SLV. Use the in-band
+`abort` control so SLV cancels TTS / drains queued sentences while the
+WebSocket remains alive for ASR continuity.
 """
 from __future__ import annotations
 
@@ -21,6 +25,8 @@ class _FakeAudio:
     def __init__(self) -> None:
         self.played: list[bytes] = []
         self.is_playing = False
+        self.stop_calls = 0
+        self.armed = 0
 
     async def play(self, pcm: bytes) -> None:
         self.is_playing = True
@@ -28,6 +34,10 @@ class _FakeAudio:
 
     async def stop_playback(self) -> None:
         self.is_playing = False
+        self.stop_calls += 1
+
+    def arm_for_next_turn(self) -> None:
+        self.armed += 1
 
     def set_output_sample_rate(self, sr: int) -> None:
         pass
@@ -58,7 +68,7 @@ async def test_dispatch_does_not_block_on_llm_turn():
 
     llm_started = asyncio.Event()
     llm_release = asyncio.Event()
-    seen_during_llm: dict[str, bool] = {"audio": False, "abort": False}
+    seen_during_llm: dict[str, bool] = {"audio": False, "stopped": False}
 
     async def slow_on_user_utterance(text: str) -> None:
         llm_started.set()
@@ -76,11 +86,13 @@ async def test_dispatch_does_not_block_on_llm_turn():
     # 2. While LLM is "running", dispatch a TTSAudio -- must reach speaker.
     await app._dispatch_one(TTSAudio(pcm=b"\x01\x00" * 8, sample_rate=24000))
     seen_during_llm["audio"] = len(app.audio.played) == 1
+    reconnects_before_barge = app.slv.reconnects
 
-    # 3. While LLM is "running", dispatch ASRPartial -- must trigger abort.
+    # 3. While LLM is "running", dispatch ASRPartial -- must stop playback,
+    #    abort SLV TTS without reconnecting, and cancel the LLM turn.
     app.audio.is_playing = True
     await app._dispatch_one(ASRPartial(text="wait"))
-    seen_during_llm["abort"] = app.slv.aborted == 1
+    seen_during_llm["stopped"] = app.audio.stop_calls >= 1
 
     # HIGH-2 fix: barge-in MUST cancel the in-flight LLM turn so streaming
     # tokens don't immediately restart TTS and undo stop_playback.
@@ -89,6 +101,10 @@ async def test_dispatch_does_not_block_on_llm_turn():
         app._llm_turn_task.exception(), asyncio.CancelledError
     ), "LLM turn should be cancelled, not completed normally"
     assert seen_during_llm["audio"], "TTSAudio not played while LLM streaming"
-    assert seen_during_llm["abort"], "ASRPartial did not trigger abort while LLM streaming"
+    assert seen_during_llm["stopped"], "ASRPartial did not stop playback during LLM stream"
+    assert app.slv.aborted == 1
+    assert app.slv.reconnects == reconnects_before_barge, (
+        "barge-in should not reconnect SLV in the hot path"
+    )
 
     llm_release.set()  # no-op now; task already cancelled

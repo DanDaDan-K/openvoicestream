@@ -74,6 +74,27 @@ async def test_watchdog_cancelled_when_real_final_arrives():
 
 
 @pytest.mark.asyncio
+async def test_duplicate_final_while_thinking_resets_to_idle():
+    """A duplicate-only ASR final must not strand the FSM in THINKING.
+
+    This happens when client VAD sends EOS for a noise blip and SLV reports
+    the final as a duplicate of an already streamed/empty result. The ASRFinal
+    path cancels the watchdog, so the duplicate branch itself must recover.
+    """
+    app = _fresh_app(timeout=5.0)
+    app._set_state(ConvState.THINKING)
+    await app.send_asr_eos_once()
+
+    await app._dispatch_one(
+        ASRFinal(text="", duplicate_of_streamed=True, session_complete=False)
+    )
+
+    assert app._state == ConvState.IDLE
+    assert app._eos_sent_this_turn is False
+    assert app._asr_watchdog_task is None
+
+
+@pytest.mark.asyncio
 async def test_watchdog_no_op_if_state_already_moved():
     """If the FSM left THINKING (e.g. via SLVError → IDLE) before the
     watchdog fires, the watchdog must not clobber the new state."""
@@ -86,6 +107,7 @@ async def test_watchdog_no_op_if_state_already_moved():
     await asyncio.sleep(0.15)
     # Watchdog fired but should have seen state != THINKING and bailed.
     assert app._state == ConvState.SPEAKING
+    assert app._eos_sent_this_turn is False
 
 
 @pytest.mark.asyncio
@@ -109,3 +131,39 @@ async def test_second_eos_call_cancels_prior_watchdog():
     await asyncio.sleep(0)
     assert first_task.cancelled() or first_task.done()
     assert app._asr_watchdog_task is not first_task
+
+
+@pytest.mark.asyncio
+async def test_new_speech_while_waiting_for_final_releases_eos_latch():
+    """If another speech segment starts before the prior empty/dropped
+    ASR final arrives, the next speech end must be allowed to send EOS.
+    """
+
+    class _Vad:
+        def is_speech(self, chunk: bytes) -> bool:
+            return True
+
+        def reset(self) -> None:
+            pass
+
+    app = _fresh_app(timeout=5.0)
+    app.config.client_vad_speech_min_ms = 100
+    app.config.pipeline_mode = "always_on"
+    app.config.push_to_talk_no_vad_silence = True
+    app._client_vad = _Vad()
+    app._vad_state = "idle"
+    app._vad_speech_ms = 0
+    app._vad_silence_ms = 0
+    app._vad_eos_sent = False
+    app.audio = SimpleNamespace(is_playing=False)
+    app._set_state(ConvState.THINKING)
+    await app.send_asr_eos_once()
+    stale_task = app._asr_watchdog_task
+
+    await app._update_vad(b"\x01\x00" * 1600, 100)
+    await asyncio.sleep(0)
+
+    assert app._eos_sent_this_turn is False
+    assert stale_task is not None
+    assert stale_task.cancelled() or stale_task.done()
+    assert app._state == ConvState.LISTENING
