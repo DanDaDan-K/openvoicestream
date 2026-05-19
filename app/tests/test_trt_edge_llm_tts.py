@@ -81,13 +81,19 @@ def test_split_tts_text_handles_cjk_and_latin(monkeypatch):
 
     assert len(zh_parts) > 1
     assert "".join(zh_parts) == zh
-    assert max(len(part) for part in zh_parts) <= 32
+    assert max(len(part) for part in zh_parts) <= 25
     assert all(part not in "。！？!?；;，,、：" for part in zh_parts)
+
+    no_punctuation = "这是一个没有任何标点符号的很长中文单句我们要验证它会不会被切短"
+    no_punctuation_parts = tts_mod._split_tts_text(no_punctuation, max_chars=16)
+    assert "".join(no_punctuation_parts) == no_punctuation
+    assert max(len(part) for part in no_punctuation_parts) <= 16
 
     punctuated = "真的吗？可以的，请继续！不过，逗号也要保留。"
     punctuated_parts = tts_mod._split_tts_text(punctuated, max_chars=8)
 
     assert "".join(punctuated_parts) == punctuated
+    assert max(len(part) for part in punctuated_parts) <= 8
     assert any(part.endswith("？") for part in punctuated_parts)
     assert any(part.endswith("！") for part in punctuated_parts)
     assert any("，" in part for part in punctuated_parts)
@@ -408,7 +414,6 @@ def test_old_native_fallback_env_no_longer_changes_backend(monkeypatch, tmp_path
 
     monkeypatch.setenv("EDGE_LLM_TTS_NATIVE_FALLBACK", "1")
     monkeypatch.delenv("OVS_TTS_BACKEND", raising=False)
-    monkeypatch.delenv("SEEED_LOCAL_VOICE_TTS_BACKEND", raising=False)
     monkeypatch.delenv("EDGE_LLM_TTS_BACKEND", raising=False)
     monkeypatch.setattr(tts_mod, "TTS_WORKER_BINARY", str(tmp_path / "worker"))
     monkeypatch.setattr(tts_mod, "PLUGIN_PATH", str(tmp_path / "plugin.so"))
@@ -469,6 +474,150 @@ def test_edgellm_worker_defaults_match_dual_resident_streaming_profile(monkeypat
     assert captured["request"]["chunk_frames"] == 10
     assert captured["request"]["max_chunk_frames"] == 10
     assert captured["request"]["adaptive_chunks"] is False
+    assert captured["request"]["seed"] == 42
+
+
+def test_edgellm_worker_sampling_env_prefers_ovs_alias(monkeypatch):
+    import importlib
+    import app.backends.jetson.trt_edge_llm_tts as tts_mod
+
+    monkeypatch.setenv("TTS_TALKER_TEMPERATURE", "0.9")
+    monkeypatch.setenv("OVS_TTS_TALKER_TEMPERATURE", "0.0")
+    monkeypatch.setenv("TTS_TALKER_TOP_K", "50")
+    monkeypatch.setenv("OVS_TTS_TALKER_TOP_K", "1")
+    monkeypatch.setenv("OVS_TTS_SEED", "42")
+
+    tts_mod = importlib.reload(tts_mod)
+
+    captured = {}
+
+    class FakeWorker:
+        stdin = None
+        stdout = None
+
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+
+    def fake_ensure_worker():
+        backend._worker = FakeWorker()
+        backend._worker.stdin = types.SimpleNamespace(
+            write=lambda data: captured.setdefault("request", json.loads(data)),
+            flush=lambda: None,
+        )
+        backend._worker.stdout = types.SimpleNamespace(
+            readline=lambda: json.dumps({"event": "done", "ok": True}) + "\n"
+        )
+
+    monkeypatch.setattr(backend, "_ensure_worker", fake_ensure_worker)
+    backend._ready = True
+
+    assert list(backend.generate_streaming("你好", segment_text=False, _retry_empty=False)) == []
+    assert captured["request"]["talker_temperature"] == 0.0
+    assert captured["request"]["talker_top_k"] == 1
+    assert captured["request"]["seed"] == 42
+
+
+def test_edgellm_worker_passes_speaker_id_to_worker(monkeypatch):
+    import app.backends.jetson.trt_edge_llm_tts as tts_mod
+
+    captured = {}
+
+    class FakeWorker:
+        stdin = None
+        stdout = None
+
+    monkeypatch.setenv("EDGE_LLM_TTS_STATEFUL_CODE2WAV", "1")
+    monkeypatch.setenv("OVS_TTS_SPEAKERS_JSON", '{"0":"","2301":"2301","2302":"2302"}')
+
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+
+    def fake_ensure_worker():
+        backend._worker = FakeWorker()
+        backend._worker.stdin = types.SimpleNamespace(
+            write=lambda data: captured.setdefault("request", json.loads(data)),
+            flush=lambda: None,
+        )
+        backend._worker.stdout = types.SimpleNamespace(
+            readline=lambda: json.dumps({"event": "done", "ok": True}) + "\n"
+        )
+
+    monkeypatch.setattr(backend, "_ensure_worker", fake_ensure_worker)
+    backend._ready = True
+
+    assert list(backend.generate_streaming("你好", speaker_id=2302, segment_text=False, _retry_empty=False)) == []
+    assert captured["request"]["speaker_id"] == 2302
+    assert captured["request"]["speaker"] == "2302"
+
+
+def test_edgellm_worker_resolves_embedding_speaker_id(monkeypatch):
+    import base64
+    import app.backends.jetson.trt_edge_llm_tts as tts_mod
+
+    captured = {}
+    embedding = b"\x00\x00\x80?" * 1024
+    monkeypatch.setenv(
+        "OVS_TTS_SPEAKERS_JSON",
+        '{"10001":{"type":"embedding","speaker_embedding_b64":"%s"}}'
+        % base64.b64encode(embedding).decode("ascii"),
+    )
+
+    class FakeWorker:
+        stdin = None
+        stdout = None
+
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+
+    def fake_ensure_worker():
+        backend._worker = FakeWorker()
+        backend._worker.stdin = types.SimpleNamespace(
+            write=lambda data: captured.setdefault("request", json.loads(data)),
+            flush=lambda: None,
+        )
+        backend._worker.stdout = types.SimpleNamespace(
+            readline=lambda: json.dumps({"event": "done", "ok": True}) + "\n"
+        )
+
+    monkeypatch.setattr(backend, "_ensure_worker", fake_ensure_worker)
+    backend._ready = True
+
+    assert list(backend.generate_streaming("你好", speaker_id=10001, segment_text=False, _retry_empty=False)) == []
+    assert "speaker" not in captured["request"]
+    assert captured["request"]["speaker_embedding_b64"] == base64.b64encode(embedding).decode("ascii")
+
+
+def test_edgellm_worker_streaming_segments_reuse_fixed_seed(monkeypatch):
+    import app.backends.jetson.trt_edge_llm_tts as tts_mod
+
+    requests = []
+
+    class FakeWorker:
+        stdin = None
+        stdout = None
+
+    monkeypatch.setenv("EDGE_LLM_TTS_STATEFUL_CODE2WAV", "1")
+    monkeypatch.setenv("EDGE_LLM_TTS_CJK_SEGMENT_MAX_CHARS", "8")
+    monkeypatch.setenv("OVS_TTS_SEED", "123")
+
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+
+    def fake_ensure_worker():
+        backend._worker = FakeWorker()
+        backend._worker.stdin = types.SimpleNamespace(
+            write=lambda data: requests.append(json.loads(data)),
+            flush=lambda: None,
+        )
+        backend._worker.stdout = types.SimpleNamespace(
+            readline=lambda: json.dumps({"event": "done", "ok": True}) + "\n"
+        )
+
+    monkeypatch.setattr(backend, "_ensure_worker", fake_ensure_worker)
+    backend._ready = True
+
+    text = "这是一个没有任何标点符号的长中文单句"
+    assert list(backend.generate_streaming(text, _retry_empty=False)) == []
+
+    assert len(requests) > 1
+    assert [req["text"] for req in requests] == tts_mod._split_tts_text(text, max_chars=8)
+    assert {req["seed"] for req in requests} == {123}
 
 
 def test_edgellm_worker_legacy_v2v_profile_uses_first_frame_fast_window(monkeypatch):
@@ -592,6 +741,47 @@ def test_edgellm_worker_stateful_profile_uses_small_continuous_chunks(monkeypatc
     assert captured["request"]["chunk_frames"] == 10
     assert captured["request"]["max_chunk_frames"] == 10
     assert captured["request"]["adaptive_chunks"] is False
+
+
+def test_edgellm_worker_counts_base64_chunks_before_empty_retry(monkeypatch):
+    import base64
+    import app.backends.jetson.trt_edge_llm_tts as tts_mod
+
+    class FakeStdout:
+        def __init__(self):
+            self.lines = [
+                json.dumps(
+                    {
+                        "event": "chunk",
+                        "ok": True,
+                        "chunk_transport": "base64",
+                        "audio_b64": base64.b64encode(b"pcm").decode("ascii"),
+                    }
+                )
+                + "\n",
+                json.dumps({"event": "done", "ok": True}) + "\n",
+            ]
+
+        def readline(self):
+            return self.lines.pop(0)
+
+    class FakeWorker:
+        stdin = types.SimpleNamespace(write=lambda data: None, flush=lambda: None)
+        stdout = FakeStdout()
+
+    monkeypatch.setenv("EDGE_LLM_TTS_STATEFUL_CODE2WAV", "1")
+
+    backend = tts_mod.TRTEdgeLLMTTSBackend()
+    backend._ready = True
+    backend._worker = FakeWorker()
+    monkeypatch.setattr(backend, "_ensure_worker", lambda: None)
+
+    def fail_restart(reason):
+        raise AssertionError(f"unexpected restart: {reason}")
+
+    monkeypatch.setattr(backend, "_restart_worker_locked", fail_restart)
+
+    assert list(backend.generate_streaming("你好", segment_text=False)) == [b"pcm"]
 
 
 def test_edgellm_worker_stateful_balanced_profile_uses_cp13(monkeypatch):

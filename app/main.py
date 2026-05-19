@@ -23,6 +23,8 @@ app = FastAPI(title="Jetson Speech Service", version="2.0.0")
 class TTSRequest(BaseModel):
     text: str
     sid: int | None = None
+    speaker_id: int | None = None
+    speaker_embedding_b64: str | None = None
     speed: float | None = None
     pitch: float | None = None
     language: str | None = None
@@ -61,6 +63,21 @@ _tts_stream_executor: ThreadPoolExecutor | None = None
 _asr_executor: ThreadPoolExecutor | None = None
 
 
+def _request_voice_kwargs(req: TTSRequest) -> dict:
+    import base64
+    from app.core.tts_speakers import speaker_kwargs_for_id
+
+    speaker_id = req.speaker_id if req.speaker_id is not None else req.sid
+    if speaker_id is not None and req.speaker_embedding_b64:
+        raise ValueError("speaker_id and speaker_embedding_b64 cannot be used together")
+    if req.speaker_embedding_b64:
+        try:
+            return {"speaker_embedding": base64.b64decode(req.speaker_embedding_b64)}
+        except Exception as exc:
+            raise ValueError("Invalid base64 speaker_embedding_b64") from exc
+    return speaker_kwargs_for_id(speaker_id)
+
+
 def _get_asr_backend():
     return _asr_backend
 
@@ -86,21 +103,16 @@ def _get_asr_executor() -> ThreadPoolExecutor:
 def _default_vad_backend() -> str:
     return (
         os.environ.get("OVS_VAD_BACKEND")
-        or os.environ.get("SEEED_LOCAL_VOICE_VAD_BACKEND")
         or "silero"
     ).strip() or "silero"
 
 
 def _default_vad_silence_ms() -> int:
-    raw = (
-        os.environ.get("OVS_VAD_SILENCE_MS")
-        or os.environ.get("SEEED_LOCAL_VOICE_VAD_SILENCE_MS")
-        or "400"
-    )
+    raw = os.environ.get("OVS_VAD_SILENCE_MS") or "400"
     try:
         value = int(raw)
     except ValueError:
-        logger.warning("Invalid OVS_VAD_SILENCE_MS/SEEED_LOCAL_VOICE_VAD_SILENCE_MS=%r; using 400", raw)
+        logger.warning("Invalid OVS_VAD_SILENCE_MS=%r; using 400", raw)
         return 400
     return max(0, value)
 
@@ -314,12 +326,14 @@ async def asr_capabilities():
 async def tts_capabilities():
     """Return TTS backend info and supported capabilities."""
     from app.core import tts_service
+    from app.core.tts_speakers import available_speakers
     if not tts_service.is_ready():
         return JSONResponse({"error": "TTS not ready"}, status_code=503)
     return {
         "backend": tts_service.backend_name(),
         "capabilities": [c.value for c in tts_service.capabilities()],
         "sample_rate": tts_service.get_sample_rate(),
+        "speakers": available_speakers(),
     }
 
 
@@ -330,13 +344,18 @@ async def tts(req: TTSRequest):
     from app.core import tts_service
     from app.core.coordinator import get_coordinator
 
+    try:
+        voice_kwargs = _request_voice_kwargs(req)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
     async with get_coordinator().acquire("tts"):
         wav_bytes, meta = tts_service.synthesize(
             text=req.text,
-            speaker_id=req.sid,
             speed=req.speed,
             pitch_shift=req.pitch,
             language=req.language,
+            **voice_kwargs,
         )
     return Response(
         content=wav_bytes,
@@ -372,6 +391,10 @@ async def tts_stream(req: TTSRequest):
     sr = tts_service.get_sample_rate()
     backend = tts_service.get_backend()
     from app.core.coordinator import get_coordinator
+    try:
+        voice_kwargs = _request_voice_kwargs(req)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
     # Sentence-level streaming: split the request text into sentences (via
     # pysbd when the language is supported, regex fallback otherwise) and
@@ -403,12 +426,14 @@ async def tts_stream(req: TTSRequest):
                     try:
                         for chunk in backend.generate_streaming(
                             text,
-                            speaker_id=req.sid,
                             speed=req.speed,
                             pitch_shift=req.pitch,
                             language=req.language,
+                            **voice_kwargs,
                         ):
                             loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                    except Exception:
+                        logger.exception("tts/stream synthesis failed for sentence=%r", text)
                     finally:
                         loop.call_soon_threadsafe(queue.put_nowait, None)
 
@@ -549,6 +574,8 @@ async def tts_clone_stream(req: CloneStreamRequest):
                 try:
                     for chunk in backend.generate_streaming(req.text, **stream_kwargs):
                         loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                except Exception:
+                    logger.exception("tts/clone/stream synthesis failed")
                 finally:
                     loop.call_soon_threadsafe(queue.put_nowait, None)
 
@@ -1286,6 +1313,7 @@ async def v2v_stream(ws: WebSocket):
                             break
                         loop.call_soon_threadsafe(audio_queue.put_nowait, chunk)
                 except Exception as e:
+                    logger.exception("v2v tts synthesis failed for sentence=%r", s)
                     loop.call_soon_threadsafe(audio_queue.put_nowait, ("__error__", str(e)))
                 finally:
                     loop.call_soon_threadsafe(audio_queue.put_nowait, None)

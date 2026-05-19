@@ -58,10 +58,10 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # --- env keys controlling resolver behaviour ------------------------------
-ENV_MODELS_DIR = ("OVS_MODELS_DIR", "SEEED_LOCAL_VOICE_MODELS_DIR")  # default /opt/models
-ENV_PROJECT_ROOT = ("OVS_PROJECT_ROOT", "SEEED_LOCAL_VOICE_PROJECT_ROOT")  # for resolving build scripts
-ENV_PREFETCH_ONNX = ("OVS_PREFETCH_ONNX", "SEEED_LOCAL_VOICE_PREFETCH_ONNX")  # 0/1, default 0
-ENV_FORCE_REBUILD = ("OVS_FORCE_REBUILD", "SEEED_LOCAL_VOICE_FORCE_REBUILD")  # 0/1, default 0
+ENV_MODELS_DIR = ("OVS_MODELS_DIR",)  # default /opt/models
+ENV_PROJECT_ROOT = ("OVS_PROJECT_ROOT",)  # for resolving build scripts
+ENV_PREFETCH_ONNX = ("OVS_PREFETCH_ONNX",)  # 0/1, default 0
+ENV_FORCE_REBUILD = ("OVS_FORCE_REBUILD",)  # 0/1, default 0
 
 # Conservative WS by device tier (MiB). Auto-detected from total RAM.
 _DEVICE_TIER_WS = {
@@ -123,7 +123,7 @@ def _detect_sm() -> str:
     if m:
         return m.group(1) + m.group(2)
     # Fallback: read /proc/device-tree for Tegra
-    return _env(("OVS_SM", "SEEED_LOCAL_VOICE_SM"), "87") or "87"
+    return _env(("OVS_SM",), "87") or "87"
 
 
 def _detect_trt_version() -> str:
@@ -133,7 +133,7 @@ def _detect_trt_version() -> str:
     m = re.search(r"(\d+\.\d+)\.\d+\.\d+", out)
     if m:
         return m.group(1)
-    return _env(("OVS_TRT", "SEEED_LOCAL_VOICE_TRT"), "10.3") or "10.3"
+    return _env(("OVS_TRT",), "10.3") or "10.3"
 
 
 def _detect_cuda_version() -> str:
@@ -142,7 +142,7 @@ def _detect_cuda_version() -> str:
     m = re.search(r"\+cuda(\d+\.\d+)", out)
     if m:
         return m.group(1)
-    return _env(("OVS_CUDA", "SEEED_LOCAL_VOICE_CUDA"), "12.6") or "12.6"
+    return _env(("OVS_CUDA",), "12.6") or "12.6"
 
 
 def _detect_jp_version() -> str:
@@ -151,10 +151,10 @@ def _detect_jp_version() -> str:
         with open("/etc/nv_tegra_release") as f:
             line = f.readline()
     except OSError:
-        return _env(("OVS_JP", "SEEED_LOCAL_VOICE_JP"), "6.2") or "6.2"
+        return _env(("OVS_JP",), "6.2") or "6.2"
     m = re.search(r"R(\d+)\s*\(release\)\s*,\s*REVISION:\s*(\d+)\.(\d+)", line)
     if not m:
-        return _env(("OVS_JP", "SEEED_LOCAL_VOICE_JP"), "6.2") or "6.2"
+        return _env(("OVS_JP",), "6.2") or "6.2"
     rmajor = int(m.group(1))
     # R36 → JetPack 6.x, R35 → JetPack 5.x
     jp_major = {36: 6, 35: 5}.get(rmajor, 6)
@@ -190,7 +190,7 @@ def _detect_device_tier() -> str:
                     return "agx"
     except OSError:
         pass
-    return _env(("OVS_DEVICE_TIER", "SEEED_LOCAL_VOICE_DEVICE_TIER"), "nano") or "nano"
+    return _env(("OVS_DEVICE_TIER",), "nano") or "nano"
 
 
 # ---------------------------------------------------------------------------

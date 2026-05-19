@@ -29,8 +29,6 @@ def main() -> None:
 
     os.environ["OVS_TTS_BACKEND"] = "product_explicit_kv"
     os.environ["OVS_TTS_SEED"] = str(args.seed)
-    os.environ.setdefault("SEEED_LOCAL_VOICE_TTS_BACKEND", os.environ["OVS_TTS_BACKEND"])
-    os.environ.setdefault("SEEED_LOCAL_VOICE_TTS_SEED", os.environ["OVS_TTS_SEED"])
     backend = TRTEdgeLLMTTSBackend()
     backend.preload()
     if args.streaming:

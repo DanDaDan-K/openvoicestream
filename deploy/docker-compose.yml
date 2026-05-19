@@ -27,13 +27,9 @@ services:
       - LANGUAGE_MODE=${LANGUAGE_MODE:-zh_en}
       - OVS_PROFILE=${OVS_PROFILE:-}
       - OVS_PROFILE_JSON=${OVS_PROFILE_JSON:-}
-      - OVS_VAD_BACKEND=${OVS_VAD_BACKEND:-}
-      - OVS_VAD_SILENCE_MS=${OVS_VAD_SILENCE_MS:-}
-      - SEEED_LOCAL_VOICE_PROFILE=${SEEED_LOCAL_VOICE_PROFILE:-}
-      - SEEED_LOCAL_VOICE_PROFILE_JSON=${SEEED_LOCAL_VOICE_PROFILE_JSON:-}
       # Open-dialogue endpointing defaults. Override in .env for product tuning.
-      - SEEED_LOCAL_VOICE_VAD_BACKEND=${SEEED_LOCAL_VOICE_VAD_BACKEND:-silero}
-      - SEEED_LOCAL_VOICE_VAD_SILENCE_MS=${SEEED_LOCAL_VOICE_VAD_SILENCE_MS:-400}
+      - OVS_VAD_BACKEND=${OVS_VAD_BACKEND:-silero}
+      - OVS_VAD_SILENCE_MS=${OVS_VAD_SILENCE_MS:-400}
       - QWEN3_EDGELLM_JETSON_ROOT=${QWEN3_EDGELLM_JETSON_ROOT:-/opt/qwen3-edgellm-jetson}
       - QWEN3_ARTIFACT_MANIFEST=${QWEN3_ARTIFACT_MANIFEST:-}
       - QWEN3_ARTIFACT_SET=${QWEN3_ARTIFACT_SET:-}
@@ -63,7 +59,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${SEEED_LOCAL_VOICE_MEMORY_LIMIT:-6G}
+          memory: ${OVS_MEMORY_LIMIT:-6G}
 
 volumes:
   speech-models:

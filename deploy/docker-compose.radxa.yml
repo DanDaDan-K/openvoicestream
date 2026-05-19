@@ -26,12 +26,10 @@ services:
       - rk-tts-models:/opt/tts/models
     environment:
       - OVS_PROFILE=${OVS_PROFILE:-}
-      - OVS_VAD_BACKEND=${OVS_VAD_BACKEND:-}
-      - OVS_VAD_SILENCE_MS=${OVS_VAD_SILENCE_MS:-}
-      - SEEED_LOCAL_VOICE_PROFILE=${SEEED_LOCAL_VOICE_PROFILE:-rk3588-default}
+      - OVS_PROFILE_DEFAULT=${OVS_PROFILE_DEFAULT:-rk3588-default}
       # Open-dialogue endpointing defaults. Override in .env for product tuning.
-      - SEEED_LOCAL_VOICE_VAD_BACKEND=${SEEED_LOCAL_VOICE_VAD_BACKEND:-silero}
-      - SEEED_LOCAL_VOICE_VAD_SILENCE_MS=${SEEED_LOCAL_VOICE_VAD_SILENCE_MS:-400}
+      - OVS_VAD_BACKEND=${OVS_VAD_BACKEND:-silero}
+      - OVS_VAD_SILENCE_MS=${OVS_VAD_SILENCE_MS:-400}
       # ── ASR ─────────────────────────────────────────────────────────
       - ASR_BACKEND=qwen3_asr_rk
       - ASR_DECODER_TYPE=rkllm

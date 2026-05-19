@@ -19,7 +19,6 @@ def test_worker_paths_prefer_voice_native_build(monkeypatch, tmp_path):
     asr_worker.touch()
 
     monkeypatch.setenv("OVS_BASE", str(voice_root))
-    monkeypatch.setenv("SEEED_LOCAL_VOICE_BASE", str(tmp_path / "legacy_voice"))
     monkeypatch.setenv("EDGE_LLM_BASE", str(tmp_path / "edge"))
     monkeypatch.setenv("EDGE_LLM_BUILD_DIR", "build_sm87")
     monkeypatch.delenv("EDGE_LLM_TTS_WORKER_BIN", raising=False)
@@ -33,7 +32,7 @@ def test_worker_paths_prefer_voice_native_build(monkeypatch, tmp_path):
 
 def test_worker_paths_fall_back_to_edgellm_examples(monkeypatch, tmp_path):
     edge_root = tmp_path / "edge"
-    monkeypatch.setenv("SEEED_LOCAL_VOICE_BASE", str(tmp_path / "voice"))
+    monkeypatch.delenv("OVS_BASE", raising=False)
     monkeypatch.setenv("EDGE_LLM_BASE", str(edge_root))
     monkeypatch.setenv("EDGE_LLM_BUILD_DIR", "build_sm87")
     monkeypatch.delenv("EDGE_LLM_TTS_WORKER_BIN", raising=False)

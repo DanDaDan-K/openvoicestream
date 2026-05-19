@@ -13,9 +13,9 @@ elif [[ -f /etc/seeed-local-voice.env ]]; then
   set +a
 fi
 
-if [[ -z "${OVS_PROFILE:-}" && -z "${OVS_PROFILE_JSON:-}" && -z "${SEEED_LOCAL_VOICE_PROFILE:-}" && -z "${SEEED_LOCAL_VOICE_PROFILE_JSON:-}" ]]; then
-  if [[ -n "${OVS_PROFILE_DEFAULT:-${SEEED_LOCAL_VOICE_PROFILE_DEFAULT:-}}" ]]; then
-    export OVS_PROFILE="${OVS_PROFILE_DEFAULT:-${SEEED_LOCAL_VOICE_PROFILE_DEFAULT:-}}"
+if [[ -z "${OVS_PROFILE:-}" && -z "${OVS_PROFILE_JSON:-}" ]]; then
+  if [[ -n "${OVS_PROFILE_DEFAULT:-}" ]]; then
+    export OVS_PROFILE="${OVS_PROFILE_DEFAULT}"
   else
     case "${LANGUAGE_MODE:-zh_en}" in
       zh_en)

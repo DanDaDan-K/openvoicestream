@@ -23,9 +23,7 @@ OVS_VAD_BACKEND=silero
 OVS_VAD_SILENCE_MS=400
 ```
 
-The legacy `SEEED_LOCAL_VOICE_VAD_*` variables are still accepted for
-older deployments. Clients can still override per connection with `vad`
-and `vad_silence_ms`.
+Clients can still override per connection with `vad` and `vad_silence_ms`.
 
 ## Protocol
 

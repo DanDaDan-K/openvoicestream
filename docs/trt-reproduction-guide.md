@@ -35,7 +35,7 @@ docker build -f deploy/docker/Dockerfile.jetson \
   -t seeed-local-voice:jetson-zh_en .
 
 docker run -d --name seeed-voice --network=host --runtime=nvidia \
-  -e SEEED_LOCAL_VOICE_PROFILE=jetson-zh-en \
+  -e OVS_PROFILE=jetson-zh-en \
   -e MATCHA_ACOUSTIC_EP=SPLIT_TRT \
   -v seeed-models:/opt/models \
   seeed-local-voice:jetson-zh_en

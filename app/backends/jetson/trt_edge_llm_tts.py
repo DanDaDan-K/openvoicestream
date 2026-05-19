@@ -24,6 +24,7 @@ import importlib
 import uuid
 
 from app.core.tts_backend import TTSBackend, TTSCapability
+from app.core.tts_speakers import speaker_kwargs_for_id
 
 from app.backends.jetson.trt_edge_llm_ipc import (
     TTS_BINARY,
@@ -51,7 +52,6 @@ def _env(*names: str, default: str | None = None) -> str | None:
 
 _QWEN3_TTS_MODEL_BASE = _env(
     "OVS_TTS_MODEL_BASE",
-    "SEEED_LOCAL_VOICE_TTS_MODEL_BASE",
     "QWEN3_MODEL_BASE",
     default="/opt/models/qwen3-tts",
 )
@@ -86,6 +86,18 @@ def _tts_stateful_code2wav_enabled() -> bool:
     # Stateful Code2Wav is the validated low-latency streaming path. It keeps
     # subsequent chunks small and continuous instead of optimizing only TTFA.
     return _env_flag("EDGE_LLM_TTS_STATEFUL_CODE2WAV", default=qwen3_highperf_enabled())
+
+
+def _tts_seed(default: int = 42) -> int:
+    return int(_env("OVS_TTS_SEED", default=str(default)))
+
+
+def _env_float(default: float, *names: str) -> float:
+    return float(_env(*names, default=str(default)))
+
+
+def _env_int(default: int, *names: str) -> int:
+    return int(_env(*names, default=str(default)))
 
 
 def _code2wav_engine_path() -> str:
@@ -138,7 +150,10 @@ def _split_tts_text(text: str, max_chars: Optional[int] = None) -> list[str]:
     segments: list[str] = []
     current: list[str] = []
     is_cjk = _contains_cjk(normalized)
-    max_overrun = max(2, min(8, max_chars // 2))
+    # CJK stateful Code2Wav is sensitive to long punctuation-free runs; keep
+    # the configured limit as a hard cap instead of allowing the Latin-word
+    # overrun used to avoid awkward English word breaks.
+    max_overrun = 0 if is_cjk else max(2, min(8, max_chars // 2))
     abbreviations = {
         "mr.",
         "mrs.",
@@ -217,8 +232,8 @@ def _split_tts_text(text: str, max_chars: Optional[int] = None) -> list[str]:
         if merged and all(ch in hard_breaks or ch in soft_breaks for ch in part):
             merged[-1] = f"{merged[-1]}{part}"
             continue
-        if merged and len(part) < min_chars and len(merged[-1]) + 1 + len(part) <= max_chars:
-            sep = "" if _contains_cjk(part + merged[-1]) else " "
+        sep = "" if merged and _contains_cjk(part + merged[-1]) else " "
+        if merged and len(part) < min_chars and len(merged[-1]) + len(sep) + len(part) <= max_chars:
             merged[-1] = f"{merged[-1]}{sep}{part}"
         else:
             merged.append(part)
@@ -294,12 +309,36 @@ def _pcm16_to_wav(pcm: bytes, sample_rate: int = 24000) -> bytes:
 
 
 # Default sampling parameters
-_DEFAULT_TEMPERATURE = float(os.environ.get("TTS_TALKER_TEMPERATURE", "0.9"))
-_DEFAULT_TOP_K = int(os.environ.get("TTS_TALKER_TOP_K", "50"))
-_DEFAULT_TOP_P = float(os.environ.get("TTS_TOP_P", "1.0"))
-_DEFAULT_PREDICTOR_TEMPERATURE = float(os.environ.get("TTS_PREDICTOR_TEMPERATURE", "0.9"))
-_DEFAULT_PREDICTOR_TOP_K = int(os.environ.get("TTS_PREDICTOR_TOP_K", "50"))
-_DEFAULT_PREDICTOR_TOP_P = float(os.environ.get("TTS_PREDICTOR_TOP_P", "1.0"))
+_DEFAULT_TEMPERATURE = _env_float(
+    0.9,
+    "OVS_TTS_TALKER_TEMPERATURE",
+    "TTS_TALKER_TEMPERATURE",
+)
+_DEFAULT_TOP_K = _env_int(
+    50,
+    "OVS_TTS_TALKER_TOP_K",
+    "TTS_TALKER_TOP_K",
+)
+_DEFAULT_TOP_P = _env_float(
+    1.0,
+    "OVS_TTS_TOP_P",
+    "TTS_TOP_P",
+)
+_DEFAULT_PREDICTOR_TEMPERATURE = _env_float(
+    0.9,
+    "OVS_TTS_PREDICTOR_TEMPERATURE",
+    "TTS_PREDICTOR_TEMPERATURE",
+)
+_DEFAULT_PREDICTOR_TOP_K = _env_int(
+    50,
+    "OVS_TTS_PREDICTOR_TOP_K",
+    "TTS_PREDICTOR_TOP_K",
+)
+_DEFAULT_PREDICTOR_TOP_P = _env_float(
+    1.0,
+    "OVS_TTS_PREDICTOR_TOP_P",
+    "TTS_PREDICTOR_TOP_P",
+)
 _DEFAULT_MAX_AUDIO_LENGTH = int(os.environ.get("TTS_MAX_AUDIO_LENGTH", "1024"))
 _DEFAULT_MIN_AUDIO_LENGTH = int(os.environ.get("TTS_MIN_AUDIO_LENGTH", "30"))
 _DEFAULT_REPETITION_PENALTY = float(os.environ.get("TTS_REPETITION_PENALTY", "1.05"))
@@ -341,12 +380,12 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         return self._ready
 
     def _backend_mode(self) -> str:
-        mode = _env("OVS_TTS_BACKEND", "SEEED_LOCAL_VOICE_TTS_BACKEND", "EDGE_LLM_TTS_BACKEND", default="edgellm_worker")
+        mode = _env("OVS_TTS_BACKEND", "EDGE_LLM_TTS_BACKEND", default="edgellm_worker")
         return mode.strip().lower().replace("-", "_")
 
     def _load_product_explicit_kv_backend(self):
-        model_base = _env("OVS_TTS_MODEL_BASE", "SEEED_LOCAL_VOICE_TTS_MODEL_BASE", default="/home/harvest/voice_test/models/qwen3-tts")
-        overlay = _env("OVS_TTS_NATIVE_MODULE_DIR", "SEEED_LOCAL_VOICE_TTS_NATIVE_MODULE_DIR", default="/home/harvest/voice_test/app_overlay")
+        model_base = _env("OVS_TTS_MODEL_BASE", default="/home/harvest/voice_test/models/qwen3-tts")
+        overlay = _env("OVS_TTS_NATIVE_MODULE_DIR", default="/home/harvest/voice_test/app_overlay")
         overlay_backends = os.path.join(overlay, "backends")
         for path in (overlay, overlay_backends):
             if os.path.isdir(path) and path not in sys.path:
@@ -379,7 +418,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             return
         if mode not in ("edgellm", "edgellm_worker", "official"):
             raise ValueError(
-                "Unsupported OVS_TTS_BACKEND/SEEED_LOCAL_VOICE_TTS_BACKEND/EDGE_LLM_TTS_BACKEND value "
+                "Unsupported OVS_TTS_BACKEND/EDGE_LLM_TTS_BACKEND value "
                 f"{mode!r}; expected edgellm_worker or product_explicit_kv"
             )
 
@@ -513,6 +552,23 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             raise RuntimeError(f"TTS worker did not become ready: {ready}")
         self._worker_ready_meta = ready
 
+    def _restart_worker_locked(self, reason: str) -> None:
+        """Restart the resident TTS worker while ``_worker_lock`` is held."""
+        logger.warning("Restarting TTS worker: %s", reason)
+        old = self._worker
+        self._worker = None
+        if old is not None:
+            try:
+                old.terminate()
+                old.wait(timeout=5)
+            except Exception:
+                try:
+                    old.kill()
+                except Exception:
+                    pass
+        self._worker_stderr_tail.clear()
+        self._ensure_worker()
+
     def _synthesize_worker(self, text: str, language: Optional[str], **kwargs) -> tuple[bytes, dict]:
         if _tts_stateful_code2wav_enabled():
             # The C++ worker rejects oneshot requests with "Stateful Code2Wav
@@ -538,10 +594,14 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             "predictor_top_p": _DEFAULT_PREDICTOR_TOP_P,
             "max_audio_length": kwargs.get("max_audio_length", _DEFAULT_MAX_AUDIO_LENGTH),
             "min_audio_length": kwargs.get("min_audio_length", _DEFAULT_MIN_AUDIO_LENGTH),
+            "seed": int(kwargs.get("seed", _tts_seed())),
         }
-        speaker_embedding = kwargs.get("speaker_embedding")
+        voice_kwargs = self._resolve_voice_kwargs(kwargs)
+        speaker_embedding = voice_kwargs.get("speaker_embedding")
         if speaker_embedding:
             request["speaker_embedding_b64"] = base64.b64encode(speaker_embedding).decode("ascii")
+        else:
+            self._add_speaker_request_fields(request, voice_kwargs)
         with self._worker_lock:
             self._ensure_worker()
             assert self._worker is not None and self._worker.stdin is not None and self._worker.stdout is not None
@@ -622,6 +682,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             if len(segments) > 1:
                 segment_kwargs = dict(kwargs)
                 segment_kwargs["segment_text"] = False
+                segment_kwargs.setdefault("seed", _tts_seed())
                 for segment in segments:
                     yield from self.generate_streaming(segment, **segment_kwargs)
                 return
@@ -636,6 +697,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         generator returns. Used by ``_synthesize_worker`` to assemble a
         single-shot WAV in stateful Code2Wav mode.
         """
+        retry_empty = bool(kwargs.pop("_retry_empty", True))
         req_id = uuid.uuid4().hex
         streaming_profile = str(
             kwargs.get("streaming_profile", os.environ.get("EDGE_LLM_TTS_STREAMING_PROFILE", "continuous_playback"))
@@ -693,6 +755,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             "predictor_top_p": _DEFAULT_PREDICTOR_TOP_P,
             "max_audio_length": kwargs.get("max_audio_length", _DEFAULT_MAX_AUDIO_LENGTH),
             "min_audio_length": kwargs.get("min_audio_length", _DEFAULT_MIN_AUDIO_LENGTH),
+            "seed": int(kwargs.get("seed", _tts_seed())),
             "stream": True,
             "stream_only": True,
             "first_chunk_frames": kwargs.get(
@@ -719,10 +782,16 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             "chunk_format": "pcm_s16le",
             "chunk_transport": "base64",
         }
-        speaker_embedding = kwargs.get("speaker_embedding")
+        voice_kwargs = self._resolve_voice_kwargs(kwargs)
+        speaker_embedding = voice_kwargs.get("speaker_embedding")
         if speaker_embedding:
             request["speaker_embedding_b64"] = base64.b64encode(speaker_embedding).decode("ascii")
+        else:
+            self._add_speaker_request_fields(request, voice_kwargs)
 
+        retry_after_empty = False
+        emitted_chunks = 0
+        done_event: dict | None = None
         with self._worker_lock:
             self._ensure_worker()
             assert self._worker is not None and self._worker.stdin is not None and self._worker.stdout is not None
@@ -739,6 +808,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
                     raise RuntimeError(f"TTS streaming worker failed: {event}")
                 if event.get("event") == "chunk":
                     if event.get("chunk_transport") == "base64":
+                        emitted_chunks += 1
                         yield base64.b64decode(event.get("audio_b64", ""))
                     elif event.get("chunk_file"):
                         with open(event["chunk_file"], "rb") as f:
@@ -749,14 +819,38 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
                             pass
                         if event.get("chunk_format") == "wav" and len(payload) > 44:
                             payload = payload[44:]
+                        emitted_chunks += 1
                         yield payload
                 elif event.get("event") == "done":
+                    done_event = event
                     # Surface the worker's terminal metadata to callers that
                     # passed a `meta_out` dict (used by _synthesize_worker in
                     # stateful Code2Wav mode to assemble a single-shot WAV).
                     if meta_out is not None and isinstance(meta_out, dict):
                         meta_out.update(event)
+                    if (
+                        retry_empty
+                        and _tts_stateful_code2wav_enabled()
+                        and emitted_chunks == 0
+                    ):
+                        retry_after_empty = True
+                        self._restart_worker_locked(
+                            f"stateful stream returned 0 chunks for request {req_id}"
+                        )
                     break
+        if retry_after_empty:
+            logger.warning(
+                "Retrying TTS stream after empty stateful result "
+                "(done=%s stderr_tail=%s)",
+                done_event,
+                self._worker_stderr_snip(),
+            )
+            yield from self._generate_streaming_single(
+                text,
+                meta_out=meta_out,
+                _retry_empty=False,
+                **kwargs,
+            )
 
     def synthesize(
         self,
@@ -789,7 +883,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             if len(segments) > 1:
                 segment_kwargs = dict(kwargs)
                 segment_kwargs["segment_text"] = False
-                segment_kwargs.setdefault("seed", int(_env("OVS_TTS_SEED", "SEEED_LOCAL_VOICE_TTS_SEED", default="42")))
+                segment_kwargs.setdefault("seed", _tts_seed())
                 wav_parts: list[bytes] = []
                 segment_meta: list[dict] = []
                 total_elapsed = 0.0
@@ -922,7 +1016,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
                 **kwargs,
             )
         if self._use_worker():
-            return self._synthesize_worker(text, language, **kwargs)
+            return self._synthesize_worker(text, language, speaker_id=speaker_id, **kwargs)
 
         # Build input JSON
         input_data = {
@@ -951,6 +1045,8 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
                 "min_audio_length", _DEFAULT_MIN_AUDIO_LENGTH
             ),
         }
+        voice_kwargs = self._resolve_voice_kwargs({"speaker_id": speaker_id, **kwargs})
+        self._add_speaker_request_fields(input_data["requests"][0], voice_kwargs)
 
         with tempfile.TemporaryDirectory(prefix="trt_edgellm_tts_") as tmpdir:
             input_path = os.path.join(tmpdir, "input.json")
@@ -1019,3 +1115,20 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
                     )
 
             return wav_bytes, meta
+
+    @staticmethod
+    @staticmethod
+    def _resolve_voice_kwargs(kwargs: dict) -> dict:
+        if kwargs.get("speaker_embedding"):
+            return {"speaker_embedding": kwargs["speaker_embedding"]}
+        speaker_id = kwargs.get("speaker_id")
+        return speaker_kwargs_for_id(speaker_id)
+
+    @staticmethod
+    def _add_speaker_request_fields(request: dict, voice_kwargs: dict) -> None:
+        if not voice_kwargs:
+            return
+        if "speaker_id" in voice_kwargs:
+            request["speaker_id"] = int(voice_kwargs["speaker_id"])
+        if "speaker" in voice_kwargs:
+            request["speaker"] = str(voice_kwargs["speaker"])

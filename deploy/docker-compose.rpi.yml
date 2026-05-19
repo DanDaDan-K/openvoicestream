@@ -17,7 +17,7 @@ services:
       - speech-models:/opt/models
     environment:
       - OVS_PROFILE=${OVS_PROFILE:-}
-      - SEEED_LOCAL_VOICE_PROFILE=${SEEED_LOCAL_VOICE_PROFILE:-rpi5-default}
+      - OVS_PROFILE_DEFAULT=${OVS_PROFILE_DEFAULT:-rpi5-default}
       - LANGUAGE_MODE=${LANGUAGE_MODE:-zh_en}
       - MODEL_DIR=${MODEL_DIR:-/opt/models}
       - ASR_BACKEND=${ASR_BACKEND:-sherpa}

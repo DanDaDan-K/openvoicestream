@@ -6,10 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import struct
 import sys
 import time
 import urllib.error
 import urllib.request
+import wave
+from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -54,6 +57,27 @@ def post_json(url: str, payload: dict, timeout: float) -> bytes:
         return resp.read()
 
 
+def pcm_stream_to_wav(payload: bytes) -> bytes:
+    if len(payload) < 4:
+        raise RuntimeError(f"TTS stream returned too little data: {len(payload)} bytes")
+    sample_rate = struct.unpack("<I", payload[:4])[0]
+    pcm = payload[4:]
+    out = BytesIO()
+    with wave.open(out, "wb") as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(sample_rate)
+        writer.writeframes(pcm)
+    return out.getvalue()
+
+
+def wav_duration_s(wav_bytes: bytes) -> float:
+    with wave.open(BytesIO(wav_bytes), "rb") as reader:
+        rate = reader.getframerate()
+        frames = reader.getnframes()
+    return frames / rate if rate > 0 else 0.0
+
+
 def post_multipart_file(url: str, field: str, path: Path, timeout: float) -> dict:
     boundary = f"openvoicestream-{time.time_ns()}"
     mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -82,6 +106,10 @@ def main() -> int:
     parser.add_argument("--min-sim", type=float, default=0.2)
     parser.add_argument("--timeout-sec", type=float, default=120)
     parser.add_argument("--keep-audio", type=Path)
+    parser.add_argument("--streaming", action="store_true", help="use /tts/stream and wrap raw PCM as WAV")
+    parser.add_argument("--min-audio-sec", type=float, default=0.0)
+    parser.add_argument("--expect-asr-segmented", action="store_true")
+    parser.add_argument("--max-failed-segments", type=int, default=0)
     args = parser.parse_args()
 
     base = args.url.rstrip("/")
@@ -92,9 +120,18 @@ def main() -> int:
         if not health.get("asr"):
             raise RuntimeError(f"ASR is not ready: {health}")
 
-        wav = post_json(f"{base}/tts", {"text": args.text}, args.timeout_sec)
+        if args.streaming:
+            stream_payload = post_json(f"{base}/tts/stream", {"text": args.text}, args.timeout_sec)
+            wav = pcm_stream_to_wav(stream_payload)
+        else:
+            wav = post_json(f"{base}/tts", {"text": args.text}, args.timeout_sec)
         if len(wav) < 1000:
             raise RuntimeError(f"TTS returned too little audio: {len(wav)} bytes")
+        duration_s = wav_duration_s(wav)
+        if duration_s < args.min_audio_sec:
+            raise RuntimeError(
+                f"TTS audio duration {duration_s:.2f}s < required {args.min_audio_sec:.2f}s"
+            )
 
         if args.keep_audio:
             args.keep_audio.write_bytes(wav)
@@ -121,6 +158,10 @@ def main() -> int:
             "expected": args.text,
             "asr_text": text,
             "similarity": round(sim, 4),
+            "audio_duration_s": round(duration_s, 3),
+            "asr_segmented": bool(asr.get("segmented")),
+            "asr_segment_count": asr.get("segment_count"),
+            "asr_failed_segments": asr.get("failed_segments"),
             "health": health,
         }
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -128,6 +169,13 @@ def main() -> int:
             raise RuntimeError("ASR returned empty text")
         if sim < args.min_sim:
             raise RuntimeError(f"similarity {sim:.4f} < required {args.min_sim:.4f}")
+        if args.expect_asr_segmented and not asr.get("segmented"):
+            raise RuntimeError(f"ASR did not report segmented=true: {asr}")
+        failed_segments = int(asr.get("failed_segments", 0) or 0)
+        if failed_segments > args.max_failed_segments:
+            raise RuntimeError(
+                f"ASR failed_segments {failed_segments} > allowed {args.max_failed_segments}"
+            )
     except (urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
         print(f"roundtrip verification failed: {exc}", file=sys.stderr)
         return 1

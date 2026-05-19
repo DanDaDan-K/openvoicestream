@@ -22,7 +22,7 @@ History — Jetson image patches (each fix forced a rebake):
 - v1.4 → layered TRT/CUDA libs (all < 500 MB), passes registry
 - v1.5 → EdgeLLM plugin replaced with W8A16-capable build
 - v1.6 → engine_resolver + profile fixes added (missed full app/ refresh)
-- v1.7 → full app/ + configs/ refresh, baked SEEED_LOCAL_VOICE_PROFILE blanked
+- v1.7 → full app/ + configs/ refresh, baked OVS_PROFILE blanked
 - v1.8 → hf_artifacts User-Agent fix (hf-mirror 403)
 - v1.9 → engine_resolver manifest key alignment (model-relative vs full path)
 - v1.10 → multilang preset also pulls matcha-icefall-zh-en bundle from Seeed CDN
@@ -72,7 +72,7 @@ Requires:
 ```bash
 docker run -d --name seeed-jetson --runtime nvidia --network host \
   -v /tmp/nano-audit:/opt/models/qwen3-edgellm:ro \
-  -e SEEED_LOCAL_VOICE_PRESET=voice_clone \
+  -e OVS_PRESET=voice_clone \
   -e HF_ENDPOINT=https://hf-mirror.com \
   -e QWEN3_ARTIFACT_ROOT=/opt/models/qwen3-edgellm \
   sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:jetson-v1.12-highperf
@@ -83,7 +83,7 @@ docker run -d --name seeed-jetson --runtime nvidia --network host \
 docker run -d --name seeed-jetson-ml --runtime nvidia --network host \
   -v /tmp/nano-audit:/opt/models/qwen3-edgellm:ro \
   -v seeed-models:/opt/models \
-  -e SEEED_LOCAL_VOICE_PRESET=multilang \
+  -e OVS_PRESET=multilang \
   -e HF_ENDPOINT=https://hf-mirror.com \
   -e QWEN3_ARTIFACT_ROOT=/opt/models/qwen3-edgellm \
   sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:jetson-v1.12-highperf
@@ -107,7 +107,7 @@ Artifact decision flow:
 ```bash
 docker run -d --name seeed-jetson-lite --runtime nvidia --network host \
   -v seeed-models:/opt/models \
-  -e SEEED_LOCAL_VOICE_PRESET=lite_zh_en \
+  -e OVS_PRESET=lite_zh_en \
   -e HF_ENDPOINT=https://hf-mirror.com \
   sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:jetson-v1.12-highperf
 ```
@@ -153,7 +153,7 @@ docker run -d --name seeed-rk --privileged --network host \
   -v /dev:/dev \
   -v seeed-rk-asr:/opt/asr/models \
   -v seeed-rk-tts:/opt/tts/models \
-  -e SEEED_LOCAL_VOICE_PRESET=multilang \
+  -e OVS_PRESET=multilang \
   -e RK_ARTIFACT_REPO_ID=harvestsu/seeed-local-voice-rk-artifacts \
   -e RK_ARTIFACT_SET=rk3588-multilang-2026-05-17 \
   sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-v1.4-closedloop
@@ -176,7 +176,7 @@ CPU-only (sherpa-onnx). No `--runtime nvidia`, no `--privileged`.
 **asr_zh_en (RPi4/CM4 minimum: Paraformer streaming, no TTS)**
 ```bash
 docker run -d --name seeed-rpi-asr -p 8621:8000 \
-  -e SEEED_LOCAL_VOICE_PRESET=asr_zh_en \
+  -e OVS_PRESET=asr_zh_en \
   -v seeed-models:/opt/models \
   sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rpi-v1.0-onnx
 ```
@@ -186,7 +186,7 @@ docker run -d --name seeed-rpi-asr -p 8621:8000 \
 Until `lite_zh_en × rpi5` is added to PRESET_TABLE, use explicit profile:
 ```bash
 docker run -d --name seeed-rpi-lite -p 8621:8000 \
-  -e SEEED_LOCAL_VOICE_PROFILE=rpi5-default \
+  -e OVS_PROFILE=rpi5-default \
   -v seeed-models:/opt/models \
   sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rpi-v1.0-onnx
 ```
@@ -365,14 +365,14 @@ V2V forced-EOS llm=0 (warmup 3 + 5 runs): short/zh 323ms; long/zh 876ms; short/e
 
 ## Common gotchas
 
-- **`SEEED_LOCAL_VOICE_PROFILE=...` overrides PRESET.** Don't pass both. New v1.7 / rk-v1.1 / rpi-v1.1 images do NOT bake a default PROFILE.
+- **`OVS_PROFILE=...` overrides PRESET.** Don't pass both. New v1.7 / rk-v1.1 / rpi-v1.1 images do NOT bake a default PROFILE.
 - **HF_ENDPOINT for China users**: set `https://hf-mirror.com` so engine_resolver can pull bundles. Defaults to `https://huggingface.co` (works internationally).
 - **Jetson multilang requires the `qwen3-edgellm-jetson` artifact set** at the path the profile expects. The `-v /tmp/nano-audit:/opt/models/qwen3-edgellm:ro` mount is what supplies it on Nano; for AGX/NX you must `hf download harvestsu/qwen3-edgellm-jetson-artifacts --local-dir <path>` first.
 - **RK image vendors userspace runtime libs.** Do not bind-mount
   `librknnrt.so` / `librkllmrt.so` unless intentionally testing a different
   runtime. If `RK_RUNTIME_STRICT=1` reports a mismatch, remove the override or
   update the device BSP/runtime/artifact set.
-- **Port conflicts**: default deployments use host port 8621. If that port is already occupied, set `SEEED_LOCAL_VOICE_PORT` for `deploy/install.sh` or override the compose command/port mapping consistently.
+- **Port conflicts**: default deployments use host port 8621. If that port is already occupied, set `OVS_PORT` for `deploy/install.sh` or override the compose command/port mapping consistently.
 - **`docker logs <name>` can be noisy** during first start (model download progress bars). Filter with `| grep -E "INFO|WARN|ERROR|backend|Application|ready"`.
 
 ## Reload / restart commands

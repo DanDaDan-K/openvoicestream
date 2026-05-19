@@ -66,7 +66,7 @@ fleet exec "$NODE" -- "
 if [[ "$PERF_ARGS" != *"--base-url"* ]]; then
   SUB="${PERF_ARGS%% *}"
   REST="${PERF_ARGS#${SUB}}"      # everything after the subcommand, may be empty
-  PERF_ARGS="$SUB --base-url http://127.0.0.1:${OVS_PORT:-${SEEED_LOCAL_VOICE_PORT:-8621}} --mode-label local$REST"
+  PERF_ARGS="$SUB --base-url http://127.0.0.1:${OVS_PORT:-8621} --mode-label local$REST"
 fi
 
 echo ">> Running perf on-device: python perf.py $PERF_ARGS"

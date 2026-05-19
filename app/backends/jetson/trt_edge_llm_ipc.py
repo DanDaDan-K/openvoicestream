@@ -38,21 +38,17 @@ _EDGE_LLM_BUILD = os.path.join(
 )
 _OPENVOICESTREAM_BASE = (
     os.environ.get("OVS_BASE")
-    or os.environ.get("SEEED_LOCAL_VOICE_BASE")
     or os.path.expanduser("~/project/openvoicestream")
 )
 _VOICE_WORKER_BUILD = os.environ.get(
     "OVS_WORKER_BUILD",
-    os.environ.get(
-        "SEEED_LOCAL_VOICE_WORKER_BUILD",
-        os.path.join(_OPENVOICESTREAM_BASE, "build", "edgellm_voice_worker", "workers"),
-    ),
+    os.path.join(_OPENVOICESTREAM_BASE, "build", "edgellm_voice_worker", "workers"),
 )
 
 
 QWEN3_RUNTIME_PROFILE = os.environ.get(
     "EDGE_LLM_QWEN3_PROFILE",
-    os.environ.get("OVS_QWEN3_PROFILE", os.environ.get("SEEED_LOCAL_VOICE_QWEN3_PROFILE", "highperf")),
+    os.environ.get("OVS_QWEN3_PROFILE", "highperf"),
 ).strip().lower().replace("-", "_")
 
 

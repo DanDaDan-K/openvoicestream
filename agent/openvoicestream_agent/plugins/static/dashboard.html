@@ -42,6 +42,7 @@
     <button id="btnMenu" class="icon-btn" title="更多">⋮</button>
     <div id="menu" class="menu hidden">
       <button id="btnClear">清空日志</button>
+      <button id="btnClearContextMenu">清空上下文</button>
       <button id="btnPause">暂停</button>
     </div>
   </div>
@@ -63,6 +64,7 @@
     <div class="tab-panel" id="tab-history">
       <div class="history-toolbar">
         <button id="btnRefreshHist" class="ctl-btn">刷新</button>
+        <button id="btnClearHist" class="ctl-btn danger">清空上下文</button>
         <span class="muted">数据来源: <code>/api/session/history</code></span>
       </div>
       <div id="history" class="history-stream"></div>

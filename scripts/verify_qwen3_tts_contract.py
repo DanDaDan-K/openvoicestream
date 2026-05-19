@@ -131,10 +131,6 @@ def collect_contract(args: argparse.Namespace) -> dict[str, Any]:
     os.environ["OVS_TTS_SEED"] = str(args.seed)
     os.environ.setdefault("OVS_TTS_MODEL_BASE", args.model_base)
     os.environ.setdefault("OVS_TTS_NATIVE_MODULE_DIR", args.native_module_dir)
-    os.environ.setdefault("SEEED_LOCAL_VOICE_TTS_BACKEND", os.environ["OVS_TTS_BACKEND"])
-    os.environ.setdefault("SEEED_LOCAL_VOICE_TTS_SEED", os.environ["OVS_TTS_SEED"])
-    os.environ.setdefault("SEEED_LOCAL_VOICE_TTS_MODEL_BASE", os.environ["OVS_TTS_MODEL_BASE"])
-    os.environ.setdefault("SEEED_LOCAL_VOICE_TTS_NATIVE_MODULE_DIR", os.environ["OVS_TTS_NATIVE_MODULE_DIR"])
 
     app_dir = args.app_dir
     overlay = os.environ["OVS_TTS_NATIVE_MODULE_DIR"]

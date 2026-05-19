@@ -12,7 +12,7 @@ ARTIFACT_SET="${QWEN3_ARTIFACT_SET:-orin-nano-highperf-2026-05-10}"
 ARTIFACT_ROOT="${QWEN3_ARTIFACT_ROOT:-/opt/models/qwen3-edgellm}"
 SERVICE_PORT="${SERVICE_PORT:-18621}"
 CONTAINER="${CONTAINER:-ovs-highperf-verify}"
-PROFILE="${OVS_PROFILE:-${SEEED_LOCAL_VOICE_PROFILE:-jetson-multilang-highperf}}"
+PROFILE="${OVS_PROFILE:-jetson-multilang-highperf}"
 PUSH=0
 EXPORT_TAR=""
 
@@ -98,7 +98,6 @@ docker run -d --name "$CONTAINER" --runtime nvidia --network host --ipc host \
   -v /usr/src/tensorrt:/usr/src/tensorrt:ro \
   -e LANGUAGE_MODE=multilanguage \
   -e OVS_PROFILE="$PROFILE" \
-  -e SEEED_LOCAL_VOICE_PROFILE="$PROFILE" \
   -e QWEN3_ARTIFACT_ROOT=/opt/models/qwen3-edgellm \
   -e QWEN3_ARTIFACT_VERIFY_SHA256=1 \
   -e CUDA_MODULE_LOADING=LAZY \
@@ -126,6 +125,17 @@ docker exec "$CONTAINER" bash /opt/qwen3-edgellm-jetson/scripts/verify_reproduct
   --set "$ARTIFACT_SET" \
   --service-url "http://127.0.0.1:$SERVICE_PORT" \
   --skip-clone
+
+log "Long Chinese TTS stream -> segmented ASR gate"
+python3 deploy/roundtrip_verify.py \
+  --url "http://127.0.0.1:$SERVICE_PORT" \
+  --streaming \
+  --language chinese \
+  --timeout-sec 180 \
+  --min-audio-sec 8 \
+  --expect-asr-segmented \
+  --min-sim 0.18 \
+  --text "这是一个没有任何标点符号的很长中文单句我们要验证它会不会被切成足够短的小段避免状态化声码器在后半段逐渐发散产生噪声和吞音同时还要保持前后内容完整清楚自然不要重复不要变成杂音"
 
 log "ASR streaming gate"
 docker exec "$CONTAINER" bash /opt/qwen3-edgellm-jetson/scripts/verify_reproduction_streaming.sh \

@@ -115,6 +115,7 @@ class SLVClient:
         if self._ws is not None:
             return  # idempotent
         self._reader_done.clear()
+        self._tts_sample_rate = None
         self._ws = await ws_connect(self.url, max_size=None)
         await self._ws.send(json.dumps({"type": CLIENT_CONFIG, **self.config}))
         self._reader_task = asyncio.create_task(self._reader_loop(), name="slv-reader")
@@ -146,6 +147,7 @@ class SLVClient:
                 except Exception:
                     pass
             self._reader_done.clear()
+            self._tts_sample_rate = None
             self._ws = await ws_connect(self.url, max_size=None)
             await self._ws.send(json.dumps({"type": CLIENT_CONFIG, **self.config}))
             self._reader_task = asyncio.create_task(self._reader_loop(), name="slv-reader")
@@ -197,9 +199,12 @@ class SLVClient:
                 self._ws = None
 
     async def send_text(self, text: str) -> None:
+        if text:
+            logger.info("SLV send text chunk len=%d", len(text))
         await self._send_json({"type": CLIENT_TEXT, "text": text})
 
     async def flush_tts(self) -> None:
+        logger.info("SLV send tts_flush")
         await self._send_json({"type": CLIENT_TTS_FLUSH})
 
     async def abort(self) -> None:
@@ -286,9 +291,11 @@ class SLVClient:
             (sr,) = struct.unpack("<I", data[:4])
             self._tts_sample_rate = sr
             pcm = data[4:]
+            logger.info("SLV tts sample_rate=%d first_pcm=%d", sr, len(pcm))
             if pcm:
                 await self._queue.put(TTSAudio(pcm=pcm, sample_rate=sr))
             return
+        logger.info("SLV tts audio bytes=%d", len(data))
         await self._queue.put(TTSAudio(pcm=data, sample_rate=self._tts_sample_rate))
 
     async def _handle_json(self, raw: str) -> None:
@@ -313,10 +320,12 @@ class SLVClient:
                 )
             )
         elif t == SERVER_TTS_STARTED:
+            logger.info("SLV tts_started sentence=%r", evt.get("sentence", "")[:80])
             await self._queue.put(TTSStarted(sentence=evt.get("sentence", "")))
         elif t == SERVER_TTS_SENTENCE_DONE:
             await self._queue.put(TTSSentenceDone(sentence=evt.get("sentence", "")))
         elif t == SERVER_TTS_DONE:
+            logger.info("SLV tts_done")
             await self._queue.put(TTSDone())
         elif t == SERVER_ERROR:
             await self._queue.put(SLVError(evt.get("error", "unknown")))

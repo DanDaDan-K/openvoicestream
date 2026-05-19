@@ -1106,6 +1106,19 @@ class BaseApp:
                 self._set_state(ConvState.IDLE)
                 self._reset_sleep_timer()
             await self._broadcast("on_assistant_done")
+            # SLV closes /v2v/stream after honoring tts_flush. Reconnect
+            # proactively here so the next mic turn does not send ASR/text
+            # frames into a closing transport and silently lose TTS.
+            try:
+                await asyncio.wait_for(self.slv.reconnect(), timeout=2.0)
+                self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
+                await self._broadcast(
+                    "on_slv_reconnect", {"count": self._slv_reconnect_count}
+                )
+            except asyncio.TimeoutError:
+                logger.warning("SLV reconnect timed out after tts_done")
+            except Exception:
+                logger.exception("SLV reconnect failed after tts_done")
             return
 
         if isinstance(evt, SLVError):

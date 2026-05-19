@@ -5,7 +5,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.core.asr_backend import ASRCapability
+from app.core.asr_backend import ASRCapability, TranscriptionResult
 from app.backends.jetson.trt_edge_llm_asr import (
     TRTEdgeLLMASRBackend,
     _float_audio_to_wav_bytes,
@@ -43,6 +43,91 @@ def test_trt_edgellm_asr_advertises_streaming_capability():
     backend = TRTEdgeLLMASRBackend()
 
     assert ASRCapability.STREAMING in backend.capabilities
+
+
+def test_trt_edgellm_asr_offline_transcribe_segments_long_audio(monkeypatch):
+    import app.backends.jetson.qwen3_asr as qwen3_asr
+    import app.backends.jetson.trt_edge_llm_asr as asr_mod
+
+    monkeypatch.setenv("OVS_VAD_BACKEND", "none")
+    monkeypatch.setenv("EDGE_LLM_ASR_OFFLINE_SEGMENT_SEC", "2.0")
+    audio = np.ones(16000 * 5, dtype=np.float32) * 0.02
+    wav_bytes = _float_audio_to_wav_bytes(audio, 16000)
+
+    def fake_split(samples, sample_rate=16000):
+        assert sample_rate == 16000
+        return [
+            samples[: sample_rate * 2],
+            samples[sample_rate * 2 : sample_rate * 4],
+            samples[sample_rate * 4 :],
+        ]
+
+    calls = []
+
+    def fake_mel(segment_wav):
+        calls.append(segment_wav)
+        return np.zeros((1, 128, 100), dtype=np.float32)
+
+    def fake_worker(mel_path, elapsed_mel_s):
+        idx = len(calls)
+        return TranscriptionResult(
+            text=f"第{idx}段。",
+            language="Chinese",
+            inference_time_s=0.1,
+            mel_time_s=0.01,
+            worker_time_s=0.09,
+        )
+
+    monkeypatch.setattr(qwen3_asr, "_split_at_silence_vad", fake_split)
+    monkeypatch.setattr(asr_mod, "audio_bytes_to_mel", fake_mel)
+
+    backend = TRTEdgeLLMASRBackend()
+    backend._ready = True
+    monkeypatch.setattr(backend, "_use_worker", lambda: True)
+    monkeypatch.setattr(backend, "_transcribe_worker", fake_worker)
+
+    result = backend.transcribe(wav_bytes, language="Chinese")
+
+    assert result.text == "第1段第2段第3段。"
+    assert result.language == "Chinese"
+    assert result.meta["segmented"] is True
+    assert result.meta["segment_count"] == 3
+    assert len(calls) == 3
+
+
+def test_trt_edgellm_asr_offline_split_uses_configured_vad(monkeypatch):
+    import app.core.vad as vad_mod
+    import app.backends.jetson.trt_edge_llm_asr as asr_mod
+
+    class ScriptedVAD:
+        def __init__(self):
+            self.calls = 0
+
+        def process(self, samples):
+            self.calls += 1
+            return vad_mod.VADSession.SPEECH_END if self.calls == 25 else None
+
+        def reset(self):
+            self.calls = 0
+
+    created = {}
+
+    def fake_create_vad(backend, sample_rate, silence_ms, **kwargs):
+        created["backend"] = backend
+        created["sample_rate"] = sample_rate
+        created["silence_ms"] = silence_ms
+        return ScriptedVAD()
+
+    monkeypatch.setenv("OVS_VAD_BACKEND", "silero")
+    monkeypatch.setenv("OVS_VAD_SILENCE_MS", "320")
+    monkeypatch.setenv("EDGE_LLM_ASR_OFFLINE_SEGMENT_SEC", "10")
+    monkeypatch.setattr(vad_mod, "create_vad", fake_create_vad)
+
+    audio = np.ones(16000, dtype=np.float32) * 0.02
+    segments = asr_mod._split_offline_audio(audio, 16000, max_segment_s=10)
+
+    assert created == {"backend": "silero", "sample_rate": 16000, "silence_ms": 320}
+    assert len(segments) == 2
 
 
 # ── worker-error classification ─────────────────────────────────────────

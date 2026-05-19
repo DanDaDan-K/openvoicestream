@@ -445,12 +445,28 @@
     pendingPartialBubble = null; pendingAssistantBubble = null; pendingAssistantText = "";
     $("menu").classList.add("hidden");
   });
+  async function clearSessionContext() {
+    if (!window.confirm("清空 LLM 上下文？当前模式和 system prompt 设置会保留。")) return;
+    const r = await fetch("/api/session/clear", { method: "POST" });
+    let data = {};
+    try { data = await r.json(); } catch (_) {}
+    if (!r.ok || data.ok === false) throw new Error(data.error || ("HTTP " + r.status));
+    await refreshHistory();
+    showToast("已清空上下文 (" + (data.cleared || 0) + " 条)", "success");
+  }
+  $("btnClearContextMenu").addEventListener("click", async () => {
+    $("menu").classList.add("hidden");
+    try { await clearSessionContext(); } catch (e) { showToast("清空上下文失败: " + e.message, "error"); }
+  });
   $("btnPause").addEventListener("click", () => {
     paused = !paused;
     $("btnPause").textContent = paused ? "Resume" : "Pause";
     $("menu").classList.add("hidden");
   });
   $("btnRefreshHist").addEventListener("click", refreshHistory);
+  $("btnClearHist").addEventListener("click", async () => {
+    try { await clearSessionContext(); } catch (e) { showToast("清空上下文失败: " + e.message, "error"); }
+  });
 
   // pipeline_mode controls — visibility set after snapshot arrives.
   $("btnWake").addEventListener("click", async () => {

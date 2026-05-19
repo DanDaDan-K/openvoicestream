@@ -13,8 +13,8 @@ Examples:
   deploy/install.sh --target rpi --pull --verify
 
 Environment overrides:
-  LANGUAGE_MODE, OVS_PROFILE (or SEEED_LOCAL_VOICE_PROFILE), RK_ARTIFACT_SET,
-  QWEN3_ARTIFACT_SET, QWEN3_HF_REPO_ID, OVS_PORT (or SEEED_LOCAL_VOICE_PORT),
+  LANGUAGE_MODE, OVS_PROFILE, RK_ARTIFACT_SET,
+  QWEN3_ARTIFACT_SET, QWEN3_HF_REPO_ID, OVS_PORT,
   HF_ENDPOINT, PARAFORMER_PREROLL_MS
 EOF
 }
@@ -153,7 +153,7 @@ case "$canonical_target" in
     if [[ ! -e /usr/local/cuda/lib64/libcudla.so.1 ]]; then
       die "Jetson CUDA runtime library libcudla.so.1 is missing under /usr/local/cuda/lib64. Check the JetPack/CUDA installation before starting the slim image."
     fi
-    profile="${OVS_PROFILE:-${SEEED_LOCAL_VOICE_PROFILE:-}}"
+    profile="${OVS_PROFILE:-}"
     if [[ -n "${profile}" && "${profile}" == jetson-multilang-* ]]; then
       echo "Jetson Qwen3 profile: ${profile}"
       echo "Qwen3 artifacts: ${QWEN3_HF_REPO_ID:-harvestsu/qwen3-edgellm-jetson-artifacts}@${QWEN3_HF_REVISION:-main}"
@@ -202,7 +202,7 @@ if ! docker compose -f "$compose_file" "${up_args[@]}"; then
   exit 1
 fi
 
-port="${OVS_PORT:-${SEEED_LOCAL_VOICE_PORT:-8621}}"
+port="${OVS_PORT:-8621}"
 url="http://127.0.0.1:${port}"
 
 echo "Service URL: ${url}"

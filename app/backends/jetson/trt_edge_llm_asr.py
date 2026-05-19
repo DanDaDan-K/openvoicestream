@@ -56,6 +56,33 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.lower() not in ("0", "false", "no")
 
 
+def _offline_segment_enabled() -> bool:
+    return _env_bool("EDGE_LLM_ASR_OFFLINE_SEGMENT", True)
+
+
+def _offline_segment_threshold_s() -> float:
+    return float(os.environ.get("EDGE_LLM_ASR_OFFLINE_SEGMENT_SEC", "6.0"))
+
+
+def _offline_segment_min_s() -> float:
+    return float(os.environ.get("EDGE_LLM_ASR_OFFLINE_MIN_SEGMENT_SEC", "0.4"))
+
+
+def _default_offline_vad_backend() -> str:
+    return (
+        os.environ.get("OVS_VAD_BACKEND")
+        or "silero"
+    ).strip() or "silero"
+
+
+def _default_offline_vad_silence_ms() -> int:
+    raw = os.environ.get("OVS_VAD_SILENCE_MS")
+    try:
+        return int(raw) if raw else 400
+    except ValueError:
+        return 400
+
+
 class WorkerProtocolError(RuntimeError):
     """Base class for ASR worker protocol-level errors.
 
@@ -582,6 +609,17 @@ class TRTEdgeLLMASRBackend(ASRBackend):
         if not self._ready:
             raise RuntimeError("ASR backend not preloaded")
 
+        if _offline_segment_enabled():
+            try:
+                audio, sample_rate = _wav_bytes_to_float_audio(audio_bytes)
+                duration_s = len(audio) / max(sample_rate, 1)
+            except Exception:
+                audio = None
+                sample_rate = 16000
+                duration_s = 0.0
+            if audio is not None and duration_s > _offline_segment_threshold_s():
+                return self._transcribe_segmented_offline(audio, sample_rate, language)
+
         with tempfile.TemporaryDirectory(
             prefix="trt_edgellm_asr_"
         ) as tmpdir:
@@ -689,6 +727,72 @@ class TRTEdgeLLMASRBackend(ASRBackend):
                 text=text, language=language_detected, **meta
             )
 
+    def _transcribe_segmented_offline(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        language: str,
+    ) -> TranscriptionResult:
+        """Split long offline WAV uploads before sending them to the worker."""
+        if sample_rate != 16000:
+            ratio = 16000 / sample_rate
+            new_len = max(1, int(round(len(audio) * ratio)))
+            audio = np.interp(
+                np.linspace(0, len(audio) - 1, new_len),
+                np.arange(len(audio)),
+                audio,
+            ).astype(np.float32)
+            sample_rate = 16000
+
+        original_duration_s = len(audio) / sample_rate
+        segments = _split_offline_audio(
+            audio,
+            sample_rate,
+            max_segment_s=_offline_segment_threshold_s(),
+        )
+        texts: list[str] = []
+        last_language = language
+        total_inference_s = 0.0
+        total_mel_s = 0.0
+        total_worker_s = 0.0
+        failed_segments = 0
+        min_seg_s = _offline_segment_min_s()
+
+        for seg in segments:
+            seg_duration_s = len(seg) / sample_rate
+            if seg_duration_s < min_seg_s:
+                continue
+            wav_bytes = _float_audio_to_wav_bytes(seg, sample_rate)
+            try:
+                result = self.transcribe(wav_bytes, language=language)
+            except Exception as exc:
+                failed_segments += 1
+                logger.warning(
+                    "TRT-EdgeLLM ASR offline segment failed (%.1fs): %s",
+                    seg_duration_s,
+                    exc,
+                )
+                continue
+            if result.text:
+                texts.append(result.text)
+            last_language = result.language or last_language
+            total_inference_s += float(result.meta.get("inference_time_s", 0.0) or 0.0)
+            total_mel_s += float(result.meta.get("mel_time_s", 0.0) or 0.0)
+            total_worker_s += float(result.meta.get("worker_time_s", 0.0) or 0.0)
+
+        return TranscriptionResult(
+            text=_join_segment_texts(texts, last_language or language),
+            language=last_language,
+            segmented=True,
+            segment_count=len(segments),
+            failed_segments=failed_segments,
+            original_duration_s=round(original_duration_s, 3),
+            inference_time_s=round(total_inference_s, 3),
+            mel_time_s=round(total_mel_s, 3),
+            worker_time_s=round(total_worker_s, 3),
+            worker_init_ms=round(float(self._worker_ready_meta.get("init_ms", 0.0)), 1),
+        )
+
     def create_stream(self, language: str = "auto") -> ASRStream:
         """Accumulate stream audio and run the resident worker on finalize.
 
@@ -713,6 +817,125 @@ def _float_audio_to_wav_bytes(audio: np.ndarray, sample_rate: int) -> bytes:
         wav.setframerate(sample_rate)
         wav.writeframes(pcm.tobytes())
     return out.getvalue()
+
+
+def _wav_bytes_to_float_audio(audio_bytes: bytes) -> tuple[np.ndarray, int]:
+    with wave.open(io.BytesIO(audio_bytes), "rb") as wav:
+        sample_rate = wav.getframerate()
+        channels = wav.getnchannels()
+        sample_width = wav.getsampwidth()
+        frames = wav.readframes(wav.getnframes())
+    if sample_width == 2:
+        audio = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    elif sample_width == 4:
+        audio = np.frombuffer(frames, dtype="<i4").astype(np.float32) / 2147483648.0
+    elif sample_width == 1:
+        audio = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    else:
+        raise ValueError(f"Unsupported WAV sample width: {sample_width}")
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    return audio.astype(np.float32), sample_rate
+
+
+def _split_offline_audio(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    max_segment_s: float,
+) -> list[np.ndarray]:
+    configured_vad_segments = _split_offline_audio_with_configured_vad(
+        audio,
+        sample_rate,
+        max_segment_s=max_segment_s,
+    )
+    if configured_vad_segments:
+        return configured_vad_segments
+
+    try:
+        from app.backends.jetson.qwen3_asr import _split_at_silence_vad
+        segments = _split_at_silence_vad(audio, sample_rate)
+    except ImportError:
+        from app.backends.jetson.qwen3_asr import _split_at_silence_energy
+        segments = _split_at_silence_energy(audio, sample_rate)
+    except Exception as exc:
+        logger.warning("TRT-EdgeLLM ASR offline splitter failed: %s", exc)
+        segments = [audio]
+
+    max_samples = max(1, int(max_segment_s * sample_rate))
+    bounded: list[np.ndarray] = []
+    for seg in segments:
+        if len(seg) <= max_samples:
+            bounded.append(seg)
+            continue
+        for start in range(0, len(seg), max_samples):
+            bounded.append(seg[start:start + max_samples])
+    return [seg for seg in bounded if len(seg) > 0]
+
+
+def _split_offline_audio_with_configured_vad(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    max_segment_s: float,
+) -> list[np.ndarray]:
+    backend = _default_offline_vad_backend()
+    if backend.lower() in ("", "none", "off", "disabled"):
+        return []
+    try:
+        from app.core.vad import VADSession, create_vad
+        vad = create_vad(
+            backend=backend,
+            sample_rate=sample_rate,
+            silence_ms=_default_offline_vad_silence_ms(),
+        )
+    except Exception as exc:
+        logger.warning("Configured offline ASR VAD %r unavailable: %s", backend, exc)
+        return []
+    if vad is None:
+        return []
+
+    max_samples = max(1, int(max_segment_s * sample_rate))
+    min_samples = max(1, int(_offline_segment_min_s() * sample_rate))
+    chunk_samples = max(1, int(0.02 * sample_rate))
+    cuts = [0]
+    last_cut = 0
+
+    for end in range(chunk_samples, len(audio) + chunk_samples, chunk_samples):
+        chunk_end = min(end, len(audio))
+        chunk = audio[end - chunk_samples:chunk_end] if end <= len(audio) else audio[end - chunk_samples:]
+        if len(chunk) == 0:
+            continue
+        event = vad.process(chunk)
+        elapsed = chunk_end - last_cut
+        if event == VADSession.SPEECH_END and elapsed >= min_samples:
+            cuts.append(chunk_end)
+            last_cut = chunk_end
+            vad.reset()
+            continue
+        while chunk_end - last_cut >= max_samples:
+            last_cut += max_samples
+            cuts.append(last_cut)
+            vad.reset()
+
+    if cuts[-1] != len(audio):
+        cuts.append(len(audio))
+
+    segments = [audio[cuts[i]:cuts[i + 1]] for i in range(len(cuts) - 1)]
+    return [seg for seg in segments if len(seg) >= min_samples]
+
+
+def _join_segment_texts(texts: list[str], language: str | None) -> str:
+    texts = [text.strip() for text in texts if text and text.strip()]
+    if not texts:
+        return ""
+    if len(texts) > 1:
+        trail_punct = "。，、！？；,.!?;"
+        texts = [text.rstrip(trail_punct).rstrip() for text in texts[:-1]] + [texts[-1]]
+    cjk_langs = {"Chinese", "Japanese", "Korean", "Cantonese", "zh", "ja", "ko"}
+    lang = language or ""
+    is_cjk = lang in cjk_langs or any(lang.startswith(prefix) for prefix in ("zh", "ja", "ko"))
+    return ("" if is_cjk else " ").join(texts).strip()
 
 
 class _TRTEdgeLLMAccumulatingASRStream(ASRStream):
