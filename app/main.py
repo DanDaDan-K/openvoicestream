@@ -1450,7 +1450,16 @@ async def v2v_stream(ws: WebSocket):
                                 "error": "tts_language requested but no streaming TTS backend ready"})
             await ws.close(code=1011); return
         tts_be = tts_service.get_backend()
-        tts_buffer = v2v_proto.SentenceBuffer(language=tts_language_norm)
+        low_latency_tts = os.environ.get("OVS_TTS_LOW_LATENCY_CHUNKING", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        if low_latency_tts:
+            tts_buffer = v2v_proto.LowLatencyTTSBuffer(language=tts_language_norm)
+        else:
+            tts_buffer = v2v_proto.SentenceBuffer(language=tts_language_norm)
 
     logger.info("v2v stream opened (asr=%s tts=%s vad=%s)",
                 asr_language or "off", tts_language or "off", vad_backend if asr_language else "off")
