@@ -124,7 +124,7 @@ class Config:
     # below this ceiling. Default 3000 leaves a small margin under the
     # engines-3072 build's max_seq_len. Set to None to disable (matches
     # the original append-only invariant).
-    session_max_input_tokens: int | None = 3000
+    session_max_input_tokens: int | None = 2400
     # Tokenizer used to estimate prompt size. Default matches the most
     # common edge-llm engine; override per-deployment if your engine
     # ships a different vocabulary.
