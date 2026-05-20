@@ -27,6 +27,12 @@ services:
       - LANGUAGE_MODE=${LANGUAGE_MODE:-zh_en}
       - OVS_PROFILE=${OVS_PROFILE:-}
       - OVS_PROFILE_JSON=${OVS_PROFILE_JSON:-}
+      # Admin endpoints (/admin/backend/reload, /admin/backend/status, PATCH
+      # /admin/tts/runtime) are loopback-only by default. To call them from
+      # outside the container, set OVS_ADMIN_KEY (e.g. in .env or shell) and
+      # pass it back as the X-Admin-Key header. Leaving it unset keeps remote
+      # admin disabled (403), which is the safe default for production.
+      - OVS_ADMIN_KEY=${OVS_ADMIN_KEY:-}
       # Open-dialogue endpointing defaults. Override in .env for product tuning.
       - OVS_VAD_BACKEND=${OVS_VAD_BACKEND:-silero}
       - OVS_VAD_SILENCE_MS=${OVS_VAD_SILENCE_MS:-400}

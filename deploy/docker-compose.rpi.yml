@@ -17,6 +17,10 @@ services:
       - speech-models:/opt/models
     environment:
       - OVS_PROFILE=${OVS_PROFILE:-}
+      # Admin endpoints are loopback-only by default. Set OVS_ADMIN_KEY (in
+      # .env or shell) and pass it back as the X-Admin-Key header to enable
+      # remote admin. Unset keeps remote admin disabled (403).
+      - OVS_ADMIN_KEY=${OVS_ADMIN_KEY:-}
       - OVS_PROFILE_DEFAULT=${OVS_PROFILE_DEFAULT:-rpi5-default}
       - LANGUAGE_MODE=${LANGUAGE_MODE:-zh_en}
       - MODEL_DIR=${MODEL_DIR:-/opt/models}

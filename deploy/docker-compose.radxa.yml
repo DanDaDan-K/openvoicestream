@@ -26,6 +26,10 @@ services:
       - rk-tts-models:/opt/tts/models
     environment:
       - OVS_PROFILE=${OVS_PROFILE:-}
+      # Admin endpoints are loopback-only by default. Set OVS_ADMIN_KEY (in
+      # .env or shell) and pass it back as the X-Admin-Key header to enable
+      # remote admin. Unset keeps remote admin disabled (403).
+      - OVS_ADMIN_KEY=${OVS_ADMIN_KEY:-}
       - OVS_PROFILE_DEFAULT=${OVS_PROFILE_DEFAULT:-rk3588-default}
       # Open-dialogue endpointing defaults. Override in .env for product tuning.
       - OVS_VAD_BACKEND=${OVS_VAD_BACKEND:-silero}
