@@ -219,6 +219,72 @@ def test_apply_profile_from_env_still_works(tmp_path, monkeypatch):
     assert os.environ["COMPAT_KEY"] == "ok"
 
 
+# ---------------------------------------------------------------------------
+# Artifact pre-flight helpers
+# ---------------------------------------------------------------------------
+
+def test_expected_artifact_paths_heuristic(monkeypatch):
+    """Only path-like suffixes + absolute expanded values are reported."""
+    monkeypatch.delenv("SOMEVAR", raising=False)
+    profile = {
+        "name": "p",
+        "env": {
+            "FOO_ENGINE": "/a/b.engine",
+            "BAR_DIR": "/c/d",
+            "BAZ_VALUE": "/should/be/skipped",
+            "REL_PATH": "deploy/x",
+            "ABS_PATH": "/p/q",
+            "OTHER_JSON": "/m/n.json",
+            "NON_STR_PATH": 42,
+        },
+    }
+    out = profile_loader.expected_artifact_paths(profile)
+    assert out == {
+        "FOO_ENGINE": "/a/b.engine",
+        "BAR_DIR": "/c/d",
+        "ABS_PATH": "/p/q",
+        "OTHER_JSON": "/m/n.json",
+    }
+
+
+def test_expected_artifact_paths_expands_vars(monkeypatch):
+    monkeypatch.setenv("ARTIFACT_ROOT", "/opt/models")
+    profile = {"env": {"X_DIR": "$ARTIFACT_ROOT/foo"}}
+    out = profile_loader.expected_artifact_paths(profile)
+    assert out == {"X_DIR": "/opt/models/foo"}
+
+
+def test_find_missing_artifacts_all_present(tmp_path):
+    f = tmp_path / "model.engine"
+    f.write_text("blob", encoding="utf-8")
+    d = tmp_path / "subdir"
+    d.mkdir()
+    profile = {
+        "env": {
+            "MY_ENGINE": str(f),
+            "MY_DIR": str(d),
+        },
+    }
+    assert profile_loader.find_missing_artifacts(profile) == []
+
+
+def test_find_missing_artifacts_some_missing(tmp_path):
+    f = tmp_path / "exists.engine"
+    f.write_text("blob", encoding="utf-8")
+    profile = {
+        "env": {
+            "MY_ENGINE": str(f),
+            "MISSING_DIR": "/definitely/not/here/xyz",
+            "ALSO_MISSING_PATH": "/nope/zzz",
+        },
+    }
+    missing = profile_loader.find_missing_artifacts(profile)
+    keys = {m["env_var"] for m in missing}
+    assert keys == {"MISSING_DIR", "ALSO_MISSING_PATH"}
+    for m in missing:
+        assert m["path"].startswith("/")
+
+
 def test_apply_profile_returns_empty_when_no_ref(monkeypatch):
     """No env hints + no explicit ref → returns {} without touching state."""
     for k in ("OVS_PROFILE_JSON", "OVS_PROFILE", "OVS_PROFILE_DEFAULT",

@@ -354,6 +354,23 @@ class BackendManager(Generic[T]):
                 # profile's *_backend field, so self._factory() after
                 # apply_profile() builds the correct new-kind backend.
 
+                # FIX_DRYRUN: pre-flight artifact check. Catches "profile for the
+                # wrong device" before we tear down the running backend. Without
+                # this, a missing engine path forces a failed preload + rollback
+                # dance (see commit fd19877 and memory:
+                # backend_manager_rollback_env_pollution).
+                missing = profile_loader.find_missing_artifacts(new_profile_preview)
+                if missing:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": "profile_artifacts_missing",
+                            "kind": self.name,
+                            "profile": new_profile_preview.get("name"),
+                            "missing": missing,
+                        },
+                    )
+
             # 4. Drain ---------------------------------------------------------
             async with self._state_lock:
                 self._state = BackendState.DRAINING

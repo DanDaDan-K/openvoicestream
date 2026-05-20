@@ -243,3 +243,56 @@ def apply_profile_from_env() -> dict:
       4. ``OVS_PRESET`` — resolved via ``profile_selector``.
     """
     return apply_profile(None)
+
+
+# ---------------------------------------------------------------------------
+# Artifact pre-flight helpers
+# ---------------------------------------------------------------------------
+
+# Env-key suffixes that signal "this value is a filesystem path / artifact".
+# Used by ``expected_artifact_paths`` / ``find_missing_artifacts`` to decide
+# which env entries are worth existence-checking before a profile reload.
+_PATH_LIKE_SUFFIXES: tuple[str, ...] = (
+    "_DIR", "_ENGINE", "_PATH", "_BIN", "_MANIFEST",
+    "_SETTINGS", "_FILTERS", "_JSON",
+)
+
+
+def expected_artifact_paths(profile: dict) -> dict[str, str]:
+    """Return ``{env_key: expanded_absolute_path}`` for env entries that
+    look like filesystem artifacts.
+
+    Variable expansion uses the current ``os.environ`` (same semantics
+    ``apply_profile`` uses when writing them).
+
+    Heuristic: include env keys whose suffix matches
+    :data:`_PATH_LIKE_SUFFIXES` AND whose expanded value starts with ``/``
+    (absolute path only). Non-absolute paths and non-string values are
+    skipped — they're either repo-relative (e.g. ``deploy/artifacts/...``)
+    or non-path config.
+    """
+    result: dict[str, str] = {}
+    env_block = profile.get("env") or {}
+    for k, v in env_block.items():
+        if not isinstance(v, str):
+            continue
+        if not any(k.endswith(s) for s in _PATH_LIKE_SUFFIXES):
+            continue
+        expanded = os.path.expandvars(v)
+        if expanded.startswith("/"):
+            result[k] = expanded
+    return result
+
+
+def find_missing_artifacts(profile: dict) -> list[dict]:
+    """Return missing-path records for the given profile.
+
+    Empty list means all expected absolute paths exist on disk. Record
+    shape: ``{"env_var": <key>, "path": <expanded>}``.
+    """
+    paths = expected_artifact_paths(profile)
+    missing: list[dict] = []
+    for k, p in paths.items():
+        if not os.path.exists(p):
+            missing.append({"env_var": k, "path": p})
+    return missing

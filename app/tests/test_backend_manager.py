@@ -674,6 +674,74 @@ def test_init_backend_managers_propagates_initial_profile_ref(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# FIX_DRYRUN: pre-flight artifact validation rejects unloadable profiles
+# with HTTP 400 *before* draining the running backend.
+# ---------------------------------------------------------------------------
+
+@asynctest
+async def test_reload_rejects_profile_with_missing_engine_paths():
+    """Profile with a path-like env value that doesn't exist on disk → 400."""
+    mgr = _make_mgr()
+    await mgr.start()
+    old = mgr.get_backend_unsafe()
+
+    bad_path = "/nonexistent/seeed/test/dryrun/foo.engine"
+
+    def loader(self, ref):
+        return {
+            "name": ref,
+            "tts_backend": "fake",
+            "asr_backend": "fake",
+            "env": {"EDGE_LLM_ASR_ENGINE_DIR": bad_path},
+        }
+
+    original = BackendManager._load_profile_kind
+    BackendManager._load_profile_kind = loader  # type: ignore[assignment]
+    try:
+        with pytest.raises(HTTPException) as ei:
+            await mgr.reload("p-bad")
+    finally:
+        BackendManager._load_profile_kind = original  # type: ignore[assignment]
+
+    assert ei.value.status_code == 400
+    detail = ei.value.detail
+    assert detail["error"] == "profile_artifacts_missing"
+    assert detail["kind"] == "tts"
+    assert detail["profile"] == "p-bad"
+    missing_paths = [m["path"] for m in detail["missing"]]
+    assert bad_path in missing_paths
+    # Manager must NOT have entered DRAINING — old backend still serving.
+    assert mgr.state == BackendState.READY
+    assert mgr.get_backend_unsafe() is old
+
+
+@asynctest
+async def test_reload_passes_artifact_check_when_paths_exist():
+    """Profile env points at /tmp (always exists) → check passes, reload proceeds."""
+    mgr = _make_mgr()
+    await mgr.start()
+
+    def loader(self, ref):
+        return {
+            "name": ref,
+            "tts_backend": "fake",
+            "asr_backend": "fake",
+            # /tmp exists on every supported platform; passes the heuristic.
+            "env": {"SOME_DIR": "/tmp"},
+        }
+
+    original = BackendManager._load_profile_kind
+    BackendManager._load_profile_kind = loader  # type: ignore[assignment]
+    try:
+        out = await mgr.reload("p-ok")
+    finally:
+        BackendManager._load_profile_kind = original  # type: ignore[assignment]
+
+    assert out["status"] == "reloaded"
+    assert mgr.state == BackendState.READY
+
+
+# ---------------------------------------------------------------------------
 # Regression: rollback must unload the failed NEW backend before re-invoking
 # the factory, so a factory that caches its instance in a module-level global
 # (mirrors main.py's _asr_backend / _tts_service_mod._backend pattern) gets
