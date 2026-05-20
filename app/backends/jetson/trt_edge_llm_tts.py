@@ -68,7 +68,6 @@ def _resolve_speaker_encoder() -> str:
     return os.path.join(_QWEN3_TTS_MODEL_BASE, "onnx", "speaker_encoder.onnx")
 
 
-_QWEN3_SPEAKER_ENCODER = _resolve_speaker_encoder()
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -497,6 +496,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         self._talker_dir = resolve_tts_talker_dir()
         self._code_predictor_dir = resolve_tts_code_predictor_dir()
         self._tokenizer_dir = resolve_tts_tokenizer_dir()
+        self._speaker_encoder = _resolve_speaker_encoder()
         self._code2wav_dir = resolve_tts_code2wav_dir()
         self._worker_binary = resolve_tts_worker_binary()
         self._qwen3_runtime_profile = qwen3_runtime_profile()
@@ -1154,9 +1154,9 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
     def extract_speaker_embedding(self, audio_wav_bytes: bytes) -> bytes:
         if self._product_backend is not None:
             return self._product_backend.extract_speaker_embedding(audio_wav_bytes)
-        if not os.path.exists(_QWEN3_SPEAKER_ENCODER):
-            raise NotImplementedError(f"speaker encoder not found: {_QWEN3_SPEAKER_ENCODER}")
-        return _qwen3_speaker_embed_inproc(audio_wav_bytes, _QWEN3_SPEAKER_ENCODER)
+        if not os.path.exists(self._speaker_encoder):
+            raise NotImplementedError(f"speaker encoder not found: {self._speaker_encoder}")
+        return _qwen3_speaker_embed_inproc(audio_wav_bytes, self._speaker_encoder)
 
     def _synthesize_single(
         self,

@@ -10,9 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from types import SimpleNamespace  # noqa: F401 — kept for backwards compat / other call sites
-
-
 class _WSHandle:
     """Lightweight WS-session handle for BackendManager.register_ws().
 
