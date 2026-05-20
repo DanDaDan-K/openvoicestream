@@ -147,6 +147,79 @@ TTS_TOKENIZER_DIR = os.environ.get(
     else os.path.expanduser("~/qwen3-tts-trt-edge-llm-export"),
 )
 
+
+# ---------------------------------------------------------------------------
+# Fresh-read resolvers for TTS artifact paths
+#
+# The module-level constants above capture os.environ at *import time*. Hot
+# reload via BackendManager.apply_profile() updates os.environ post-import,
+# so backends that consume the module-level constants would see stale paths
+# on the second profile swap. The resolver functions below mirror the exact
+# cold-boot logic but re-read os.environ on each call; consumers should call
+# them inside ``__init__`` (or per-use) instead of importing the constants.
+# ---------------------------------------------------------------------------
+
+
+def _tts_vocab_pruned_now() -> str:
+    """Return the current EDGE_LLM_TTS_VOCAB_PRUNED value (lowercased)."""
+    return os.environ.get(
+        "EDGE_LLM_TTS_VOCAB_PRUNED",
+        os.environ.get("QWEN3_TTS_VOCAB_PRUNED", "0"),
+    ).lower()
+
+
+def resolve_tts_talker_dir() -> str:
+    """Resolve the talker engine dir from the *current* os.environ.
+
+    Mirrors the module-level TTS_TALKER_DIR resolution at lines 111-122 but
+    re-reads env each call so hot reload picks up profile-applied values.
+    """
+    explicit = os.environ.get("EDGE_LLM_TTS_TALKER_DIR")
+    default_talker = os.path.join(_TTS_DEFAULT_ROOT, "engines", "talker")
+    if explicit:
+        return explicit
+    full_dir = os.environ.get("EDGE_LLM_TTS_FULL_TALKER_DIR", default_talker)
+    pruned_dir = os.environ.get("EDGE_LLM_TTS_PRUNED_TALKER_DIR", default_talker)
+    vocab = _tts_vocab_pruned_now()
+    if vocab in ("1", "true", "yes"):
+        return pruned_dir
+    if vocab in ("0", "false", "no"):
+        return full_dir
+    return default_talker
+
+
+def resolve_tts_code_predictor_dir() -> str:
+    """Resolve the code-predictor dir from the *current* os.environ.
+
+    Mirrors the module-level TTS_CODE_PREDICTOR_DIR resolution at
+    lines 123-133 (incl. the qwen3-highperf bf16-io override probe).
+    """
+    explicit = os.environ.get("EDGE_LLM_TTS_CP_DIR")
+    if explicit:
+        return explicit
+    talker_dir = resolve_tts_talker_dir()
+    default_cp = os.path.join(os.path.dirname(talker_dir), "code_predictor")
+    bf16_io_cp = os.environ.get(
+        "EDGE_LLM_TTS_CP_BF16_IO_DIR",
+        "/tmp/qwen3_tts_cp_lmhead_pretranspose_0510/cp_dir",
+    )
+    if qwen3_highperf_enabled():
+        return _first_existing_dir(bf16_io_cp, default_cp)
+    return default_cp
+
+
+def resolve_tts_tokenizer_dir() -> str:
+    """Resolve the tokenizer dir from the *current* os.environ.
+
+    Mirrors the module-level TTS_TOKENIZER_DIR resolution at lines 143-148.
+    """
+    explicit = os.environ.get("EDGE_LLM_TTS_TOKENIZER_DIR")
+    if explicit:
+        return explicit
+    if os.path.exists(os.path.join(_TTS_DEFAULT_ROOT, "processed_chat_template.json")):
+        return _TTS_DEFAULT_ROOT
+    return os.path.expanduser("~/qwen3-tts-trt-edge-llm-export")
+
 # ASR engine directories
 _ASR_PRUNED_ENGINE_DIR = os.path.expanduser(
     "~/qwen3-asr-edgellm-runtime/engines/thinker_prunedembed35k_kv512"

@@ -29,13 +29,13 @@ from app.core.tts_speakers import resolve_speaker_kwargs
 from app.backends.jetson.trt_edge_llm_ipc import (
     TTS_BINARY,
     TTS_WORKER_BINARY,
-    TTS_TALKER_DIR,
-    TTS_CODE_PREDICTOR_DIR,
     TTS_CODE2WAV_DIR,
-    TTS_TOKENIZER_DIR,
     PLUGIN_PATH,
     QWEN3_RUNTIME_PROFILE,
     qwen3_highperf_enabled,
+    resolve_tts_talker_dir,
+    resolve_tts_code_predictor_dir,
+    resolve_tts_tokenizer_dir,
     run_binary,
 )
 
@@ -480,6 +480,16 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         self._worker_lock = threading.Lock()
         self._worker_ready_meta: dict = {}
         self._worker_stderr_tail = deque(maxlen=80)
+        # Capture artifact paths from the *current* env at instance creation
+        # time. BackendManager builds a fresh backend after apply_profile()
+        # clears the factory cache, so __init__ always sees the latest
+        # profile-applied env. Avoid relying on the module-level
+        # TTS_TALKER_DIR/TTS_CODE_PREDICTOR_DIR/TTS_TOKENIZER_DIR constants
+        # which are frozen at first import — see resolve_tts_*_dir() in
+        # trt_edge_llm_ipc.py.
+        self._talker_dir = resolve_tts_talker_dir()
+        self._code_predictor_dir = resolve_tts_code_predictor_dir()
+        self._tokenizer_dir = resolve_tts_tokenizer_dir()
 
     # -- TTSBackend interface ------------------------------------------------
 
@@ -551,13 +561,13 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         required = [
             (TTS_WORKER_BINARY if self._use_worker() else TTS_BINARY, "TTS binary"),
             (PLUGIN_PATH, "TRT-Edge-LLM plugin"),
-            (os.path.join(TTS_TALKER_DIR, "config.json"), "talker config"),
-            (os.path.join(TTS_TOKENIZER_DIR, "tokenizer.json"), "tokenizer"),
+            (os.path.join(self._talker_dir, "config.json"), "talker config"),
+            (os.path.join(self._tokenizer_dir, "tokenizer.json"), "tokenizer"),
         ]
         if explicit_talker_engine:
             required.append((explicit_talker_engine, "explicit Talker engine"))
         else:
-            required.append((os.path.join(TTS_TALKER_DIR, "llm.engine"), "talker engine"))
+            required.append((os.path.join(self._talker_dir, "llm.engine"), "talker engine"))
         missing = []
         for path, label in required:
             if not os.path.exists(path):
@@ -581,7 +591,7 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             "TTS backend preload OK (profile=%s binary=%s talker=%s)",
             QWEN3_RUNTIME_PROFILE,
             TTS_WORKER_BINARY if self._use_worker() else TTS_BINARY,
-            TTS_TALKER_DIR,
+            self._talker_dir,
         )
         if self._use_worker():
             self._ensure_worker()
@@ -690,11 +700,11 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         cmd = [
             TTS_WORKER_BINARY,
             "--talkerEngineDir",
-            TTS_TALKER_DIR,
+            self._talker_dir,
             "--codePredictorEngineDir",
-            TTS_CODE_PREDICTOR_DIR,
+            self._code_predictor_dir,
             "--tokenizerDir",
-            TTS_TOKENIZER_DIR,
+            self._tokenizer_dir,
             "--code2wavEngineDir",
             TTS_CODE2WAV_DIR,
         ]
@@ -1204,11 +1214,11 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
                 "--inputFile",
                 input_path,
                 "--talkerEngineDir",
-                TTS_TALKER_DIR,
+                self._talker_dir,
                 "--codePredictorEngineDir",
-                TTS_CODE_PREDICTOR_DIR,
+                self._code_predictor_dir,
                 "--tokenizerDir",
-                TTS_TOKENIZER_DIR,
+                self._tokenizer_dir,
                 "--outputFile",
                 output_path,
                 "--outputAudioDir",
