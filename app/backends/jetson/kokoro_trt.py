@@ -215,6 +215,14 @@ def _samples_to_wav(samples: np.ndarray, sample_rate: int) -> bytes:
 class KokoroTRTBackend(TTSBackend):
     """English Kokoro v1.0 TTS accelerated with TensorRT on Jetson."""
 
+    # Hot-reload enabled 2026-05-21 after applying matcha's release-order fix
+    # (commit 2967688): execution contexts dropped before engines, CUDA stream
+    # synchronized and destroyed, ORT sessions cleared, gc.collect() x2 to
+    # reap pybind cycles. ORT sessions are all CPU EP (no CUDA EP allocator
+    # leak surface). See unload() docstring for the full ordering rationale.
+    # Hardware (VRAM) verification on orin-nano will be a separate dispatch.
+    supports_hot_reload: bool = True
+
     def __init__(self):
         self._token_to_id: dict[str, int] = {}
         self._runtime_mode = os.environ.get("KOKORO_TRT_RUNTIME", "auto").strip().lower()
@@ -262,39 +270,130 @@ class KokoroTRTBackend(TTSBackend):
         return self._ready
 
     def unload(self) -> None:
-        """Best-effort release of TRT engines / ORT sessions / CUDA pools.
+        """Release TRT engines + execution contexts + ORT sessions + CUDA pool.
 
-        PR5: ``supports_hot_reload`` stays False — the spike measured <6% RSS
-        drop here because pybind/TRT/ORT hold internal references we can't
-        nuke from Python. Still required for completeness and so a future
-        process-aware reload path can use it.
+        Mirrors :meth:`MatchaTRTBackend.unload` (commit 2967688) so kokoro
+        participates in cross-implementation hot reload. Kokoro has more
+        engine/context pairs than matcha because of the split-generator
+        architecture (encoder/decoder/source/generator plus an optional
+        "long" 256-512 bucket) and the hybrid prefix engine, so each pair
+        gets the same context-before-engine treatment.
+
+        Ordering:
+            1. Sync the CUDA stream — pending kernels must finish before we
+               pull TRT contexts out from under them.
+            2. Drop execution contexts BEFORE engines. The TRT engine
+               destructor may skip workspace cleanup if execution contexts
+               are still attached, leaking activation memory. We loop the
+               split (and long-bucket) ctx dicts before the engine dicts,
+               then handle the optional ``_ctx``/``_engine`` (hybrid or
+               full-engine mode).
+            3. Drop engines (each holds tens-hundreds of MB of device
+               weights).
+            4. Drop ORT sessions (all CPU EP for kokoro — no CUDA EP
+               allocator surface).
+            5. Destroy the CUDA pool (cudaStreamDestroy + free remaining
+               allocations).
+            6. gc.collect() twice — first pass clears acyclic, second pass
+               walks reference cycles produced by TRT Python bindings.
+
+        Idempotent. Safe to call from BackendManager rollback.
         """
-        if not self._ready and self._engine is None and self._ort_sess is None:
+        if (
+            not self._ready
+            and self._engine is None
+            and self._ctx is None
+            and self._ort_sess is None
+            and self._suffix_sess is None
+            and self._split_length_sess is None
+            and self._split_source_sess is None
+            and self._split_istft_sess is None
+            and not self._split_engines
+            and not self._split_ctxs
+            and not self._split_long_engines
+            and not self._split_long_ctxs
+            and self._pool is None
+        ):
             return
+
         try:
-            pool = self._pool
-            if pool is not None:
+            # 1. Sync stream
+            if self._pool is not None:
                 try:
-                    pool.free_all()
+                    self._pool.synchronize()
                 except Exception:
-                    logger.exception("Kokoro pool.free_all failed; continuing")
-            self._engine = None
-            self._ctx = None
-            self._pool = None
+                    logger.exception("Kokoro unload: pool.synchronize failed; continuing")
+
+            # 2. Execution contexts before engines.
+            for name, ctx in list(self._split_ctxs.items()):
+                try:
+                    del ctx
+                except Exception:
+                    logger.exception("Kokoro unload: split ctx[%s] del raised", name)
+            self._split_ctxs = {}
+
+            for name, ctx in list(self._split_long_ctxs.items()):
+                try:
+                    del ctx
+                except Exception:
+                    logger.exception("Kokoro unload: split long ctx[%s] del raised", name)
+            self._split_long_ctxs = {}
+
+            if self._ctx is not None:
+                try:
+                    del self._ctx
+                except Exception:
+                    logger.exception("Kokoro unload: main ctx del raised")
+                self._ctx = None
+
+            # 3. Engines
+            for name, eng in list(self._split_engines.items()):
+                try:
+                    del eng
+                except Exception:
+                    logger.exception("Kokoro unload: split engine[%s] del raised", name)
+            self._split_engines = {}
+
+            for name, eng in list(self._split_long_engines.items()):
+                try:
+                    del eng
+                except Exception:
+                    logger.exception("Kokoro unload: split long engine[%s] del raised", name)
+            self._split_long_engines = {}
+
+            if self._engine is not None:
+                try:
+                    del self._engine
+                except Exception:
+                    logger.exception("Kokoro unload: main engine del raised")
+                self._engine = None
+
+            # 4. ORT sessions (all CPU EP).
             self._ort_sess = None
             self._suffix_sess = None
             self._split_length_sess = None
             self._split_source_sess = None
             self._split_istft_sess = None
-            self._split_engines = {}
-            self._split_ctxs = {}
-            self._split_long_engines = {}
-            self._split_long_ctxs = {}
+
+            # 5. CUDA pool teardown
+            if self._pool is not None:
+                try:
+                    self._pool.destroy()
+                except Exception:
+                    logger.exception("Kokoro unload: pool.destroy failed; continuing")
+                self._pool = None
+
+            # 6. Force finalizers
             import gc
             gc.collect()
+            gc.collect()
         except Exception:
-            logger.exception("KokoroTRTBackend.unload failed; continuing")
+            logger.exception("KokoroTRTBackend.unload outer-try failed; continuing")
         finally:
+            self._token_to_id = {}
+            self._output_name = None
+            self._hybrid_fixed_seq_len = None
+            self._hybrid_max_seq_len = None
             self._ready = False
 
     def preload(self) -> None:
