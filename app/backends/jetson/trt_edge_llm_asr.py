@@ -131,6 +131,13 @@ def _classify_worker_response(output_data: dict, *, request_event: str | None = 
 class TRTEdgeLLMASRBackend(ASRBackend):
     """ASR via TRT-Edge-LLM llm_inference subprocess."""
 
+    # supports_hot_reload: True when running in worker subprocess mode
+    # (kill+respawn releases all GPU memory cleanly). When use_worker=False
+    # the engine is held in-process and we have no clean release path.
+    @property
+    def supports_hot_reload(self) -> bool:  # type: ignore[override]
+        return self._use_worker()
+
     def __init__(self):
         self._config = self._load_config()
         self._ready = False
@@ -276,6 +283,22 @@ class TRTEdgeLLMASRBackend(ASRBackend):
         self._ready = True
         if self._use_worker():
             self._warm_worker()
+
+    def unload(self) -> None:
+        """Kill the resident ASR worker subprocess to fully release GPU memory.
+
+        Mirrors TRTEdgeLLMTTSBackend.unload(). Idempotent; safe to call from
+        BackendManager.reload() rollback. The actual SIGKILL+pipe-close happens
+        in restart_worker(); we just mark not-ready afterward.
+        """
+        if not self._ready and self._worker is None:
+            return
+        try:
+            self.restart_worker()
+        except Exception:
+            logger.exception("TRTEdgeLLMASRBackend.unload failed; continuing")
+        finally:
+            self._ready = False
 
     def _warm_worker(self) -> None:
         """Pre-warm TRT audio_encoder optimization profile for batch shapes 1..N.

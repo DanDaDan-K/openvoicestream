@@ -245,3 +245,45 @@ def test_typed_errors_subclass_worker_protocol_error():
     assert issubclass(NoActiveSessionError, WorkerProtocolError)
     assert issubclass(SessionAlreadyActiveError, WorkerProtocolError)
     assert issubclass(WorkerExitError, WorkerProtocolError)
+
+
+def test_supports_hot_reload_true_when_worker_mode():
+    backend = TRTEdgeLLMASRBackend()
+    backend._config["use_worker"] = True
+    assert backend.supports_hot_reload is True
+
+
+def test_supports_hot_reload_false_when_inprocess():
+    backend = TRTEdgeLLMASRBackend()
+    backend._config["use_worker"] = False
+    assert backend.supports_hot_reload is False
+
+
+def test_unload_idempotent_when_not_ready():
+    backend = TRTEdgeLLMASRBackend()
+    # Fresh: _ready=False, _worker=None — must early return without raising.
+    backend.unload()
+    assert backend._ready is False
+    assert backend._worker is None
+
+
+def test_unload_kills_worker_and_marks_not_ready(monkeypatch):
+    backend = TRTEdgeLLMASRBackend()
+    backend._ready = True
+    called = {"restart": 0}
+
+    def fake_restart():
+        called["restart"] += 1
+        backend._worker = None
+
+    monkeypatch.setattr(backend, "restart_worker", fake_restart)
+
+    class _Dummy:
+        def poll(self):
+            return None
+
+    backend._worker = _Dummy()
+    backend.unload()
+    assert called["restart"] == 1
+    assert backend._ready is False
+    assert backend._worker is None
