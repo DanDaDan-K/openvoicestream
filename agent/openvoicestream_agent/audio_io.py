@@ -348,6 +348,16 @@ class AudioIO:
         if self._output_stream is not None:
             return
         self._ensure_playback_buffer()
+        # Query the device's preferred sample rate. macOS Bluetooth in HFP
+        # profile is mono 16k; pushing 24k into it produces silent playback.
+        # Use whatever the device wants, and let play() resample to it.
+        device_sr = self._resolve_output_sample_rate()
+        if device_sr != self.output_sr:
+            logger.info(
+                "output stream sample rate %d -> %d (device-preferred)",
+                self.output_sr, device_sr,
+            )
+            self.output_sr = device_sr
         self._output_stream = sd.RawOutputStream(
             samplerate=self.output_sr,
             blocksize=max(1, int(self.output_sr * 0.02)),
@@ -357,6 +367,35 @@ class AudioIO:
             callback=self._output_callback,
         )
         self._output_stream.start()
+        try:
+            dev_idx = self._output_stream.device
+            name = sd.query_devices(dev_idx)["name"] if dev_idx is not None else "(default)"
+            logger.info(
+                "output stream open: device=%s sr=%d", name, self.output_sr,
+            )
+        except Exception:  # pragma: no cover
+            pass
+
+    def _resolve_output_sample_rate(self) -> int:
+        """Pick a sample rate the current default output device accepts.
+
+        macOS Bluetooth in HFP/SCO profile only supports its native rate
+        (typically 16k mono). Opening at 24k or 48k there results in
+        silent playback. Query the device and prefer its declared
+        ``default_samplerate``; fall back to the configured rate when
+        the query fails.
+        """
+        try:
+            if self.output_device is not None:
+                info = sd.query_devices(self.output_device, kind="output")
+            else:
+                info = sd.query_devices(kind="output")
+            sr = int(info.get("default_samplerate") or 0)
+            if sr > 0:
+                return sr
+        except Exception:
+            pass
+        return self.output_sr
 
     async def _playback_loop(self) -> None:
         assert self._out_queue is not None
