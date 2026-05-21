@@ -1,6 +1,6 @@
 # Spec: Qwen3 TTS Worker — Configurable Concurrency
 
-**Status**: Draft — open for assignment
+**Status**: Approved (2026-05-21, after two codex review rounds) — open for assignment
 **Owner (placeholder)**: TBD
 **Target platforms**: Jetson Orin Nano (8GB), Jetson Orin NX (16GB), future Jetson AGX
 **Estimated effort**: 3–5 days (familiar dev), 1–2 weeks (unfamiliar)
@@ -14,20 +14,39 @@ The voice-agent conversation flow streams long text through TTS in multiple segm
 - Python side: `threading.Lock` (`_worker_lock`) wraps each request — see
   `app/backends/jetson/trt_edge_llm_tts.py:480`, used at `:610`, `:781`, `:971`.
 - Worker side: `while (std::getline(std::cin, line))` main loop — see
-  `third_party/qwen3-edgellm-jetson/native/edgellm_voice_worker/qwen3_tts_worker.cpp:326`.
+  `examples/omni/qwen3_tts_worker.cpp:557` **in `suharvest/TensorRT-Edge-LLM`**.
   One request is fully processed (talker prefill → code-predictor →
   Code2Wav streaming → terminal `done` event) before the next is read.
+
+> **Source-of-truth note (added after dev-agent investigation 2026-05-22):**
+> The TTS worker source lives in the `TensorRT-Edge-LLM` fork
+> (`https://github.com/suharvest/TensorRT-Edge-LLM`, `examples/omni/qwen3_tts_worker.cpp`,
+> 1000 lines as of commit `6239d5f`), **not** in the `qwen3-edgellm-jetson`
+> submodule. The toolkit submodule at
+> `third_party/qwen3-edgellm-jetson/native/edgellm_voice_worker/qwen3_tts_worker.cpp`
+> contains a stale 687-line snapshot that is not part of the deployment
+> build pipeline; treat it as deprecated. The ASR worker is the opposite —
+> its source of truth is `qwen3-edgellm-jetson/native/edgellm_voice_worker/qwen3_asr_worker.cpp`
+> (1416 lines). See the sibling ASR spec for the ASR side.
+>
+> All file:line references below refer to `examples/omni/qwen3_tts_worker.cpp`
+> in the TensorRT-Edge-LLM fork at the commit listed above. The
+> implementation agent's first step is to confirm the line numbers still
+> match the current HEAD of `suharvest/TensorRT-Edge-LLM:main`.
 
 **Consequence**: after segment N's `done` arrives, segment N+1 must run its
 own ~150–300 ms talker prefill **before** the first audio chunk emerges. The
 playback queue drains during that window, producing an audible mid-sentence
 gap.
 
-`_split_tts_text` (`trt_edge_llm_tts.py:228`) hard-caps CJK segments at 16
-characters (env `EDGE_LLM_TTS_CJK_SEGMENT_MAX_CHARS`) because the stateful
-Code2Wav engine is sensitive to long no-punctuation runs. Raising the cap
-risks distortion. Therefore the only clean fix is to make the worker
-**pipeline** segment N+1's prefill against segment N's tail-streaming.
+`_split_tts_text` (`app/backends/jetson/trt_edge_llm_tts.py:249-251`)
+currently defaults CJK segments to **48 characters**
+(`EDGE_LLM_TTS_CJK_SEGMENT_MAX_CHARS`, matching the profile setting on Orin
+NX). Raising the cap further risks distortion in the stateful Code2Wav
+engine. With the cap already at the operational maximum, segment count is
+already minimized — the only remaining lever to close the inter-segment
+gap is to make the worker **pipeline** segment N+1's prefill against
+segment N's tail-streaming.
 
 ## 2. Goal
 
@@ -74,18 +93,28 @@ request because the protocol is serial.
 
 ### 3.2 Worker side
 
-`third_party/qwen3-edgellm-jetson/native/edgellm_voice_worker/qwen3_tts_worker.cpp`:
+`examples/omni/qwen3_tts_worker.cpp` in `suharvest/TensorRT-Edge-LLM`
+(commit `6239d5f` baseline, 1000 lines):
 
 | Line | What |
 |------|------|
-| `:285` | `int main(...)` |
-| `:299` | `cudaStreamCreate(&stream)` — main CUDA stream (talker + code_predictor + code2wav default) |
-| `:300` | `cudaStreamCreate(&code2wavStream)` — second stream, currently only used when `asyncCode2Wav` (currently hard-coded false at `:341`) |
-| `:308` | `Qwen3OmniTTSRuntime ttsRuntime(...)` — single instance, owns talker + code_predictor engines, KV-cache buffers, CUDA-graph state |
-| `:314` | `Code2WavRunner code2wavRunner(...)` — single instance (or lazy) |
-| `:326` | main loop — `std::getline(std::cin, line)` then `process_one_request(line)` |
-| `:374` | `TalkerGenerationResponse talkerResponse` — created per request, holds the generated code-frame stream |
-| `:478` | `chunkThread` — optional helper thread for async Code2Wav (already exists but gated by `asyncCode2Wav=false`) |
+| `:443` | `int main(int argc, char** argv)` |
+| `:459` | `cudaStreamCreate(&stream)` — primary CUDA stream (talker + code_predictor + main code2wav) |
+| `:463-465` | `std::unique_ptr<Code2WavRunner> code2wavRunner`, `statefulCode2wavRunner`, plus `asyncCode2WavStream` declared at `:465` (lazy-init) |
+| `:466` | `std::unique_ptr<Code2WavRunner> asyncCode2wavRunner` — a SECOND Code2Wav runner used only when a request opts in via `async_code2wav=true` (created lazily on first use via `getAsyncCode2WavRunner` at `:473-481`) |
+| `:510` | `statefulCode2wavRunner = std::make_unique<StatefulCode2WavRunner>(...)` — when stateful mode enabled at process startup |
+| `:520` | `code2wavRunner = std::make_unique<Code2WavRunner>(...)` — when stateless mode is the startup choice |
+| `:553` | first `std::cout` — `{"event":"ready", "init_ms": ...}` |
+| `:557` | main loop — `while (std::getline(std::cin, line))` |
+| `:572` | per-request `async_code2wav` flag read from request JSON (default false) |
+| `:593` | branch: `statefulCode2Wav && asyncCode2Wav` — different code path that bypasses the stateful runner for async |
+| `:627, :654` | chunk JSON build + stdout emit |
+| `:670` | lazy re-construction of `StatefulCode2WavRunner` inside the request loop (when stateful kwargs change between requests) |
+| `:711` | same for stateless `Code2WavRunner` |
+| `:761-827` | async-Code2Wav request path — spawns work onto `asyncCode2WavStream` via `synthesizeWindow(asyncRunner, ...)` |
+| `:916, :946` | done JSON build + stdout emit |
+| `:990` | error / end-of-request response emit |
+| `:996, :998` | shutdown `cudaStreamDestroy` for async stream + primary stream |
 
 Per-request state that must be **isolated** if we run two requests in
 parallel:
@@ -110,8 +139,14 @@ slots". Each slot has:
 
 - One TRT execution context for talker
 - One TRT execution context for code predictor
-- One TRT execution context for Code2Wav (or pool 1 shared, depending on
-  stateful-vs-stateless mode)
+- **One Code2WavRunner instance, owned exclusively by the slot.** The
+  existing worker shares a single `Code2WavRunner` across requests
+  (`qwen3_tts_worker.cpp:311-315`, reset inline at `:393-397, :605-608`).
+  With N>1 slots running concurrently, sharing this runner would interleave
+  stateful Code2Wav LSTM state across requests and corrupt audio. Per-slot
+  ownership is **mandatory**, not optional — both stateful and stateless
+  modes must allocate one runner per slot. Memory budget in §6 reflects N
+  copies of the runner.
 - One CUDA stream
 - A reusable KV-cache buffer sized for `talker_max_seq_len`
 - Stateful Code2Wav state buffer (when enabled)
@@ -162,16 +197,27 @@ class _WorkerIO:
 
     def request(self, payload: dict) -> Iterator[dict]:
         self._sem.acquire()
+        req_id = payload["id"]
+        q = queue.Queue()
+        # CRITICAL ordering: insert into map BEFORE writing to stdin, so
+        # the reader thread can never see an event before the queue exists.
+        with self._inflight_lock:
+            self._inflight[req_id] = q
         try:
-            req_id = payload["id"]
-            q = queue.Queue()
-            with self._inflight_lock:
-                self._inflight[req_id] = q
             with self._stdin_lock:
                 self._proc.stdin.write(json.dumps(payload) + "\n")
                 self._proc.stdin.flush()
+        except Exception:
+            # Write failed — clean up map and semaphore, then re-raise.
+            with self._inflight_lock:
+                self._inflight.pop(req_id, None)
+            self._sem.release()
+            raise
+        try:
             while True:
                 event = q.get(timeout=60.0)   # raises Empty on hang
+                if event.get("event") == "_worker_exit":
+                    raise WorkerExitError("TTS worker died mid-request")
                 yield event
                 if event.get("event") == "done":
                     return
@@ -181,15 +227,41 @@ class _WorkerIO:
             self._sem.release()
 
     def _reader_loop(self):
-        for line in self._proc.stdout:
-            event = json.loads(line)
-            rid = event.get("request_id") or event.get("id")
+        try:
+            for line in self._proc.stdout:
+                event = json.loads(line)
+                rid = event.get("request_id") or event.get("id")
+                with self._inflight_lock:
+                    q = self._inflight.get(rid)
+                if q is not None:
+                    q.put(event)
+                # else: stale / unsolicited, drop
+        finally:
+            # Worker exited (clean or crash). Wake every in-flight caller
+            # with a sentinel so they raise WorkerExitError instead of
+            # hanging on q.get().
             with self._inflight_lock:
-                q = self._inflight.get(rid)
-            if q is not None:
-                q.put(event)
-            # else: stale / unsolicited, drop
+                for q in self._inflight.values():
+                    q.put({"event": "_worker_exit"})
+                self._inflight.clear()
 ```
+
+**Invariants the reader/writer pair must maintain:**
+
+1. **Map insert happens before stdin write.** If the writer inserts after
+   the write, the reader could see and drop the response before the
+   queue exists.
+2. **Write failure cleans up.** A failed `stdin.write` (broken pipe,
+   worker died) must pop the map entry and release the semaphore before
+   raising, or the slot leaks.
+3. **Reader-exit sentinel.** When the reader loop exits (stdout EOF =
+   worker process died), every queue gets a `_worker_exit` event so
+   waiting callers raise `WorkerExitError`. Without this, callers hang
+   on `q.get(timeout=60.0)` for 60 s per call before noticing the
+   worker is dead.
+4. **Semaphore is released exactly once per `request()` call.** Either
+   the success path's `finally`, or the write-failure cleanup — never
+   both, never neither.
 
 **(b) Existing `generate_streaming` / `_generate_streaming_single` use
 `_WorkerIO.request(payload)` instead of taking `_worker_lock` directly.**
@@ -262,7 +334,21 @@ while (std::getline(std::cin, line)) {
 ```
 
 Wrap `std::cout` writes with a mutex so concurrent threads don't interleave
-JSON lines.
+JSON lines. **Audit every existing stdout site** — not just chunk events.
+Current direct writes (in `examples/omni/qwen3_tts_worker.cpp` of
+`suharvest/TensorRT-Edge-LLM`) that must route through the new
+`emitEvent(rid, kind, json)` helper:
+
+- `:553` — `ready` event
+- `:654` — chunk emit (JSON built at `:627`)
+- `:946` — `done` event (JSON built at `:916`)
+- `:990` — error / end-of-request emit
+- All `std::cerr` sites (`:72, :214, :541`) are info/usage/error logs —
+  verify they stay on stderr; they do not need the mutex but the audit
+  must explicitly classify each.
+
+A grep gate in CI: `grep -nE '(std::cout|std::printf)' examples/omni/qwen3_tts_worker.cpp`
+must return zero results outside the `emitEvent()` helper.
 
 **Phase 4 (small) — Config knob**
 
@@ -327,17 +413,21 @@ Per concurrent slot:
 | Talker KV cache (max seq 2048, 28 layers, FP16) | ~400 MB |
 | Code-predictor state | ~50 MB |
 | Stateful Code2Wav state (when enabled) | ~30 MB |
+| Code2WavRunner instance (per §4.1 — required per slot) | ~50 MB |
 | Talker execution context (TRT) | ~50 MB |
-| **Per-slot total** | **~530 MB** |
+| **Per-slot total** | **~580 MB** |
 
 Free GPU memory after baseline load (measured from container logs):
 
-- Orin Nano 8GB: ~1.4 GB → **N=1 max safely**, N=2 borderline
-- Orin NX 16GB: ~6 GB → **N=2 comfortable, N=3 ok, N=4 tight**
+- Orin Nano 8GB: ~1.4 GB → **N=1 max safely**, N=2 not viable
+- Orin NX 16GB: ~6 GB → **N=2 comfortable, N=3 tight, N=4 not viable**
 
-Always validate with `nvidia-smi` (Jetson: `tegrastats`) under load. The
-spec author **must** measure actual memory delta per slot before
-publishing recommended defaults.
+**Validation requirement (blocking before profile bump):** The
+implementation author must add `[JV_MEM]` log points at slot construction
+in `qwen3_tts_worker.cpp` and capture per-slot deltas under
+`tegrastats`. The per-slot estimates above are spec-time hypotheses;
+the N=2 profile rollout (Plan §9 step 4) cannot proceed without measured
+deltas confirming the budget.
 
 ## 7. Risks
 
@@ -349,7 +439,10 @@ publishing recommended defaults.
 | 4 | TensorRT engine thread-safety | TensorRT permits concurrent `enqueueV3` on different contexts and streams from different threads — verify with current TRT version on Jetson (`nvidia-smi --query`) before relying on it |
 | 5 | OOM at N=3+ on smaller boards | Validate at startup: probe free memory, refuse to launch if `N × per_slot > available - safety_margin` |
 | 6 | Stateful Code2Wav state leak across slots | Each slot has its own state; never shared |
-| 7 | Existing async-Code2Wav (`asyncCode2Wav=false` today) helper thread conflicts with new scheduler thread | Pick one model — either keep async-Code2Wav per-slot, or eliminate the asyncCode2Wav branch entirely. Recommend eliminating since per-slot CUDA streams give us the parallelism asyncCode2Wav was reaching for |
+| 7 | Existing async-Code2Wav path is real, not dead code | The production worker has a runtime-selectable `async_code2wav` kwarg (per-request, default false) at `cpp:572`; when set, work routes to a SECOND `Code2WavRunner` on a SECOND CUDA stream (`cpp:466, :473-481, :761-827`). The new scheduler must (a) own the async runner per-slot (so two slots running with `async_code2wav=true` don't collide on a shared async stream) OR (b) deprecate the async path entirely since per-slot streams subsume it. Recommend (b) but verify no current caller depends on the async path before removing |
+| 8 | Hot-reload (`/admin/backend/reload`) drain semantics change with N>1 in-flight | Today `unload()` terminates the worker under `_worker_lock` (`trt_edge_llm_tts.py:630-643`). With the new design, `unload()` must wait for all `_inflight` queues to drain (or hit `drain_timeout_s`), then kill the worker and rely on the reader-exit sentinel to wake any remaining callers with `WorkerExitError`. Document: drain timeout must be ≥ longest expected per-segment synth (~2 s) × concurrency to avoid spurious aborts |
+| 9 | Reader thread sees event before queue exists | §4.2 mandates "insert map entry before stdin write" ordering. Without this, the writer could send a request, the reader could process the first event, and find no queue — event dropped, caller hangs on `q.get` forever |
+| 10 | Sampling defaults (`temperature`, `top_p`, `top_k`) make output non-deterministic | Plan §7 byte-identical acceptance requires pinned seed + greedy sampling. Existing profile already sets `OVS_TTS_TALKER_TEMPERATURE=0.0`, `OVS_TTS_TALKER_TOP_K=1`, `OVS_TTS_SEED=42` (`jetson-multilang-highperf-nx.json:40-43`); regression tests must assert these are set or the byte-identical claim is moot |
 
 ## 8. Testing plan
 
@@ -409,19 +502,39 @@ publishing recommended defaults.
 
 ## 11. Reference
 
-- Current worker source: `third_party/qwen3-edgellm-jetson/native/edgellm_voice_worker/qwen3_tts_worker.cpp`
+- Current worker source: `examples/omni/qwen3_tts_worker.cpp` in
+  `suharvest/TensorRT-Edge-LLM` (the production fork). The repo is checked
+  out on Mac at `/Users/harvest/project/tensorrt-edge-llm` and on orin-nx
+  at `/home/harvest/TensorRT-Edge-LLM`. **NOT** in the
+  `qwen3-edgellm-jetson` submodule — that copy is stale (see §1
+  source-of-truth note).
 - Python IPC: `app/backends/jetson/trt_edge_llm_tts.py` (lines 470-1100)
-- TRT runtime classes: `Qwen3OmniTTSRuntime`, `Code2WavRunner` — defined in
-  `third_party/qwen3-edgellm-jetson/native/edgellm_voice/`
-- Build script: `deploy/jetson-release-highperf.sh` (rebuilds worker
-  binary; landed via image rebuild — confirm with deployment owner)
+- TRT runtime classes: `Code2WavRunner`, `StatefulCode2WavRunner` — header
+  `tensorrt_edge_llm/multimodal/statefulCode2WavRunner.h` (referenced at
+  `cpp:11`). `Qwen3OmniTTSRuntime` may live elsewhere; the implementor
+  must locate it under the TensorRT-Edge-LLM tree.
+- Build entry: `cmake` against the TensorRT-Edge-LLM tree. There is no
+  in-repo build script that consumes this source directly today; the
+  deployed binary in `deploy/jetson-workers/qwen3_tts_worker` (60.7 MB,
+  baked into the Jetson image via Dockerfile `COPY`) was produced
+  out-of-band by `cmake --build` inside the TensorRT-Edge-LLM tree on
+  orin-nx. The implementor needs to (a) establish a reproducible build,
+  (b) document it in `deploy/jetson-release-highperf.sh` or a new
+  `deploy/build-qwen3-tts-worker.sh`, and (c) refresh
+  `deploy/jetson-workers/qwen3_tts_worker` from the new build.
 
 ---
 
 **Acceptance criteria for the assignee:**
 
 1. With `OVS_TTS_WORKER_CONCURRENCY=1`, all existing tests pass and audio
-   output is byte-identical to the pre-change worker for the same input.
+   output is byte-identical to the pre-change worker for the same input,
+   given pinned greedy sampling (Plan §7 criterion 1). "Pre-change
+   worker" = the production binary built from the **current HEAD** of
+   `suharvest/TensorRT-Edge-LLM:main` BEFORE this spec's edits land —
+   NOT the stale 687-line toolkit version. The implementor records the
+   sha256 of the pre-change binary before starting Phase 1 and uses it
+   as the regression baseline.
 2. With `OVS_TTS_WORKER_CONCURRENCY=2` on Orin NX, the dashboard
    conversation has measurably fewer mid-sentence gaps (qualitative A/B
    demo plus a quantitative measurement: instrument the worker to log the
