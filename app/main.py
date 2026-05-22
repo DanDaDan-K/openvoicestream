@@ -251,6 +251,25 @@ def _try_asr_manager():
 def _get_tts_stream_executor() -> ThreadPoolExecutor:
     global _tts_stream_executor
     if _tts_stream_executor is None:
+        # Phase 3b-B-4 part-4 INVESTIGATION RESULT: lifting max_workers above
+        # 1 exposes a deeper bug in the C++ stateful Code2WavRunner reset
+        # path. Two concurrent /tts/stream requests cause:
+        #
+        #   CUDA runtime error in cudaMemsetAsync(state.read.rawPointer(), ...)
+        #   an illegal memory access was encountered
+        #
+        # The C++ engine slot pools (Phase 3b-B-1) + worker thread-dispatch
+        # (Phase 3b-B-2) + per-slot Code2Wav (Phase 3b-B-4 part-2 commit
+        # `5e1323f`) all carry the right per-slot data, but per-slot
+        # StatefulCode2WavRunner state buffer initialization isn't actually
+        # multi-slot safe yet — that's the next bottleneck to fix. Until
+        # that's resolved, keep this serializing at the HTTP layer so the
+        # worker never sees two in-flight requests simultaneously. The
+        # `OVS_TTS_WORKER_CONCURRENCY` env is wired all the way down (engine
+        # pools sized to it, worker dispatcher uses it, _WorkerIO semaphore
+        # picks it up) but its only practical effect today is making the
+        # cold-start eager-init less of a spike when the cap eventually
+        # rises.
         _tts_stream_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="tts-stream"
         )
