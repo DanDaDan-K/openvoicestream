@@ -270,8 +270,21 @@ def _get_tts_stream_executor() -> ThreadPoolExecutor:
         # picks it up) but its only practical effect today is making the
         # cold-start eager-init less of a spike when the cap eventually
         # rises.
+        # Phase B stability gate landed: C1 (codecHiddensBuffer per-request)
+        # + C5 (Code2Wav worker mutex) + worker-side runtime mutex (fork
+        # commit 718b233) make N=2 stable — no CUDA crashes, audio MD5
+        # byte-identical at N=1. However throughput is currently
+        # SERIALIZED at the runtime layer because the broad mutex around
+        # handleAudioGeneration() prevents real parallelism. Default
+        # stays at 1 until Phase B C2/C3 lands (per-call locals for the
+        # ~14 racing runtime scratch tensors, see
+        # docs/specs/tts-n2-phase-b-patches.md §1). Set
+        # OVS_TTS_STREAM_MAX_WORKERS=2 to opt into N=2 with the current
+        # stability-without-throughput tradeoff (slow-client TTFA ≈
+        # 2-4× single-client baseline).
         _tts_stream_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="tts-stream"
+            max_workers=int(os.environ.get("OVS_TTS_STREAM_MAX_WORKERS", "1")),
+            thread_name_prefix="tts-stream",
         )
     return _tts_stream_executor
 
