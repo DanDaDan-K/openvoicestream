@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,7 @@ import base64
 import io
 import wave
 from collections import deque
-from typing import Optional
+from typing import Iterator, Optional
 import importlib
 import uuid
 
@@ -478,6 +479,114 @@ _DEFAULT_CODEC_EOS_LOGIT_OFFSET = float(os.environ.get("TTS_CODEC_EOS_LOGIT_OFFS
 _DEFAULT_SEGMENT_TEXT = os.environ.get("EDGE_LLM_TTS_SEGMENT_TEXT", "1").lower() not in ("0", "false", "no")
 
 
+class WorkerExitError(RuntimeError):
+    """Raised when the TTS worker subprocess dies while a request is in flight."""
+
+
+class _WorkerIO:
+    """Per-worker stdin writer + stdout reader thread, multiplexing N in-flight requests.
+
+    Replaces the previous coarse ``_worker_lock`` (which serialized full
+    request→response cycles end-to-end) with:
+
+      * a single ``_stdin_lock`` that only protects the single-line JSON write,
+      * a daemon reader thread that demuxes stdout events to per-request
+        ``queue.Queue`` instances keyed by ``request_id``/``id``,
+      * a ``threading.Semaphore`` bounding in-flight requests to ``concurrency``.
+
+    When the worker subprocess EOFs (crash / restart), the reader thread wakes
+    every in-flight caller with a sentinel ``{"event": "_worker_exit"}`` so
+    they raise ``WorkerExitError`` instead of hanging on ``q.get(timeout=...)``.
+
+    A given ``_WorkerIO`` instance is bound to ONE subprocess. To restart the
+    worker, discard the old instance and create a new one (handled in
+    ``_ensure_worker`` / ``_restart_worker``).
+    """
+
+    def __init__(self, proc: subprocess.Popen, concurrency: int):
+        self._proc = proc
+        self._stdin_lock = threading.Lock()
+        self._inflight: dict[str, "queue.Queue"] = {}
+        self._inflight_lock = threading.Lock()
+        self._sem = threading.Semaphore(max(1, int(concurrency)))
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop,
+            name="tts-worker-stdout",
+            daemon=True,
+        )
+        self._reader_thread.start()
+
+    def request(self, payload: dict) -> Iterator[dict]:
+        """Send ``payload`` to the worker and yield response events until ``done``.
+
+        Caller must include a unique ``id`` field in ``payload``. The generator
+        terminates when an ``event=="done"`` is received, or raises
+        ``WorkerExitError`` if the worker dies mid-request.
+        """
+        self._sem.acquire()
+        req_id = payload["id"]
+        q: "queue.Queue" = queue.Queue()
+        # CRITICAL ordering: insert the queue BEFORE writing stdin so the
+        # reader thread can never observe an event for ``req_id`` before
+        # the queue exists (would otherwise be dropped as "stale").
+        with self._inflight_lock:
+            self._inflight[req_id] = q
+        try:
+            assert self._proc.stdin is not None
+            try:
+                with self._stdin_lock:
+                    self._proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                    self._proc.stdin.flush()
+            except Exception:
+                with self._inflight_lock:
+                    self._inflight.pop(req_id, None)
+                raise
+            while True:
+                try:
+                    event = q.get(timeout=60.0)
+                except Exception:
+                    raise
+                if event.get("event") == "_worker_exit":
+                    raise WorkerExitError("TTS worker died mid-request")
+                yield event
+                if event.get("event") == "done":
+                    return
+        finally:
+            with self._inflight_lock:
+                self._inflight.pop(req_id, None)
+            self._sem.release()
+
+    def _reader_loop(self) -> None:
+        """Drain worker stdout, dispatching events to per-request queues."""
+        try:
+            assert self._proc.stdout is not None
+            for line in self._proc.stdout:
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    logger.debug("TTS worker emitted non-JSON line: %r", line[:200])
+                    continue
+                rid = event.get("request_id") or event.get("id")
+                with self._inflight_lock:
+                    q = self._inflight.get(rid) if rid else None
+                if q is not None:
+                    q.put(event)
+                # else: stale / unsolicited (e.g. spurious "ready" replays
+                # or events after a restart). Drop silently.
+        except Exception:
+            logger.exception("TTS worker stdout reader crashed")
+        finally:
+            # Worker died (or stdout closed). Wake every in-flight caller
+            # with the sentinel so they raise WorkerExitError instead of
+            # hanging on q.get(timeout=60).
+            with self._inflight_lock:
+                for q in self._inflight.values():
+                    q.put({"event": "_worker_exit"})
+                self._inflight.clear()
+
+
 class TRTEdgeLLMTTSBackend(TTSBackend):
     """TTS via TRT-Edge-LLM qwen3_tts_inference subprocess."""
 
@@ -503,7 +612,15 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         self._product_backend = None
         self._resolved_mode: Optional[str] = None
         self._worker: Optional[subprocess.Popen] = None
+        # _worker_lock is retained for unload()/restart lifecycle serialization
+        # (process spawn + handle swap). Per-request I/O serialization moved
+        # to _WorkerIO (see TTS worker concurrency spec §4.2). The fine-grained
+        # stdin lock + reader thread live inside ``self._worker_io``.
         self._worker_lock = threading.Lock()
+        self._worker_io: Optional[_WorkerIO] = None
+        self._worker_concurrency: int = max(
+            1, int(os.environ.get("OVS_TTS_WORKER_CONCURRENCY", "1"))
+        )
         self._worker_ready_meta: dict = {}
         self._worker_stderr_tail = deque(maxlen=80)
         # Capture artifact paths from the *current* env at instance creation
@@ -649,6 +766,10 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             with self._worker_lock:
                 old = self._worker
                 self._worker = None
+                # Drop _WorkerIO first so its reader thread sees EOF
+                # cleanly when we kill the subprocess below, and wakes any
+                # (unexpected) in-flight callers with the exit sentinel.
+                self._worker_io = None
                 if old is not None:
                     try:
                         old.terminate()
@@ -766,12 +887,30 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         if ready.get("event") != "ready":
             raise RuntimeError(f"TTS worker did not become ready: {ready}")
         self._worker_ready_meta = ready
+        # Re-read concurrency in case the env was applied between __init__
+        # and the first preload (BackendManager applies profile env before
+        # building the backend, but later hot reloads come via __init__ on a
+        # fresh instance — so this is mostly defensive).
+        self._worker_concurrency = max(
+            1, int(os.environ.get("OVS_TTS_WORKER_CONCURRENCY", str(self._worker_concurrency)))
+        )
+        self._worker_io = _WorkerIO(self._worker, self._worker_concurrency)
 
     def _restart_worker_locked(self, reason: str) -> None:
-        """Restart the resident TTS worker while ``_worker_lock`` is held."""
+        """Restart the resident TTS worker.
+
+        Called from inside ``_worker_lock`` (held by the streaming retry-on-
+        empty path). Drops the current ``_WorkerIO`` so the daemon reader
+        thread exits cleanly via EOF on the killed process's stdout, then
+        spawns a fresh process + new ``_WorkerIO`` via ``_ensure_worker``.
+        Any other in-flight request on the old ``_WorkerIO`` (none expected
+        in the empty-stream retry path, but safe by construction) receives
+        the ``_worker_exit`` sentinel and raises ``WorkerExitError``.
+        """
         logger.warning("Restarting TTS worker: %s", reason)
         old = self._worker
         self._worker = None
+        self._worker_io = None
         if old is not None:
             try:
                 old.terminate()
@@ -817,18 +956,28 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
             request["speaker_embedding_b64"] = base64.b64encode(speaker_embedding).decode("ascii")
         else:
             self._add_speaker_request_fields(request, voice_kwargs)
+        # Phase 3b-B-3 (TTS worker concurrency): one-shot path now goes through
+        # _WorkerIO.request() — same protocol contract (one event per request
+        # in the file-output mode), but the stdin write is serialized only at
+        # the byte level and the response is demuxed by request_id, allowing
+        # other concurrent requests to interleave at the stdout reader.
         with self._worker_lock:
             self._ensure_worker()
-            assert self._worker is not None and self._worker.stdin is not None and self._worker.stdout is not None
-            t0 = time.time()
-            self._worker.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
-            self._worker.stdin.flush()
-            line = self._worker.stdout.readline()
-            elapsed = time.time() - t0
-        if not line:
+            assert self._worker_io is not None
+        t0 = time.time()
+        response = None
+        try:
+            for event in self._worker_io.request(request):
+                response = event
+        except WorkerExitError as exc:
             self._worker = None
-            raise RuntimeError(f"TTS worker exited before response: {self._worker_stderr_snip()}")
-        response = json.loads(line)
+            self._worker_io = None
+            raise RuntimeError(f"TTS worker exited before response: {self._worker_stderr_snip()}") from exc
+        elapsed = time.time() - t0
+        if response is None:
+            self._worker = None
+            self._worker_io = None
+            raise RuntimeError(f"TTS worker returned no events: {self._worker_stderr_snip()}")
         if not response.get("ok"):
             raise RuntimeError(f"TTS worker failed: {response}")
         with open(response["output_file"], "rb") as f:
@@ -1007,22 +1156,20 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
         retry_after_empty = False
         emitted_chunks = 0
         done_event: dict | None = None
+        # Phase 3b-B-3 (TTS worker concurrency): streaming path now iterates
+        # over _WorkerIO.request() — the daemon reader thread demuxes events
+        # to this request's queue by request_id. The old end-to-end
+        # _worker_lock is no longer held across the chunk loop, so other
+        # in-flight requests can run concurrently up to OVS_TTS_WORKER_CONCURRENCY.
         with self._worker_lock:
             self._ensure_worker()
-            assert self._worker is not None and self._worker.stdin is not None and self._worker.stdout is not None
-            self._worker.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
-            self._worker.stdin.flush()
-
-            while True:
-                line = self._worker.stdout.readline()
-                if not line:
-                    self._worker = None
-                    raise RuntimeError(f"TTS worker exited during stream: {self._worker_stderr_snip()}")
-                event = json.loads(line)
-                # Forward-compat (TTS worker concurrency Phase 1): the worker
-                # now emits both "request_id" and "id" on every event. With
-                # N=1 + _worker_lock the demux is still implicit, but log
-                # any unexpected id so we catch protocol drift early.
+            assert self._worker_io is not None
+            worker_io = self._worker_io
+        try:
+            for event in worker_io.request(request):
+                # Forward-compat: worker emits both "request_id" and "id".
+                # _WorkerIO already demuxes by request_id, but keep the
+                # mismatch-warn for protocol-drift detection.
                 event_rid = _event_request_id(event)
                 if event_rid is not None and event_rid != req_id and event_rid != "__worker__":
                     logger.debug(
@@ -1061,10 +1208,21 @@ class TRTEdgeLLMTTSBackend(TTSBackend):
                         and emitted_chunks == 0
                     ):
                         retry_after_empty = True
-                        self._restart_worker_locked(
-                            f"stateful stream returned 0 chunks for request {req_id}"
-                        )
+                        # Reacquire the lifecycle lock for the restart —
+                        # other concurrent requests on the old worker_io
+                        # will receive _worker_exit sentinels and raise
+                        # WorkerExitError (caller handles).
+                        with self._worker_lock:
+                            self._restart_worker_locked(
+                                f"stateful stream returned 0 chunks for request {req_id}"
+                            )
                     break
+        except WorkerExitError as exc:
+            self._worker = None
+            self._worker_io = None
+            raise RuntimeError(
+                f"TTS worker exited during stream: {self._worker_stderr_snip()}"
+            ) from exc
         if retry_after_empty:
             logger.warning(
                 "Retrying TTS stream after empty stateful result "
