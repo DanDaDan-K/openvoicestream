@@ -83,7 +83,7 @@ COPY deploy/rk-runtime/            /opt/rk-runtime/
 RUN pip install --no-cache-dir -e /opt/speech/third_party/rkvoice-stream
 
 # Model dirs (bind-mounted at runtime, not baked)
-RUN mkdir -p /opt/tts/models /opt/asr/models /opt/asr/lib /opt/models \
+RUN mkdir -p /opt/tts/models /opt/asr/models /opt/asr/lib /opt/models /opt/kokoro-rknn \
     && ln -sf /opt/rk-runtime/librknnrt.so /usr/lib/librknnrt.so \
     && ln -sf /opt/rk-runtime/librkllmrt.so /opt/asr/lib/librkllmrt.so \
     && ln -sf /opt/rk-runtime/librkllmrt.so /usr/lib/librkllmrt.so
