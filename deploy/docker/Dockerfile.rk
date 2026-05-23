@@ -53,6 +53,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 # NPU runtime:   rknn-toolkit-lite2
 # CPU TTS:       sherpa-onnx (Kokoro / Matcha fallback)
 # Web:           fastapi, uvicorn[standard], python-multipart, websockets, requests
+# Kokoro G2P:    misaki (+ Chinese deps) — required for Kokoro RK ZH path; without
+#                misaki, Chinese text falls back to char-level lookup that
+#                silently produces 4-byte audio (see docs/specs/kokoro-rk-zh-fix-misaki.md).
+#                Persisted in image so docker compose --force-recreate doesn't drop it.
 RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
         'numpy<2' \
         soundfile \
@@ -67,6 +71,15 @@ RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
         python-multipart \
         websockets \
         requests \
+        misaki \
+        jieba \
+        pypinyin \
+        pypinyin_dict \
+        ordered_set \
+        cn2an \
+        proces \
+        addict \
+        regex \
     && ldconfig
 
 # ── Application code ──────────────────────────────────────────────────
