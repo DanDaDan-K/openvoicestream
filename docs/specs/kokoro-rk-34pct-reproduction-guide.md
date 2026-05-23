@@ -225,27 +225,50 @@ wget "$HF/rk3588/kokoro-decoder-front.int8.rknn" \
 Verify md5s against `docs/specs/kokoro-rk-34pct-http-rtf-final.md` §"File
 integrity" table before continuing.
 
-#### B.2 Bucket-8 and bucket-16 (NOT yet on HF — local copy required)
+#### B.2 Bucket-8 and bucket-16 (HF mirror available — 2026-05-23)
 
-> **Honest status (2026-05-23):** bucket-8 and bucket-16 artifacts are
-> **not** mirrored to Hugging Face yet (deferred — see bucket-8 spec §8
-> TODO and bucket-16 spec). The only authoritative copies live on:
-> - `wsl2-local:/home/harve/kokoro-analysis/m_bucket8/` (build host)
-> - `wsl2-local:/home/harve/kokoro-analysis/m_bucket16/` (build host)
-> - `radxa:/home/radxa/models/tts/kokoro-bucket-{8,16}/` (current prod)
+Bucket-8 and bucket-16 artifacts are now mirrored at
+`harvestsu/seeed-local-voice-rk-artifacts` under
+`rk3588/kokoro-hybrid-v1/bucket{8,16}/`. End-to-end md5 round-trip from
+HF matches the wsl2-local build-host source (verified 2026-05-23).
 
-Until an HF mirror exists, a fresh box reproduces by copying from one of
-the two host paths above. Recommended path: use the fleet tool's direct
-LAN transfer from the existing radxa to the new one (much faster than
-re-deriving on `wsl2-local`):
+| File | HF path under `rk3588/kokoro-hybrid-v1/` | Local target |
+| --- | --- | --- |
+| `kokoro-prefix-cpu-bucket8.onnx`                              | `bucket8/kokoro-prefix-cpu-bucket8.onnx`                              | `/home/radxa/models/tts/kokoro-bucket-8/kokoro-prefix-cpu-bucket8.onnx` |
+| `kokoro-decoder-front-bucket8.fp16.rknn`                      | `bucket8/kokoro-decoder-front-bucket8.fp16.rknn`                      | `/home/radxa/models/tts/kokoro-bucket-8/rk3588/kokoro-decoder-front-bucket8.fp16.rknn` |
+| `kokoro-vocoder-front-half-bucket8.native.fp16.rknn`          | `bucket8/kokoro-vocoder-front-half-bucket8.native.fp16.rknn`          | `/home/radxa/models/tts/kokoro-bucket-8/rk3588/kokoro-vocoder-front-half-bucket8.native.fp16.rknn` |
+| `kokoro-vocoder-tail-rest-cpu-bucket8.onnx`                   | `bucket8/kokoro-vocoder-tail-rest-cpu-bucket8.onnx`                   | `/home/radxa/models/tts/kokoro-bucket-8/kokoro-vocoder-tail-rest-cpu-bucket8.onnx` |
+| `kokoro-prefix-cpu-bucket16.onnx`                             | `bucket16/kokoro-prefix-cpu-bucket16.onnx`                            | `/home/radxa/models/tts/kokoro-bucket-16/kokoro-prefix-cpu-bucket16.onnx` |
+| `kokoro-decoder-front-bucket16.fp16.rknn`                     | `bucket16/kokoro-decoder-front-bucket16.fp16.rknn`                    | `/home/radxa/models/tts/kokoro-bucket-16/kokoro-decoder-front-bucket16.fp16.rknn` |
+| `kokoro-vocoder-front-half-bucket16.native.fp16.rknn`         | `bucket16/kokoro-vocoder-front-half-bucket16.native.fp16.rknn`        | `/home/radxa/models/tts/kokoro-bucket-16/kokoro-vocoder-front-half-bucket16.native.fp16.rknn` |
+| `kokoro-vocoder-tail-rest-cpu-bucket16.onnx`                  | `bucket16/kokoro-vocoder-tail-rest-cpu-bucket16.onnx`                 | `/home/radxa/models/tts/kokoro-bucket-16/kokoro-vocoder-tail-rest-cpu-bucket16.onnx` |
+
+Fetch directly with wget (note: bucket-8 uses nested `rk3588/` layout to
+match bucket-32; bucket-16 is flat per §2.3):
 
 ```bash
-fleet transfer radxa:/home/radxa/models/tts/kokoro-bucket-8/  <new-host>:/home/<user>/models/tts/kokoro-bucket-8/
-fleet transfer radxa:/home/radxa/models/tts/kokoro-bucket-16/ <new-host>:/home/<user>/models/tts/kokoro-bucket-16/
+HF=https://huggingface.co/harvestsu/seeed-local-voice-rk-artifacts/resolve/main/rk3588/kokoro-hybrid-v1
+
+# Bucket-8 (nested rk3588/ layout)
+mkdir -p /home/radxa/models/tts/kokoro-bucket-8/rk3588
+cd /home/radxa/models/tts/kokoro-bucket-8
+wget "$HF/bucket8/kokoro-prefix-cpu-bucket8.onnx" \
+     "$HF/bucket8/kokoro-vocoder-tail-rest-cpu-bucket8.onnx"
+cd rk3588
+wget "$HF/bucket8/kokoro-decoder-front-bucket8.fp16.rknn" \
+     "$HF/bucket8/kokoro-vocoder-front-half-bucket8.native.fp16.rknn"
+
+# Bucket-16 (flat layout — all four files at bucket-16 root)
+mkdir -p /home/radxa/models/tts/kokoro-bucket-16
+cd /home/radxa/models/tts/kokoro-bucket-16
+wget "$HF/bucket16/kokoro-prefix-cpu-bucket16.onnx" \
+     "$HF/bucket16/kokoro-decoder-front-bucket16.fp16.rknn" \
+     "$HF/bucket16/kokoro-vocoder-front-half-bucket16.native.fp16.rknn" \
+     "$HF/bucket16/kokoro-vocoder-tail-rest-cpu-bucket16.onnx"
 ```
 
-Expected per-file md5s (verify against the source of truth in the
-bucket-8 / bucket-16 specs §7.1 / "Artifact md5"):
+Verify md5s after download (source of truth — matches bucket-8 / bucket-16
+specs §7.1 / "Artifact md5"):
 
 ```
 Bucket-8:
@@ -261,10 +284,12 @@ Bucket-16:
   0021f107a9bc93618e5a74d5ba23218d  kokoro-vocoder-tail-rest-cpu-bucket16.onnx
 ```
 
-If both host paths are unavailable, rebuild via
-`wsl2-local:/home/harve/kokoro-analysis/m_bucket{8,16}/run_*.sh`
-(RKNN-toolkit2 2.3.0 + venv `/home/harve/rknn-build/.venv`); follow the
-"What is done" sections of the bucket-8 / bucket-16 specs.
+Fallback paths if HF is unreachable: the same files live on
+`wsl2-local:/home/harve/kokoro-analysis/m_bucket{8,16}/` (build host) and
+`radxa:/home/radxa/models/tts/kokoro-bucket-{8,16}/` (current prod);
+`fleet transfer` works between any two of these. To rebuild from source,
+run `wsl2-local:/home/harve/kokoro-analysis/m_bucket{8,16}/run_*.sh`
+(RKNN-toolkit2 2.3.0 + venv `/home/harve/rknn-build/.venv`).
 
 ### C. Install misaki ZH G2P into the container
 
@@ -457,19 +482,14 @@ the source specs in §10.
    diff is already in commit `ca9332c`; only the image bake step is
    pending.
 
-5. **Bucket-8 / bucket-16 not on Hugging Face yet.** Authoritative copies
-   are on `wsl2-local` build host and the production radxa. HF mirror
-   under `harvestsu/seeed-local-voice-rk-artifacts/.../bucket{8,16}/` is
-   listed as TODO in the bucket-8 spec §8. New deployments must pull from
-   one of the two existing hosts via `fleet transfer`.
-
-6. **Manifest entries for bucket-8 / bucket-16 sets not yet appended to
+5. **Manifest entries for bucket-8 / bucket-16 sets not yet appended to
    `deploy/artifacts/rk_manifest.json`.** Only the bucket-32 set
-   `rk3588-kokoro-hybrid-34pct-2026-05-23` is present. Manifest append is
-   gated on HF mirror landing (so `model_downloader` has a real URL to
-   resolve).
+   `rk3588-kokoro-hybrid-34pct-2026-05-23` is present. HF mirror is now
+   live under `rk3588/kokoro-hybrid-v1/bucket{8,16}/` (see §3.B.2), so
+   `model_downloader` manifest entries can be added in a follow-up
+   without further dependencies.
 
-7. **BERT FP16 RKNN artifact (M2, `50463cb`) is on disk but not wired.**
+6. **BERT FP16 RKNN artifact (M2, `50463cb`) is on disk but not wired.**
    Retained as a reference / diagnostic build per the dead-code A/B
    finding. Do not promote without re-validating that BERT contributes to
    audio in any Kokoro variant being considered.
@@ -503,9 +523,11 @@ back into the image at the next release:
    bake step is deferred per bucket-16 spec "Phase 2c image persistence
    note".
 
-5. **HF mirror for bucket-8 / bucket-16 artifacts** — once uploaded under
-   `harvestsu/seeed-local-voice-rk-artifacts/.../bucket{8,16}/`, append
-   manifest entries:
+5. **Append bucket-8 / bucket-16 manifest entries** — HF mirror under
+   `harvestsu/seeed-local-voice-rk-artifacts/.../bucket{8,16}/` landed
+   2026-05-23 (md5 round-trip verified against wsl2-local build host).
+   Remaining work is to append the two manifest entries to
+   `deploy/artifacts/rk_manifest.json`:
    - `rk3588-kokoro-hybrid-34pct-bucket8-2026-05-23`
    - `rk3588-kokoro-hybrid-34pct-bucket16-2026-05-23`
    so fresh deploys via `model_downloader` can pull all three buckets.
