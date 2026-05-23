@@ -50,6 +50,19 @@ Validated image:
 
 - `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-v1.4-closedloop`
 
+Artifact sets:
+
+- `rk3588-multilang-2026-05-17` — Matcha TTS (closed-loop validated).
+- `rk3588-kokoro-hybrid-2026-05-23` — Kokoro hybrid TTS (CPU prefix ONNX +
+  RKNN decoder-front int8 + CPU tail ONNX), paired with `rk3588-kokoro-rknn`
+  profile. Files:
+  - `opt/kokoro-rknn/kokoro-prefix-cpu.onnx` sha256
+    `549fece07d8696ae9ea60f4667e2680b5ca1f41735af545489a378eed3fe1f1c`
+  - `opt/kokoro-rknn/kokoro-generator-tail-cpu.onnx` sha256
+    `1bdbb9fdea62922e79fa29891471e7797047f16636bff9bfb8944b28ee451bcb`
+  - `opt/kokoro-rknn/rk3588/kokoro-decoder-front.int8.rknn` sha256
+    `a6de7a2512d83a22cfba8e1793b1f463108126dfee4eb8592a28fe7c268d6861`
+
 ## Raspberry Pi / CPU Artifacts
 
 Raspberry Pi uses ONNX through sherpa-onnx. It does not use precompiled engine
