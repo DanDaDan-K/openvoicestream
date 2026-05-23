@@ -823,9 +823,26 @@ async def tts_stream(req: TTSRequest, request: Request):
                 # on the wrapped generator, which raises GeneratorExit into
                 # _generate_streaming_single() and triggers
                 # _WorkerIO.cancel(req_id) (trt_edge_llm_tts.py:1255-1269).
+                #
+                # [Sentence pipeline parallelism] Single-user multi-sentence
+                # streaming used to be strictly serial: sentence N drains
+                # before sentence N+1 is even submitted. Slot 1 of the worker
+                # pool (sized to OVS_TTS_WORKER_CONCURRENCY=2) sat idle in
+                # the typical single-client case. Now: submit a sliding
+                # window of `prefetch` sentences and drain their chunk queues
+                # in order. Chunk order on the wire is unchanged (sentence
+                # N's chunks are yielded before sentence N+1's), so audio
+                # MD5 is byte-identical to the serial baseline. The win is
+                # wall-clock: while sentence N's audio is being yielded to
+                # the client, sentence N+1's prefill + early decode is
+                # already running on the second slot.
                 import threading as _threading
                 cancel_flag = _threading.Event()
-                gen_holder: list = [None]
+                # Active sync generators (one per in-flight sentence). The
+                # disconnect watcher must close ALL of them so each
+                # underlying _generate_streaming_single() receives
+                # GeneratorExit and emits worker_io.cancel(req_id).
+                active_gens: list = []
                 gen_lock = _threading.Lock()
                 watcher_task: asyncio.Task | None = None
 
@@ -849,9 +866,12 @@ async def tts_stream(req: TTSRequest, request: Request):
                                 return
                             if message.get("type") == "http.disconnect":
                                 cancel_flag.set()
+                                # Snapshot the set under lock then close
+                                # outside to avoid holding it during slow
+                                # close() calls.
                                 with gen_lock:
-                                    g = gen_holder[0]
-                                if g is not None:
+                                    gens = list(active_gens)
+                                for g in gens:
                                     try:
                                         g.close()
                                     except Exception:
@@ -860,7 +880,8 @@ async def tts_stream(req: TTSRequest, request: Request):
                                             exc_info=True,
                                         )
                                 logger.info(
-                                    "tts/stream: client disconnected — cancel flag raised"
+                                    "tts/stream: client disconnected — cancel flag raised (%d gens closed)",
+                                    len(gens),
                                 )
                                 return
                     except asyncio.CancelledError:
@@ -873,12 +894,37 @@ async def tts_stream(req: TTSRequest, request: Request):
                             return
                         loop = asyncio.get_event_loop()
                         watcher_task = asyncio.create_task(_disconnect_watcher())
-                        for sentence in sentences:
-                            if cancel_flag.is_set():
-                                break
-                            queue: asyncio.Queue[bytes | None] = asyncio.Queue()
 
-                            def _run(text=sentence):
+                        # Pipeline window: max sentences in flight at once.
+                        # Capped by the TTS stream executor size so we never
+                        # block waiting for an executor slot.
+                        # OVS_TTS_STREAM_PREFETCH overrides; default mirrors
+                        # max_workers (2).
+                        #
+                        # CRITICAL: we do NOT pre-submit sentence 1 alongside
+                        # sentence 0. If both prefills run simultaneously the
+                        # GPU contention also hits sentence 0, so the TTFA
+                        # of the very first chunk regresses (~520ms → ~920ms
+                        # in early tests). Instead, sentence i+1 is submitted
+                        # the moment sentence i emits its FIRST chunk — i.e.
+                        # sentence i has cleared prefill and is in decode/
+                        # Code2Wav, so its first audio is already on the way.
+                        # This keeps sentence 0's TTFA at the single-sentence
+                        # baseline while still overlapping sentence i+1's
+                        # prefill with sentence i's decode.
+                        executor = _get_tts_stream_executor()
+                        prefetch_max = min(
+                            int(os.environ.get(
+                                "OVS_TTS_STREAM_PREFETCH",
+                                str(executor._max_workers),
+                            )),
+                            len(sentences),
+                        )
+
+                        def _submit(idx: int, q: "asyncio.Queue[bytes | None]"):
+                            text = sentences[idx]
+
+                            def _run():
                                 gen = None
                                 try:
                                     gen = backend.generate_streaming(
@@ -887,17 +933,17 @@ async def tts_stream(req: TTSRequest, request: Request):
                                         **voice_kwargs,
                                     )
                                     with gen_lock:
-                                        gen_holder[0] = gen
+                                        active_gens.append(gen)
                                     for chunk in gen:
                                         if cancel_flag.is_set():
                                             break
-                                        loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                                        loop.call_soon_threadsafe(q.put_nowait, chunk)
                                 except Exception:
-                                    logger.exception("tts/stream synthesis failed for sentence=%r", text)
+                                    logger.exception(
+                                        "tts/stream synthesis failed for sentence=%r",
+                                        text,
+                                    )
                                 finally:
-                                    # Explicit close → triggers GeneratorExit
-                                    # in _generate_streaming_single, which
-                                    # calls worker_io.cancel(req_id).
                                     if gen is not None:
                                         try:
                                             gen.close()
@@ -906,16 +952,55 @@ async def tts_stream(req: TTSRequest, request: Request):
                                                 "gen.close() in _run raised",
                                                 exc_info=True,
                                             )
-                                    with gen_lock:
-                                        gen_holder[0] = None
-                                    loop.call_soon_threadsafe(queue.put_nowait, None)
+                                        with gen_lock:
+                                            try:
+                                                active_gens.remove(gen)
+                                            except ValueError:
+                                                pass
+                                    loop.call_soon_threadsafe(q.put_nowait, None)
 
-                            loop.run_in_executor(_get_tts_stream_executor(), _run)
+                            loop.run_in_executor(executor, _run)
+
+                        # Allocate queues. Submit ONLY sentence 0 to start —
+                        # sentence 1+ will be submitted as sentence i emits
+                        # its first chunk (see comment above for rationale).
+                        queues: list[asyncio.Queue[bytes | None]] = [
+                            asyncio.Queue() for _ in range(len(sentences))
+                        ]
+                        next_to_submit = 1
+                        _submit(0, queues[0])
+
+                        def _maybe_prefetch():
+                            nonlocal next_to_submit
+                            if (
+                                next_to_submit < len(sentences)
+                                and not cancel_flag.is_set()
+                                # Keep the in-flight window bounded by
+                                # prefetch_max — if it's 1, never prefetch
+                                # (effectively serial, byte-equiv to old).
+                                and (next_to_submit - current_idx) < prefetch_max
+                            ):
+                                _submit(next_to_submit, queues[next_to_submit])
+                                next_to_submit += 1
+
+                        # Drain in order. Submit sentence i+1 as soon as
+                        # sentence i emits its first audio chunk.
+                        for current_idx in range(len(sentences)):
+                            if cancel_flag.is_set():
+                                break
+                            q = queues[current_idx]
+                            first_chunk_seen = False
                             while True:
-                                chunk = await queue.get()
+                                chunk = await q.get()
                                 if chunk is None:
                                     break
+                                if not first_chunk_seen:
+                                    _maybe_prefetch()
+                                    first_chunk_seen = True
                                 yield chunk
+                            # Also try after sentence completes, in case it
+                            # produced zero chunks (degenerate path).
+                            _maybe_prefetch()
                 finally:
                     if watcher_task is not None:
                         watcher_task.cancel()
