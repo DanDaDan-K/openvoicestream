@@ -134,6 +134,7 @@ class RKTTSBackend(TTSBackend):
             raise RuntimeError("RKTTSBackend not loaded (was unloaded)")
         voice = resolve_speaker_kwargs(self.model_id, allow_embedding=False, **kwargs)
         speaker_id = voice.get("speaker_id", 0)
+        kwargs.pop("speaker_id", None)
         speed = kwargs.pop("speed", None)
         pitch_shift = kwargs.pop("pitch_shift", None)
         language = detect_zh_en(text, kwargs.pop("language", None))
