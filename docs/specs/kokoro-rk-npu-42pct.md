@@ -1,6 +1,8 @@
 # Kokoro RK NPU 推至 42% R&D spec
 
-> Status: **deferred** — codex spec landed 2026-05-23, awaiting kickoff. Current shipped state is the 17%-NPU hybrid (decoder-front INT8 only), validated on Radxa RK3588 (RTF 0.673 @ "abc."). See manifest `rk3588-kokoro-hybrid-2026-05-23` in `deploy/artifacts/rk_manifest.json`.
+> Status: **target revised to ~34% (2026-05-23)** — A/B audio verification (commit `3b18517`, `docs/specs/kokoro-bert-ab-audio-report.md`) proved BERT is **bit-exact dead code** in Kokoro v1.0 ONNX export (10/10 utterances byte-identical with/without BERT compute; mel L1 = 0 dB; pitch RMSE = 0 Hz). The original 42% budget assumed BERT contributed 23.7% of compute; that compute exists in the graph but is not on the audio path. Removing the BERT addition from the budget caps the realistic NPU share at ~34% (17% existing decoder-front INT8 + 16.8% vocoder front-half FP16 via M4). M2 BERT FP16 RKNN artifact (commit `50463cb`) is retained as a reference/diagnostic build but **will not be wired into the runtime** — it would only relocate dead computation to the NPU. M3 (prefix split) is closed as **NO-OP** per the same finding.
+>
+> Current shipped state is the 17%-NPU hybrid (decoder-front INT8 only), validated on Radxa RK3588 (RTF 0.673 @ "abc."). See manifest `rk3588-kokoro-hybrid-2026-05-23` in `deploy/artifacts/rk_manifest.json`. M4 vocoder front-half is the only remaining NPU expansion path; see §4 M4-revised below for the active workstream.
 
 ## §1 Subgraph boundary selection
 
