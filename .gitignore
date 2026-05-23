@@ -28,6 +28,7 @@ Thumbs.db
 # Runtime bundles copied from device builds or release artifacts.
 deploy/jetson-workers/
 deploy/rk-runtime/
+deploy/kokoro-artifacts/
 
 # Generated performance artifacts
 bench/perf/__pycache__/

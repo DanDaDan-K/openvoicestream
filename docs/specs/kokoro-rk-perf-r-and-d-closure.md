@@ -27,9 +27,9 @@ tokens → misaki G2P → CPU prefix → RKNN decoder-front INT8 → RKNN vocode
 ### Production state
 
 - HF mirror complete at `harvestsu/seeed-local-voice-rk-artifacts/blob/main/rk3588/kokoro-hybrid-v1/{bucket8,bucket16,bucket-32}/`
-- Container `openvoicestream-kokoro` on radxa runs via bind-mount of bucket-8/16/32 artifacts + container-installed misaki (writable layer)
-- `Dockerfile.rk` includes misaki + ZH G2P deps for next image rebuild persistence
-- 3-bucket router env-gated; missing env vars fallback to baseline gracefully
+- Production image **rebuilt 2026-05-23 as `openvoicestream:rk-kokoro-2026-05-23-rebuilt`** — self-contained (misaki ZH G2P stack, fixed `app/backends/rk/tts.py`, submodule `65b9a13` `kokoro_rknn.py`, all 14 active bucket artifacts + `tokens.txt` baked in). No host bind-mounts of model files or `.py` overrides required. Pre-rebuild image `openvoicestream:rk-kokoro-2026-05-23` retained on host as the rollback target.
+- Deployment runbook: `docs/runbooks/kokoro-rk-deploy.md`.
+- 3-bucket router env-gated; missing env vars fallback to baseline gracefully.
 
 ## R&D paths systematically evaluated
 
@@ -81,8 +81,8 @@ All are R&D commitments significantly larger than the optimizations already deli
 
 ## Side effects discovered & resolved
 
-- **Production image `openvoicestream:rk-kokoro-2026-05-23` was built 5 min before commit 6155ebe** — shipped with broken `app/backends/rk/tts.py` (missing `speaker_id` pop). Hot-patched into running containers; `Dockerfile.rk` already pulls latest source so next image rebuild auto-fixes (commit f3a0edc).
-- **bind-mount deployment**: misaki + bucket artifacts live in container writable layer + bind-mounts. `docker compose --force-recreate` will lose them. Long-term fix is image rebuild (deferred — 30+ min, scope outside this R&D).
+- **Production image `openvoicestream:rk-kokoro-2026-05-23` was built 5 min before commit 6155ebe** — shipped with broken `app/backends/rk/tts.py` (missing `speaker_id` pop). Hot-patched into running containers; resolved by image rebuild 2026-05-23 (`openvoicestream:rk-kokoro-2026-05-23-rebuilt`, commit f3a0edc + this rebuild commit).
+- **bind-mount deployment → resolved by image rebuild 2026-05-23**: misaki + bucket artifacts + `tokens.txt` are now baked into the rebuilt image. `docker compose --force-recreate` no longer drops them. See `docs/runbooks/kokoro-rk-deploy.md`.
 
 ## Files of record
 

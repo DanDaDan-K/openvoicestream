@@ -140,10 +140,19 @@ mostly *not running 5.25 s of vocoder for a 0.9 s utterance*.
 
 ### 2.4 Production image and bind-mount overlay
 
-The production container `openvoicestream-kokoro` runs image
-`openvoicestream:rk-kokoro-2026-05-23`. The image still ships the *broken*
+**Status as of 2026-05-23 rebuild:** image
+`openvoicestream:rk-kokoro-2026-05-23-rebuilt` is **self-contained** — it
+bakes in the fixed `app/backends/rk/tts.py` (speaker-id pop, commit
+`6155ebe`), the current submodule `kokoro_rknn.py` (4-stage + 3-bucket +
+misaki wire, submodule `65b9a13`), the misaki ZH G2P stack, and all 14
+active bucket-{8,16,32} artifacts. No host bind-mounts of model files or
+`.py` overrides are required. Deploy recipe in `docs/runbooks/kokoro-rk-deploy.md`.
+
+The original (pre-rebuild) production container `openvoicestream-kokoro`
+ran image `openvoicestream:rk-kokoro-2026-05-23` with the *broken*
 `app/backends/rk/tts.py` (missing speaker-id kwarg pop) and the
-*3-stage* `kokoro_rknn.py`. Both are overridden by host bind-mounts:
+*3-stage* `kokoro_rknn.py`. Both were overridden by host bind-mounts
+(retained here as the rollback recipe / archaeological record):
 
 ```
 /tmp/fixed-tts.py                         → /opt/speech/app/backends/rk/tts.py            (ro)
@@ -295,15 +304,18 @@ run `wsl2-local:/home/harve/kokoro-analysis/m_bucket{8,16}/run_*.sh`
 
 ### C. Install misaki ZH G2P into the container
 
-The Dockerfile.rk **already lists** `misaki jieba pypinyin pypinyin_dict
-ordered_set cn2an proces addict regex` (commit `ca9332c`,
-`deploy/docker/Dockerfile.rk:74-79`). **Next image rebuild will include
-misaki automatically.**
+**Status as of 2026-05-23 image rebuild:** misaki + ZH deps are **baked
+into the image** `openvoicestream:rk-kokoro-2026-05-23-rebuilt` via
+`deploy/docker/Dockerfile.rk` lines 60-83 (misaki 0.9.4, jieba 0.42.1,
+pypinyin, pypinyin_dict, ordered_set, cn2an, proces, addict, regex). **No
+runtime install step is required for the rebuilt image.** Skip to §3.D.
 
-Until then (current production runs the pre-misaki image), install into
-the writable container layer:
+The remainder of this subsection is the historical hot-patch recipe used
+against the pre-rebuild image `openvoicestream:rk-kokoro-2026-05-23`
+(retained as the rollback path).
 
 ```bash
+# Pre-rebuild image only — installs into writable layer:
 fleet exec radxa -- "docker exec openvoicestream-kokoro \
     pip3 install 'misaki[zh]'"
 ```
@@ -312,10 +324,10 @@ This pulls misaki 0.9.4 + cn2an + addict + jieba + ordered-set + pypinyin
 + pypinyin-dict + proces + regex (~30 MB total). `aarch64` wheels exist
 for everything except `jieba` (pure-Python sdist).
 
-**Warning:** writable-layer installs survive `docker restart` and
-`docker stop/start` but are *destroyed* by `docker rm` /
-`--force-recreate`. Persist via image rebuild for any production-scale
-deploy — see §6.
+**Warning (pre-rebuild image only):** writable-layer installs survive
+`docker restart` and `docker stop/start` but are *destroyed* by
+`docker rm` / `--force-recreate`. The 2026-05-23-rebuilt image removes
+this risk entirely.
 
 ### D. Deploy container with the right bind-mounts + env
 
@@ -433,9 +445,25 @@ Use `/tmp/bench_kokoro.sh` (template; n=30 serial POSTs to
 | --- | :---: | --- | --- |
 | `"abc."` (EN, 4 phonemes) | 8 | ≤ 1.0 s | 43 012 |
 | `"你好。"` (ZH, ~6 phonemes) | 8 | ≤ 1.0 s | ~30-50 KB |
-| `"Hello world."` (EN, 16 phonemes) | 16 | ≤ 2.0 s | ~90 KB |
+| `"Hello world."` (EN, 11 phonemes) | 16 | ≤ 2.0 s | ~90 KB |
 | `"我感觉很棒。"` (ZH, 16 phonemes) | 16 | ≤ 2.0 s | ~90 KB |
-| `"hello world. how are you today?"` (EN, 27 phonemes post-G2P) | 32 | ≤ 3.5 s | 251 908 |
+| `"hello world. how are you today?"` (EN, 11 + 15 phonemes, 2 sentences) | 16 + 16 | ≤ 4.0 s | ~260 KB |
+
+**Verified on 2026-05-23 rebuilt image** (30 shots each, all 200 OK, deterministic byte size):
+
+| Test | HTTP | Size (bytes) | Server-side TTFA p50 |
+| --- | --- | --- | --- |
+| `"abc."`                              | 30/30 200 | 43 012 (deterministic)  | bucket-8 ~700 ms |
+| `"你好。"`                            | 30/30 200 | 53 252 (deterministic)  | bucket-8 ~700 ms |
+| `"Hello world."`                      | 30/30 200 | 130 052 (deterministic) | bucket-16 ~1 580 ms |
+| `"我感觉很棒。"`                      | 30/30 200 | 130 052 (deterministic) | bucket-16 ~1 580 ms |
+| `"hello world. how are you today?"`   | 30/30 200 | 260 100 (deterministic) | 2× bucket-16 ~1 550–1 850 ms / sentence (sentence-split, not bucket-32) |
+
+> Note on the 5th case: post-G2P, the EN sentence-splitter cuts the input
+> into two clauses (11 + 15 phonemes), each routed independently to
+> bucket-16. To exercise the bucket-32 path explicitly, use a single
+> long clause with >16 phonemes (e.g.
+> `"The quick brown fox jumps over the lazy dog."`).
 
 Spot-check the per-call routing in logs:
 
@@ -517,8 +545,30 @@ the source specs in §10.
 
 ## §6 Image rebuild — long-term persistence
 
-The current container leans on three runtime overlays that should fold
-back into the image at the next release:
+**Status: DONE (2026-05-23).** Image
+`openvoicestream:rk-kokoro-2026-05-23-rebuilt` (digest
+`sha256:8f57153eb8bd…` for the artifact-free first build; superseded by the
+`+tokens.txt` rebuild) was produced natively on the radxa
+(`/home/radxa/build-kokoro-rebuild/`) and now bakes in:
+
+- Updated `app/backends/rk/tts.py` (speaker-id pop, md5
+  `4961497d910cac5531ceafe35e4f1713`)
+- Updated submodule `kokoro_rknn.py` at HEAD `65b9a13` (4-stage +
+  bucket-8 + bucket-16 + misaki wire, md5 `0dbb03149b1ee2b587abd2f0b4cf821b`)
+- misaki + ZH G2P deps (Dockerfile.rk lines 60-83)
+- All 14 active bucket artifacts (~448 MB) under `/opt/kokoro-bucket-{8,16}/`
+  and `/opt/kokoro-rknn/` (bucket-32)
+- `tokens.txt` (md5 `0ed710184a1ece5a4fd565e28f5062bb`) in all three
+  bucket dirs
+
+The deploy command no longer needs the `/tmp/fixed-*.py` bind-mounts or
+the bucket-{8,16,32} bind-mounts. See `docs/runbooks/kokoro-rk-deploy.md`
+for the production-ready `docker run` recipe.
+
+The previous image tag `openvoicestream:rk-kokoro-2026-05-23` is retained
+on the radxa host as the rollback target (image id `312c874ab7ff`).
+
+The original deferred work (preserved here for archaeology / rollback):
 
 1. **Bake fixed `app/backends/rk/tts.py`** (md5
    `4961497d910cac5531ceafe35e4f1713`, includes speaker-id kwarg pop). The

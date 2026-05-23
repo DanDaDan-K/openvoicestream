@@ -92,11 +92,22 @@ COPY scripts/                      /opt/speech/scripts/
 COPY third_party/rkvoice-stream/   /opt/speech/third_party/rkvoice-stream/
 COPY deploy/rk-runtime/            /opt/rk-runtime/
 
+# Kokoro 4-stage hybrid artifacts (3-bucket router: 8/16/32 frames).
+# Bucket-32 path is mounted at /opt/kokoro-rknn (legacy long-form default).
+# Bucket-8/16 paths are at /opt/kokoro-bucket-{8,16}.
+# These are baked so docker compose --force-recreate doesn't drop them.
+# Source: HF harvestsu/seeed-local-voice-rk-artifacts/rk3588/kokoro-hybrid-v1/.
+# See docs/specs/kokoro-rk-34pct-reproduction-guide.md §3.B.
+# Staged on host at deploy/kokoro-artifacts/ (build-time only; not committed).
+COPY deploy/kokoro-artifacts/bucket-8/   /opt/kokoro-bucket-8/
+COPY deploy/kokoro-artifacts/bucket-16/  /opt/kokoro-bucket-16/
+COPY deploy/kokoro-artifacts/bucket-32/  /opt/kokoro-rknn/
+
 # Install rkvoice-stream as editable.
 RUN pip install --no-cache-dir -e /opt/speech/third_party/rkvoice-stream
 
-# Model dirs (bind-mounted at runtime, not baked)
-RUN mkdir -p /opt/tts/models /opt/asr/models /opt/asr/lib /opt/models /opt/kokoro-rknn \
+# Model dirs (ASR models still bind-mounted at runtime, not baked)
+RUN mkdir -p /opt/tts/models /opt/asr/models /opt/asr/lib /opt/models \
     && ln -sf /opt/rk-runtime/librknnrt.so /usr/lib/librknnrt.so \
     && ln -sf /opt/rk-runtime/librkllmrt.so /opt/asr/lib/librkllmrt.so \
     && ln -sf /opt/rk-runtime/librkllmrt.so /usr/lib/librkllmrt.so
