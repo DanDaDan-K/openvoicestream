@@ -106,9 +106,9 @@ Documentation chain (all committed to main):
 16. `docs/specs/README.md` (0ab706b)
 17. **This doc (closure)**
 
-Submodule `third_party/rkvoice-stream` final state: branch `feat/kokoro-rk-4stage-vocoder-front`, HEAD `5a923ef`.
+Submodule `third_party/rkvoice-stream` final state: branch `feat/kokoro-rk-4stage-vocoder-front`, HEAD `65b9a13` (post P7b bucket-8 static MM+Gemm INT8 + bucket-16 router + misaki ZH G2P).
 
-Main repo final state: HEAD `05aca9d`.
+Main repo final state: HEAD `93a279b` (post image rebuild + ZH regression fix + scripts/p7b reproduction). Subsequent doc-polish commits update closure refs; pull main for latest.
 
 ## Next user-decision gate
 

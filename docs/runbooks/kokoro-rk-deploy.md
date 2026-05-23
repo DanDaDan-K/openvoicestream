@@ -22,8 +22,8 @@ docker run -d --name openvoicestream-kokoro --restart=unless-stopped \
   --device /dev/dri --device /dev/dma_heap --device /dev/rga --device /dev/mpp_service \
   --group-add video \
   \
-  -e OVS_PROFILE=rk3588-kokoro-rknn \
-  -e RK_ARTIFACT_SET=rk3588-kokoro-hybrid-2026-05-23 \
+  -e OVS_PROFILE=rk3588-kokoro-rknn-34pct \
+  -e RK_ARTIFACT_SET=rk3588-kokoro-hybrid-34pct-2026-05-23 \
   -e RK_ARTIFACT_AUTO_DOWNLOAD=0 \
   \
   `# Bucket-32 (default seq_len=32; baked at /opt/kokoro-rknn)` \
