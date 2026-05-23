@@ -18,8 +18,13 @@ required.
 docker pull <registry>/openvoicestream:rk-kokoro-2026-05-23-rebuilt   # or local build, see §4
 
 docker run -d --name openvoicestream-kokoro --restart=unless-stopped \
+  --privileged \
   --network host \
-  --device /dev/dri --device /dev/dma_heap --device /dev/rga --device /dev/mpp_service \
+  -v /dev:/dev \
+  -v /proc/device-tree/compatible:/proc/device-tree/compatible:ro \
+  -v rk-asr-models:/opt/asr/models \
+  -v $(pwd)/configs:/opt/speech/configs:ro \
+  -v $(pwd)/deploy/artifacts:/opt/speech/deploy/artifacts:ro \
   --group-add video \
   \
   -e OVS_PROFILE=rk3588-kokoro-rknn-34pct \
@@ -63,6 +68,13 @@ docker version | grep -i arch
 
 # Disk: image ≈ 1.1 GB, plus base ≈ 138 MB. Need ≥ 2 GB free in /var/lib/docker.
 df -h /var/lib/docker
+
+# The TL;DR `docker run` uses `$(pwd)/configs` and `$(pwd)/deploy/artifacts`
+# bind-mounts — run it from a `seeed-local-voice/` checkout root (those paths
+# must exist on the host). Also creates a named volume `rk-asr-models` for
+# ASR model cache (auto-populated on first start). RK NPU access requires
+# `--privileged` + `-v /dev:/dev` + bind of `/proc/device-tree/compatible`
+# (RKNN runtime aborts with `_check_container` failure otherwise).
 ```
 
 ## 2. Image acquisition
