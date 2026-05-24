@@ -1404,8 +1404,17 @@ async def tts_stream(
             return StreamingResponse(stream(), media_type="application/octet-stream")
         except BaseException:
             # MUST-FIX 1 round 2: cover CancelledError (BaseException) too.
-            await acquire_cm.__aexit__(None, None, None)
-            _release_session()
+            # MUST-FIX 1 round 3: each cleanup must be best-effort so a
+            # failing __aexit__ / release cannot mask the original
+            # exception or short-circuit subsequent cleanups.
+            try:
+                await acquire_cm.__aexit__(None, None, None)
+            except BaseException:
+                pass
+            try:
+                _release_session()
+            except BaseException:
+                pass
             raise
 
     # Manager not initialised — legacy direct-backend path.
@@ -1740,8 +1749,17 @@ async def tts_clone_stream(
             return StreamingResponse(stream(), media_type="application/octet-stream")
         except BaseException:
             # MUST-FIX 1 round 2: cover CancelledError (BaseException) too.
-            await acquire_cm.__aexit__(None, None, None)
-            _release_session()
+            # MUST-FIX 1 round 3: best-effort cleanups so neither
+            # __aexit__ nor _release_session can mask the original
+            # exception or skip the other release path.
+            try:
+                await acquire_cm.__aexit__(None, None, None)
+            except BaseException:
+                pass
+            try:
+                _release_session()
+            except BaseException:
+                pass
             raise
 
     # Legacy fallback (manager not initialised).
@@ -2866,10 +2884,16 @@ async def v2v_stream(ws: WebSocket):
         # mid-setup before the inner main try/finally is established. The
         # release helper is idempotent so this is safe even on the normal
         # path where the inner finally already released.
-        _v2v_release_early()
+        # MUST-FIX 1 round 3: wrap each cleanup in best-effort try/except
+        # so a failing helper cannot mask the original exception or
+        # short-circuit subsequent cleanups.
+        try:
+            _v2v_release_early()
+        except BaseException:
+            pass
         try:
             reset_request_context(_v2v_ctx_tokens)
-        except Exception:
+        except BaseException:
             pass
         raise
 
