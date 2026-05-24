@@ -293,8 +293,89 @@ def _try_asr_manager():
     return mgr if mgr.is_ready() else None
 
 
+def _resolve_tts_stream_max_workers() -> tuple[int, str | None, str]:
+    """Resolve the TTS stream executor `max_workers` from env + the
+    currently-loaded backend name. Returns `(workers, backend_name_or_None,
+    env_var_used)`. Extracted so a one-shot post-startup refresh can
+    replace the executor when the backend-specific env didn't apply at
+    first call (TTS service not yet ready → backend_name() == "").
+
+    Codex Week 3 BLOCKER 4: if `_get_tts_stream_executor()` is called
+    before TTS service is ready (e.g. lazy startup, first /v2v/stream
+    warming up), backend_name() returns "" and the
+    OVS_TTS_STREAM_MAX_WORKERS_{KOKORO,MATCHA,QWEN3,MOSS} envs never
+    activate — the executor sticks at the global default forever.
+    """
+    max_workers_str = os.environ.get("OVS_TTS_STREAM_MAX_WORKERS", "2")
+    env_used = "OVS_TTS_STREAM_MAX_WORKERS"
+    try:
+        from app.core import tts_service as _tts_svc
+        backend_name = (
+            (_tts_svc.backend_name() or "").lower()
+            if _tts_svc.is_ready()
+            else ""
+        )
+    except Exception:
+        backend_name = ""
+    for suffix, env_name in (
+        ("kokoro", "OVS_TTS_STREAM_MAX_WORKERS_KOKORO"),
+        ("matcha", "OVS_TTS_STREAM_MAX_WORKERS_MATCHA"),
+        ("qwen3", "OVS_TTS_STREAM_MAX_WORKERS_QWEN3"),
+        ("moss", "OVS_TTS_STREAM_MAX_WORKERS_MOSS"),
+    ):
+        if suffix in backend_name and os.environ.get(env_name):
+            max_workers_str = os.environ[env_name]
+            env_used = env_name
+            break
+    return int(max_workers_str), backend_name or None, env_used
+
+
+# Tracks whether the cached executor was created BEFORE the TTS backend
+# name could be resolved. If True, the first /tts/stream call that lands
+# with a ready backend will refresh the executor so backend-specific
+# OVS_TTS_STREAM_MAX_WORKERS_* envs actually take effect.
+_tts_stream_executor_resolved_backend: bool = False
+
+
 def _get_tts_stream_executor() -> ThreadPoolExecutor:
-    global _tts_stream_executor
+    global _tts_stream_executor, _tts_stream_executor_resolved_backend
+    # Codex Week 3 BLOCKER 4: if the cached executor was built before the
+    # TTS backend was identifiable, try once more now that backend_name()
+    # may resolve. This lets backend-specific env overrides apply even
+    # when the executor was lazily touched during early startup.
+    if _tts_stream_executor is not None and not _tts_stream_executor_resolved_backend:
+        try:
+            from app.core import tts_service as _tts_svc
+            backend_ready_now = _tts_svc.is_ready() and bool(_tts_svc.backend_name())
+        except Exception:
+            backend_ready_now = False
+        if backend_ready_now:
+            new_workers, backend_name, env_used = _resolve_tts_stream_max_workers()
+            if new_workers != _tts_stream_executor._max_workers:
+                logger.info(
+                    "TTS executor: refreshing max_workers %d → %d "
+                    "(backend=%s, env=%s) after TTS service became ready",
+                    _tts_stream_executor._max_workers,
+                    new_workers, backend_name, env_used,
+                )
+                old = _tts_stream_executor
+                _tts_stream_executor = ThreadPoolExecutor(
+                    max_workers=new_workers,
+                    thread_name_prefix="tts-stream",
+                )
+                # Best-effort shutdown of the old executor without
+                # blocking; in-flight tasks finish naturally.
+                try:
+                    old.shutdown(wait=False, cancel_futures=False)
+                except Exception:
+                    pass
+            else:
+                logger.info(
+                    "TTS executor: backend=%s resolved post-init "
+                    "(env=%s, max_workers=%d, no change needed)",
+                    backend_name, env_used, new_workers,
+                )
+            _tts_stream_executor_resolved_backend = True
     if _tts_stream_executor is None:
         # Phase 3b-B-4 part-4 INVESTIGATION RESULT: lifting max_workers above
         # 1 exposes a deeper bug in the C++ stateful Code2WavRunner reset
@@ -330,25 +411,21 @@ def _get_tts_stream_executor() -> ThreadPoolExecutor:
         # to fall back to the C5b runtime-mutex stability gate.
         # Week 3 spec §D1: backend-specific override env > global > default.
         # Lets ops force one backend single-slot without muting the others.
-        max_workers_str = os.environ.get("OVS_TTS_STREAM_MAX_WORKERS", "2")
-        try:
-            from app.core import tts_service as _tts_svc
-            backend_name = (_tts_svc.backend_name() or "").lower() if _tts_svc.is_ready() else ""
-        except Exception:
-            backend_name = ""
-        for suffix, env_name in (
-            ("kokoro", "OVS_TTS_STREAM_MAX_WORKERS_KOKORO"),
-            ("matcha", "OVS_TTS_STREAM_MAX_WORKERS_MATCHA"),
-            ("qwen3", "OVS_TTS_STREAM_MAX_WORKERS_QWEN3"),
-            ("moss", "OVS_TTS_STREAM_MAX_WORKERS_MOSS"),
-        ):
-            if suffix in backend_name and os.environ.get(env_name):
-                max_workers_str = os.environ[env_name]
-                logger.info("TTS executor: backend=%s using %s=%s",
-                            backend_name, env_name, max_workers_str)
-                break
+        max_workers, backend_name, env_used = _resolve_tts_stream_max_workers()
+        if backend_name:
+            logger.info(
+                "TTS executor: backend=%s using %s=%d",
+                backend_name, env_used, max_workers,
+            )
+            _tts_stream_executor_resolved_backend = True
+        else:
+            logger.info(
+                "TTS executor: backend not yet resolved at init; using %s=%d "
+                "(will refresh once TTS service is ready)",
+                env_used, max_workers,
+            )
         _tts_stream_executor = ThreadPoolExecutor(
-            max_workers=int(max_workers_str),
+            max_workers=max_workers,
             thread_name_prefix="tts-stream",
         )
     return _tts_stream_executor
