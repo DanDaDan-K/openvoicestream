@@ -154,17 +154,27 @@ class SessionLimiter:
                 return None
             self._active += 1
             current = self._active
-        metrics.inc_sessions_active()
+        # Metrics are best-effort: a metric failure must NOT leak a slot
+        # nor desync limiter state. See codex MUST-FIX 2.
+        try:
+            metrics.inc_sessions_active()
+        except Exception:
+            logger.warning("session_limiter: inc_sessions_active() raised", exc_info=True)
         return SessionToken(self, current)
 
     def _release(self, token: "SessionToken") -> None:
-        if token._released:
-            return
-        token._released = True
+        # Double-release guard: check + set under the lock to prevent a
+        # concurrent double release racing past the early-return.
         with self._lock:
+            if token._released:
+                return
+            token._released = True
             if self._active > 0:
                 self._active -= 1
-        metrics.dec_sessions_active()
+        try:
+            metrics.dec_sessions_active()
+        except Exception:
+            logger.warning("session_limiter: dec_sessions_active() raised", exc_info=True)
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -246,7 +256,10 @@ async def acquire_http(endpoint: str) -> AsyncIterator[SessionToken]:
     token = limiter.try_acquire()
     if token is None:
         snap = limiter.snapshot()
-        metrics.inc_sessions_rejected("http")
+        try:
+            metrics.inc_sessions_rejected("http")
+        except Exception:
+            logger.warning("session_limiter: inc_sessions_rejected(http) raised", exc_info=True)
         logger.warning(
             "session_limiter: HTTP 429 endpoint=%s active=%d limit=%d",
             endpoint, snap["active"], snap["limit"],
@@ -284,7 +297,10 @@ async def try_acquire_ws(ws, endpoint: str) -> SessionToken | None:
     token = limiter.try_acquire()
     if token is None:
         snap = limiter.snapshot()
-        _metrics.inc_sessions_rejected("ws")
+        try:
+            _metrics.inc_sessions_rejected("ws")
+        except Exception:
+            logger.warning("session_limiter: inc_sessions_rejected(ws) raised", exc_info=True)
         reason = _json.dumps({
             "error": "too_many_sessions",
             "current": snap["active"],
