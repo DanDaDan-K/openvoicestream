@@ -1063,10 +1063,10 @@ async def tts_stream(
     # drain logic sees streaming requests in flight. Fall back to the legacy
     # tts_service path only when the manager isn't initialised (ASR-only).
     #
-    # Codex MUST-FIX 1: this lazy-start await can raise (manager FAILED /
-    # DRAINING / init exception). The session slot was acquired just above
-    # and must NOT leak when an exception propagates before we hand it off
-    # to the StreamingResponse generator.
+    # Codex MUST-FIX 1 (Week 4 round 2): catch BaseException so CancelledError
+    # also releases the slot. Python 3.8+ CancelledError is a BaseException
+    # subclass, not Exception, so `except Exception` would silently leak the
+    # slot on client cancel mid-setup.
     try:
         mgr = await _ensure_tts_manager_started()
 
@@ -1079,7 +1079,7 @@ async def tts_stream(
                  "required_capability": "streaming"},
                 status_code=501,
             )
-    except Exception:
+    except BaseException:
         _release_session()
         raise
 
@@ -1094,8 +1094,15 @@ async def tts_stream(
         # Acquire OUTSIDE the generator so inflight_http is bumped synchronously
         # at endpoint entry — otherwise it would only increment when the client
         # starts iterating the StreamingResponse, and reload drain could miss it.
+        # Codex MUST-FIX 1 (Week 4 round 2): wrap acquire_cm.__aenter__() so
+        # if it raises (FAILED/DRAINING manager) the session slot is released.
+        # Previously this await sat outside the try block.
         acquire_cm = mgr.acquire()
-        backend = await acquire_cm.__aenter__()
+        try:
+            backend = await acquire_cm.__aenter__()
+        except BaseException:
+            _release_session()
+            raise
         try:
             try:
                 voice_kwargs = _request_voice_kwargs(req, backend=backend)
@@ -1318,7 +1325,8 @@ async def tts_stream(
                     _release_session()
 
             return StreamingResponse(stream(), media_type="application/octet-stream")
-        except Exception:
+        except BaseException:
+            # MUST-FIX 1 round 2: cover CancelledError (BaseException) too.
             await acquire_cm.__aexit__(None, None, None)
             _release_session()
             raise
@@ -1612,12 +1620,17 @@ async def tts_clone_stream(
     # session slot rather than leaking it on FAILED/DRAINING manager.
     try:
         mgr = await _ensure_tts_manager_started()
-    except Exception:
+    except BaseException:
+        # MUST-FIX 1 round 2: cover CancelledError (BaseException) too.
         _release_session()
         raise
     if mgr is not None:
         acquire_cm = mgr.acquire()
-        backend = await acquire_cm.__aenter__()
+        try:
+            backend = await acquire_cm.__aenter__()
+        except BaseException:
+            _release_session()
+            raise
         try:
             sr = backend.sample_rate
 
@@ -1648,7 +1661,8 @@ async def tts_clone_stream(
                     _release_session()
 
             return StreamingResponse(stream(), media_type="application/octet-stream")
-        except Exception:
+        except BaseException:
+            # MUST-FIX 1 round 2: cover CancelledError (BaseException) too.
             await acquire_cm.__aexit__(None, None, None)
             _release_session()
             raise
@@ -2079,15 +2093,34 @@ async def v2v_stream(ws: WebSocket):
     if _v2v_tts_mgr is not None:
         _v2v_tts_mgr.register_ws(_v2v_handle)
 
+    # MUST-FIX 1 round 2: make release idempotent + a nonlocal flag so the
+    # outer setup try/except BaseException can safely cover CancelledError
+    # without double-releasing on the normal path.
+    _v2v_released = {"done": False}
+
     def _v2v_release_early():
         # Release admission resources for early-exit paths that bypass
-        # the main try/finally below.
+        # the main try/finally below. Idempotent: safe to call multiple
+        # times (e.g. once from an inner branch, once from outer cancel
+        # guard).
+        if _v2v_released["done"]:
+            return
+        _v2v_released["done"] = True
         if _v2v_asr_mgr is not None:
-            _v2v_asr_mgr.unregister_ws(_v2v_handle)
+            try:
+                _v2v_asr_mgr.unregister_ws(_v2v_handle)
+            except Exception:
+                pass
         if _v2v_tts_mgr is not None:
-            _v2v_tts_mgr.unregister_ws(_v2v_handle)
+            try:
+                _v2v_tts_mgr.unregister_ws(_v2v_handle)
+            except Exception:
+                pass
         if _v2v_session_token is not None:
-            _v2v_session_token.release()
+            try:
+                _v2v_session_token.release()
+            except Exception:
+                pass
         if _v2v_ws_metric_taken:
             try:
                 from app.core import metrics as _m_v2v
@@ -2098,655 +2131,670 @@ async def v2v_stream(ws: WebSocket):
         # helper may be called inside try/finally that itself resets;
         # caller is responsible for context cleanup.
 
-    # ── Stage 1: receive initial config ─────────────────────────────
+    # MUST-FIX 1 round 2: wrap setup + main loop so any CancelledError
+    # mid-setup (BaseException) still triggers admission cleanup via the
+    # idempotent _v2v_release_early() helper in the outer finally.
     try:
-        first_msg = await ws.receive()
-    except WebSocketDisconnect:
-        _v2v_release_early(); return
-    cfg_text = first_msg.get("text", "")
-    if not cfg_text:
-        await ws.close(code=1003); _v2v_release_early(); return
-    try:
-        cfg = _json.loads(cfg_text)
-    except (ValueError, TypeError):
-        await ws.close(code=1003); _v2v_release_early(); return
-    if cfg.get("type") != v2v_proto.CLIENT_CONFIG:
-        await ws.send_json({"type": v2v_proto.SERVER_ERROR,
-                            "error": "first message must be a config frame"})
-        await ws.close(code=1003); _v2v_release_early(); return
-
-    # Codex MUST-FIX 1: config parsing below can raise ValueError/TypeError
-    # on bad client input (e.g. non-int sample_rate). Without this guard,
-    # the exception escapes the slot-acquired region without releasing the
-    # session token / decrementing the active-WS gauge / unregistering from
-    # BackendManagers.
-    try:
-        asr_language    = cfg.get("asr_language")  # e.g. "zh" / "Chinese" / "en" / "auto" / None
-        tts_language    = cfg.get("tts_language")  # truthy = enable TTS; "auto" = let backend detect
-        # "auto" enables TTS but tells downstream (sentence buffer + backend) to
-        # not assume a language — backends with auto-detect (e.g. qwen3) will pick
-        # one from the text content; SentenceBuffer falls back to a regex splitter.
-        tts_language_norm = None if tts_language == "auto" else tts_language
-        # Normalize common client-supplied aliases to the lowercase full names
-        # qwen3 TTS expects ("chinese"/"english"/...). Sherpa TTS ignores the
-        # value entirely, so this is a no-op there.
-        if tts_language_norm:
-            _TTS_LANG_ALIAS = {
-                "zh": "chinese", "zh-cn": "chinese", "zh-hans": "chinese",
-                "en": "english", "en-us": "english", "en-gb": "english",
-                "ja": "japanese", "jp": "japanese",
-                "ko": "korean", "kr": "korean",
-            }
-            key = tts_language_norm.strip().lower()
-            tts_language_norm = _TTS_LANG_ALIAS.get(key, key)
-        tts_voice       = cfg.get("tts_voice")
-        tts_speaker_id = cfg.get("tts_speaker_id")
-        tts_speed       = cfg.get("tts_speed")
-        # Resolve speaker once at config time — avoids mid-session changes
-        # (e.g. unregister) affecting later sentences in the same session.
-        tts_speaker_kwargs: dict = {}
-        if tts_speaker_id is not None and tts_language:
-            from app.core.tts_speakers import speaker_kwargs_for_id
-            if tts_service.is_ready():
-                tts_speaker_kwargs = speaker_kwargs_for_id(
-                    int(tts_speaker_id), tts_service.get_backend().model_id
-                )
-        sample_rate     = int(cfg.get("sample_rate", 16000))
-        vad_backend     = cfg.get("vad", _default_vad_backend() if asr_language else "none")
-        vad_silence_ms  = int(cfg.get("vad_silence_ms", _default_vad_silence_ms()))
-        multi_utterance = bool(cfg.get("multi_utterance", False))
-    except (ValueError, TypeError) as _cfg_exc:
+        # ── Stage 1: receive initial config ─────────────────────────────
         try:
-            await ws.send_json({"type": v2v_proto.SERVER_ERROR,
-                                "error": f"invalid config field: {_cfg_exc}"})
-        except Exception:
-            pass
-        try:
-            await ws.close(code=1003)
-        except Exception:
-            pass
-        _v2v_release_early()
-        reset_request_context(_v2v_ctx_tokens)
-        return
-
-    if not asr_language and not tts_language:
-        await ws.send_json({"type": v2v_proto.SERVER_ERROR,
-                            "error": "config must enable asr_language and/or tts_language"})
-        await ws.close(code=1003); _v2v_release_early(); return
-
-    # ── Stage 2: bring up the backends ──────────────────────────────
-    asr_be = None
-    asr_manager = None  # ASRSessionManager — owns per-utterance lifecycle.
-    asr_enabled = False
-    vad = None
-    if asr_language:
-        asr_be = _get_asr_backend()
-        if asr_be is None or not asr_be.is_ready() or not asr_be.has_capability(ASRCapability.STREAMING):
-            await ws.send_json({"type": v2v_proto.SERVER_ERROR,
-                                "error": "asr_language requested but no streaming ASR backend ready"})
-            await ws.close(code=1011); _v2v_release_early(); return
-        # Defer stream creation until first speech-start (or first audio
-        # without VAD) — the manager creates a fresh stream per utterance.
-        from app.core.asr_session_manager import ASRSessionManager
-        asr_manager = ASRSessionManager(
-            backend=asr_be,
-            language=asr_language,
-            coord=coord,
-            executor=_get_asr_executor(),
-        )
-        asr_enabled = True
-        # VAD init runs in executor: silero ONNX first-load takes ~500ms and
-        # would otherwise stall the event loop. ValueError (e.g. unsupported
-        # sample rate) is a hard config error → reject and close. Other init
-        # failures fall back to no-VAD with a warning.
-        try:
-            _loop_init = asyncio.get_event_loop()
-            vad = await _loop_init.run_in_executor(
-                None,
-                lambda: vad_mod.create_vad(vad_backend, sample_rate=sample_rate, silence_ms=vad_silence_ms),
-            )
-        except ValueError as e:
-            await ws.send_json({"type": v2v_proto.SERVER_ERROR, "error": f"VAD config: {e}"})
+            first_msg = await ws.receive()
+        except WebSocketDisconnect:
+            _v2v_release_early(); return
+        cfg_text = first_msg.get("text", "")
+        if not cfg_text:
             await ws.close(code=1003); _v2v_release_early(); return
-        except Exception as e:
-            logger.warning("v2v VAD init (%s) failed: %s — running without VAD", vad_backend, e)
-            vad = None
-
-    tts_be = None
-    tts_buffer = None
-    if tts_language:
-        if not tts_service.is_ready() or not tts_service.has_capability(TTSCapability.STREAMING):
-            await ws.send_json({"type": v2v_proto.SERVER_ERROR,
-                                "error": "tts_language requested but no streaming TTS backend ready"})
-            await ws.close(code=1011); _v2v_release_early(); return
-        tts_be = tts_service.get_backend()
-        low_latency_tts = os.environ.get("OVS_TTS_LOW_LATENCY_CHUNKING", "1").lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        )
-        if low_latency_tts:
-            tts_buffer = v2v_proto.LowLatencyTTSBuffer(language=tts_language_norm)
-        else:
-            tts_buffer = v2v_proto.SentenceBuffer(language=tts_language_norm)
-
-    logger.info("v2v stream opened (asr=%s tts=%s vad=%s spk_id=%s spk_kwargs=%s)",
-                asr_language or "off", tts_language or "off", vad_backend if asr_language else "off",
-                tts_speaker_id, list(tts_speaker_kwargs.keys()) if tts_speaker_kwargs else None)
-
-    # ── Stage 3: per-connection state + write serialization ─────────
-    send_lock = asyncio.Lock()
-    state = {
-        # Per-utterance ASR endpoint signalling. Replaces the old
-        # asr_eos / vad_endpoint / vad_endpoint_pending flags now that
-        # ASRSessionManager owns the stream lifecycle.
-        "asr_session_closed": False,   # client explicitly ended ASR (asr_eos or ws close)
-        "endpoint_pending":   None,    # ("vad" | "client_eos"), set by dispatcher,
-                                       # consumed by asr_out_task
-        "endpoint_pending_gen": None,  # generation tag for endpoint_pending;
-                                       # if it no longer matches asr_active_gen
-                                       # by the time asr_out_task observes it,
-                                       # the endpoint belongs to a preempted
-                                       # utterance and must NOT fire finalize
-                                       # against the new one (gen-race fix,
-                                       # codex root-cause 2026-05-19).
-        "tts_flush":        False,   # set when client tts_flush
-        "current_tts_task": None,    # running TTS synth task (cancellable)
-        "current_tts_stop": None,    # threading.Event to signal synth thread
-                                     # to stop on barge-in (avoids orphan
-                                     # synth blocking the TTS executor)
-        "tts_started":      False,   # tts_started frame sent for current sentence
-        "client_closed":    False,
-        "asr_active":       False,   # tracks whether manager.on_speech_start
-                                     # has been called for the current utterance
-        "asr_active_gen":   0,       # generation tagged onto asr_active so a
-                                     # stale finalize doesn't clear a fresh
-                                     # utterance's asr_active flag (BUG 2)
-        "endpoint_finalize_pending": False,  # set when dispatcher already
-                                     # accepted the speech-end chunk and the
-                                     # asr_out_task should finalize next tick
-                                     # (BUG 3: avoids the flag-set/audio-accept
-                                     # race that lost the tail of utterances)
-    }
-    tts_q: asyncio.Queue = asyncio.Queue()
-    loop = asyncio.get_event_loop()
-
-    async def send_json(payload):
-        async with send_lock:
-            try:
-                await ws.send_json(payload)
-            except Exception:
-                state["client_closed"] = True
-
-    async def send_bytes(data):
-        async with send_lock:
-            try:
-                await ws.send_bytes(data)
-            except Exception:
-                state["client_closed"] = True
-
-    async def send_error(msg):
-        await send_json({"type": v2v_proto.SERVER_ERROR, "error": msg})
-
-    # ── Stage 4: tasks ──────────────────────────────────────────────
-
-    async def dispatcher():
-        """Receive incoming binary (audio) + text (control) frames."""
         try:
-            while not state["client_closed"]:
-                msg = await ws.receive()
-                if msg.get("type") == "websocket.disconnect":
+            cfg = _json.loads(cfg_text)
+        except (ValueError, TypeError):
+            await ws.close(code=1003); _v2v_release_early(); return
+        if cfg.get("type") != v2v_proto.CLIENT_CONFIG:
+            await ws.send_json({"type": v2v_proto.SERVER_ERROR,
+                                "error": "first message must be a config frame"})
+            await ws.close(code=1003); _v2v_release_early(); return
+    
+        # Codex MUST-FIX 1: config parsing below can raise ValueError/TypeError
+        # on bad client input (e.g. non-int sample_rate). Without this guard,
+        # the exception escapes the slot-acquired region without releasing the
+        # session token / decrementing the active-WS gauge / unregistering from
+        # BackendManagers.
+        try:
+            asr_language    = cfg.get("asr_language")  # e.g. "zh" / "Chinese" / "en" / "auto" / None
+            tts_language    = cfg.get("tts_language")  # truthy = enable TTS; "auto" = let backend detect
+            # "auto" enables TTS but tells downstream (sentence buffer + backend) to
+            # not assume a language — backends with auto-detect (e.g. qwen3) will pick
+            # one from the text content; SentenceBuffer falls back to a regex splitter.
+            tts_language_norm = None if tts_language == "auto" else tts_language
+            # Normalize common client-supplied aliases to the lowercase full names
+            # qwen3 TTS expects ("chinese"/"english"/...). Sherpa TTS ignores the
+            # value entirely, so this is a no-op there.
+            if tts_language_norm:
+                _TTS_LANG_ALIAS = {
+                    "zh": "chinese", "zh-cn": "chinese", "zh-hans": "chinese",
+                    "en": "english", "en-us": "english", "en-gb": "english",
+                    "ja": "japanese", "jp": "japanese",
+                    "ko": "korean", "kr": "korean",
+                }
+                key = tts_language_norm.strip().lower()
+                tts_language_norm = _TTS_LANG_ALIAS.get(key, key)
+            tts_voice       = cfg.get("tts_voice")
+            tts_speaker_id = cfg.get("tts_speaker_id")
+            tts_speed       = cfg.get("tts_speed")
+            # Resolve speaker once at config time — avoids mid-session changes
+            # (e.g. unregister) affecting later sentences in the same session.
+            tts_speaker_kwargs: dict = {}
+            if tts_speaker_id is not None and tts_language:
+                from app.core.tts_speakers import speaker_kwargs_for_id
+                if tts_service.is_ready():
+                    tts_speaker_kwargs = speaker_kwargs_for_id(
+                        int(tts_speaker_id), tts_service.get_backend().model_id
+                    )
+            sample_rate     = int(cfg.get("sample_rate", 16000))
+            vad_backend     = cfg.get("vad", _default_vad_backend() if asr_language else "none")
+            vad_silence_ms  = int(cfg.get("vad_silence_ms", _default_vad_silence_ms()))
+            multi_utterance = bool(cfg.get("multi_utterance", False))
+        except (ValueError, TypeError) as _cfg_exc:
+            try:
+                await ws.send_json({"type": v2v_proto.SERVER_ERROR,
+                                    "error": f"invalid config field: {_cfg_exc}"})
+            except Exception:
+                pass
+            try:
+                await ws.close(code=1003)
+            except Exception:
+                pass
+            _v2v_release_early()
+            reset_request_context(_v2v_ctx_tokens)
+            return
+    
+        if not asr_language and not tts_language:
+            await ws.send_json({"type": v2v_proto.SERVER_ERROR,
+                                "error": "config must enable asr_language and/or tts_language"})
+            await ws.close(code=1003); _v2v_release_early(); return
+    
+        # ── Stage 2: bring up the backends ──────────────────────────────
+        asr_be = None
+        asr_manager = None  # ASRSessionManager — owns per-utterance lifecycle.
+        asr_enabled = False
+        vad = None
+        if asr_language:
+            asr_be = _get_asr_backend()
+            if asr_be is None or not asr_be.is_ready() or not asr_be.has_capability(ASRCapability.STREAMING):
+                await ws.send_json({"type": v2v_proto.SERVER_ERROR,
+                                    "error": "asr_language requested but no streaming ASR backend ready"})
+                await ws.close(code=1011); _v2v_release_early(); return
+            # Defer stream creation until first speech-start (or first audio
+            # without VAD) — the manager creates a fresh stream per utterance.
+            from app.core.asr_session_manager import ASRSessionManager
+            asr_manager = ASRSessionManager(
+                backend=asr_be,
+                language=asr_language,
+                coord=coord,
+                executor=_get_asr_executor(),
+            )
+            asr_enabled = True
+            # VAD init runs in executor: silero ONNX first-load takes ~500ms and
+            # would otherwise stall the event loop. ValueError (e.g. unsupported
+            # sample rate) is a hard config error → reject and close. Other init
+            # failures fall back to no-VAD with a warning.
+            try:
+                _loop_init = asyncio.get_event_loop()
+                vad = await _loop_init.run_in_executor(
+                    None,
+                    lambda: vad_mod.create_vad(vad_backend, sample_rate=sample_rate, silence_ms=vad_silence_ms),
+                )
+            except ValueError as e:
+                await ws.send_json({"type": v2v_proto.SERVER_ERROR, "error": f"VAD config: {e}"})
+                await ws.close(code=1003); _v2v_release_early(); return
+            except Exception as e:
+                logger.warning("v2v VAD init (%s) failed: %s — running without VAD", vad_backend, e)
+                vad = None
+    
+        tts_be = None
+        tts_buffer = None
+        if tts_language:
+            if not tts_service.is_ready() or not tts_service.has_capability(TTSCapability.STREAMING):
+                await ws.send_json({"type": v2v_proto.SERVER_ERROR,
+                                    "error": "tts_language requested but no streaming TTS backend ready"})
+                await ws.close(code=1011); _v2v_release_early(); return
+            tts_be = tts_service.get_backend()
+            low_latency_tts = os.environ.get("OVS_TTS_LOW_LATENCY_CHUNKING", "1").lower() not in (
+                "0",
+                "false",
+                "no",
+                "off",
+            )
+            if low_latency_tts:
+                tts_buffer = v2v_proto.LowLatencyTTSBuffer(language=tts_language_norm)
+            else:
+                tts_buffer = v2v_proto.SentenceBuffer(language=tts_language_norm)
+    
+        logger.info("v2v stream opened (asr=%s tts=%s vad=%s spk_id=%s spk_kwargs=%s)",
+                    asr_language or "off", tts_language or "off", vad_backend if asr_language else "off",
+                    tts_speaker_id, list(tts_speaker_kwargs.keys()) if tts_speaker_kwargs else None)
+    
+        # ── Stage 3: per-connection state + write serialization ─────────
+        send_lock = asyncio.Lock()
+        state = {
+            # Per-utterance ASR endpoint signalling. Replaces the old
+            # asr_eos / vad_endpoint / vad_endpoint_pending flags now that
+            # ASRSessionManager owns the stream lifecycle.
+            "asr_session_closed": False,   # client explicitly ended ASR (asr_eos or ws close)
+            "endpoint_pending":   None,    # ("vad" | "client_eos"), set by dispatcher,
+                                           # consumed by asr_out_task
+            "endpoint_pending_gen": None,  # generation tag for endpoint_pending;
+                                           # if it no longer matches asr_active_gen
+                                           # by the time asr_out_task observes it,
+                                           # the endpoint belongs to a preempted
+                                           # utterance and must NOT fire finalize
+                                           # against the new one (gen-race fix,
+                                           # codex root-cause 2026-05-19).
+            "tts_flush":        False,   # set when client tts_flush
+            "current_tts_task": None,    # running TTS synth task (cancellable)
+            "current_tts_stop": None,    # threading.Event to signal synth thread
+                                         # to stop on barge-in (avoids orphan
+                                         # synth blocking the TTS executor)
+            "tts_started":      False,   # tts_started frame sent for current sentence
+            "client_closed":    False,
+            "asr_active":       False,   # tracks whether manager.on_speech_start
+                                         # has been called for the current utterance
+            "asr_active_gen":   0,       # generation tagged onto asr_active so a
+                                         # stale finalize doesn't clear a fresh
+                                         # utterance's asr_active flag (BUG 2)
+            "endpoint_finalize_pending": False,  # set when dispatcher already
+                                         # accepted the speech-end chunk and the
+                                         # asr_out_task should finalize next tick
+                                         # (BUG 3: avoids the flag-set/audio-accept
+                                         # race that lost the tail of utterances)
+        }
+        tts_q: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+    
+        async def send_json(payload):
+            async with send_lock:
+                try:
+                    await ws.send_json(payload)
+                except Exception:
                     state["client_closed"] = True
-                    break
-                # binary → ASR input
-                data = msg.get("bytes")
-                if data:
-                    if not asr_enabled:
-                        continue  # ignored in TTS-only mode
-                    # After session close, drop further audio. Spec: client
-                    # must open a new WebSocket to start another session.
-                    if state["asr_session_closed"]:
-                        continue
-                    samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-                    speech_started_now = False
-                    speech_ended_now = False
-                    if vad is not None:
-                        event = vad.process(samples)
-                        if event == vad_mod.VADSession.SPEECH_START:
-                            # Notify client FIRST so it can stop buffering /
-                            # playing TTS audio, then perform the server-side
-                            # barge-in (cancel in-flight TTS, open fresh ASR).
-                            await send_json({
-                                "type": v2v_proto.SERVER_VAD_EVENT,
-                                "event": v2v_proto.VAD_EVENT_SPEECH_START,
-                            })
-                            # Auto barge-in: cancel any in-flight TTS, then
-                            # open a fresh ASR utterance (pre-empts any
-                            # still-active session per spec).
-                            t = state["current_tts_task"]
-                            if t is not None and not t.done():
-                                t.cancel()
-                            stop = state["current_tts_stop"]
-                            if stop is not None:
-                                stop.set()
+    
+        async def send_bytes(data):
+            async with send_lock:
+                try:
+                    await ws.send_bytes(data)
+                except Exception:
+                    state["client_closed"] = True
+    
+        async def send_error(msg):
+            await send_json({"type": v2v_proto.SERVER_ERROR, "error": msg})
+    
+        # ── Stage 4: tasks ──────────────────────────────────────────────
+    
+        async def dispatcher():
+            """Receive incoming binary (audio) + text (control) frames."""
+            try:
+                while not state["client_closed"]:
+                    msg = await ws.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        state["client_closed"] = True
+                        break
+                    # binary → ASR input
+                    data = msg.get("bytes")
+                    if data:
+                        if not asr_enabled:
+                            continue  # ignored in TTS-only mode
+                        # After session close, drop further audio. Spec: client
+                        # must open a new WebSocket to start another session.
+                        if state["asr_session_closed"]:
+                            continue
+                        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+                        speech_started_now = False
+                        speech_ended_now = False
+                        if vad is not None:
+                            event = vad.process(samples)
+                            if event == vad_mod.VADSession.SPEECH_START:
+                                # Notify client FIRST so it can stop buffering /
+                                # playing TTS audio, then perform the server-side
+                                # barge-in (cancel in-flight TTS, open fresh ASR).
+                                await send_json({
+                                    "type": v2v_proto.SERVER_VAD_EVENT,
+                                    "event": v2v_proto.VAD_EVENT_SPEECH_START,
+                                })
+                                # Auto barge-in: cancel any in-flight TTS, then
+                                # open a fresh ASR utterance (pre-empts any
+                                # still-active session per spec).
+                                t = state["current_tts_task"]
+                                if t is not None and not t.done():
+                                    t.cancel()
+                                stop = state["current_tts_stop"]
+                                if stop is not None:
+                                    stop.set()
+                                async with coord.acquire("asr"):
+                                    new_gen = await asr_manager.on_speech_start()
+                                # Clear any stale endpoint from the previous
+                                # utterance — a VAD speech-end that was pending
+                                # finalize while this new speech-start preempted
+                                # it must NOT cause asr_out_task to call
+                                # finalize() against the fresh generation
+                                # (codex root-cause 2026-05-19: stale endpoint
+                                # firing on the wrong generation).
+                                state["endpoint_pending"] = None
+                                state["endpoint_pending_gen"] = None
+                                state["asr_active"] = True
+                                state["asr_active_gen"] = new_gen
+                                speech_started_now = True
+                            elif event == vad_mod.VADSession.SPEECH_END:
+                                # Defer setting endpoint_pending until AFTER we
+                                # accept this final chunk below — otherwise the
+                                # asr_out_task observes the flag and calls
+                                # finalize() while the tail audio is still
+                                # in-flight, silently dropping it (BUG 3).
+                                speech_ended_now = True
+                        # No-VAD mode: open the session lazily on first audio.
+                        if vad is None and not state["asr_active"]:
                             async with coord.acquire("asr"):
                                 new_gen = await asr_manager.on_speech_start()
-                            # Clear any stale endpoint from the previous
-                            # utterance — a VAD speech-end that was pending
-                            # finalize while this new speech-start preempted
-                            # it must NOT cause asr_out_task to call
-                            # finalize() against the fresh generation
-                            # (codex root-cause 2026-05-19: stale endpoint
-                            # firing on the wrong generation).
                             state["endpoint_pending"] = None
                             state["endpoint_pending_gen"] = None
                             state["asr_active"] = True
                             state["asr_active_gen"] = new_gen
-                            speech_started_now = True
-                        elif event == vad_mod.VADSession.SPEECH_END:
-                            # Defer setting endpoint_pending until AFTER we
-                            # accept this final chunk below — otherwise the
-                            # asr_out_task observes the flag and calls
-                            # finalize() while the tail audio is still
-                            # in-flight, silently dropping it (BUG 3).
-                            speech_ended_now = True
-                    # No-VAD mode: open the session lazily on first audio.
-                    if vad is None and not state["asr_active"]:
-                        async with coord.acquire("asr"):
-                            new_gen = await asr_manager.on_speech_start()
-                        state["endpoint_pending"] = None
-                        state["endpoint_pending_gen"] = None
-                        state["asr_active"] = True
-                        state["asr_active_gen"] = new_gen
-                    if state["asr_active"]:
-                        async with coord.acquire("asr"):
-                            await asr_manager.accept_audio(samples)
-                    # Now safe to flag the endpoint — audio chunk that
-                    # carried the speech-end has been delivered to the
-                    # stream. asr_out_task will pick this up on the next
-                    # poll and call finalize().
-                    if speech_ended_now:
-                        state["endpoint_pending"] = "vad"
+                        if state["asr_active"]:
+                            async with coord.acquire("asr"):
+                                await asr_manager.accept_audio(samples)
+                        # Now safe to flag the endpoint — audio chunk that
+                        # carried the speech-end has been delivered to the
+                        # stream. asr_out_task will pick this up on the next
+                        # poll and call finalize().
+                        if speech_ended_now:
+                            state["endpoint_pending"] = "vad"
+                            state["endpoint_pending_gen"] = state["asr_active_gen"]
+                            if not multi_utterance:
+                                state["asr_session_closed"] = True
+                            # Notify client of VAD speech_end so it can update
+                            # its state machine (e.g. show "thinking" indicator,
+                            # await asr_final). Sent AFTER endpoint_pending is
+                            # latched to keep ordering deterministic w.r.t. the
+                            # asr_final that follows from asr_out_task.
+                            await send_json({
+                                "type": v2v_proto.SERVER_VAD_EVENT,
+                                "event": v2v_proto.VAD_EVENT_SPEECH_END,
+                            })
+                        continue
+                    # text → JSON control
+                    text = msg.get("text", "")
+                    if not text:
+                        continue
+                    try:
+                        payload = _json.loads(text)
+                    except (ValueError, TypeError):
+                        continue
+                    typ = payload.get("type")
+                    if typ == v2v_proto.CLIENT_TEXT and tts_buffer is not None:
+                        for sentence in tts_buffer.add(payload.get("text", "")):
+                            await tts_q.put(sentence)
+                    elif typ == v2v_proto.CLIENT_TTS_FLUSH:
+                        if tts_buffer is not None:
+                            for sentence in tts_buffer.flush():
+                                await tts_q.put(sentence)
+                        state["tts_flush"] = True
+                    elif typ == v2v_proto.CLIENT_ASR_EOS:
+                        state["endpoint_pending"] = "client_eos"
                         state["endpoint_pending_gen"] = state["asr_active_gen"]
                         if not multi_utterance:
                             state["asr_session_closed"] = True
-                        # Notify client of VAD speech_end so it can update
-                        # its state machine (e.g. show "thinking" indicator,
-                        # await asr_final). Sent AFTER endpoint_pending is
-                        # latched to keep ordering deterministic w.r.t. the
-                        # asr_final that follows from asr_out_task.
-                        await send_json({
-                            "type": v2v_proto.SERVER_VAD_EVENT,
-                            "event": v2v_proto.VAD_EVENT_SPEECH_END,
-                        })
-                    continue
-                # text → JSON control
-                text = msg.get("text", "")
-                if not text:
-                    continue
-                try:
-                    payload = _json.loads(text)
-                except (ValueError, TypeError):
-                    continue
-                typ = payload.get("type")
-                if typ == v2v_proto.CLIENT_TEXT and tts_buffer is not None:
-                    for sentence in tts_buffer.add(payload.get("text", "")):
-                        await tts_q.put(sentence)
-                elif typ == v2v_proto.CLIENT_TTS_FLUSH:
-                    if tts_buffer is not None:
-                        for sentence in tts_buffer.flush():
-                            await tts_q.put(sentence)
-                    state["tts_flush"] = True
-                elif typ == v2v_proto.CLIENT_ASR_EOS:
-                    state["endpoint_pending"] = "client_eos"
-                    state["endpoint_pending_gen"] = state["asr_active_gen"]
-                    if not multi_utterance:
-                        state["asr_session_closed"] = True
-                elif typ == v2v_proto.CLIENT_ABORT:
-                    t = state["current_tts_task"]
-                    if t is not None and not t.done():
-                        t.cancel()
-                    stop = state["current_tts_stop"]
-                    if stop is not None:
-                        stop.set()
-                    # Drain queue so flush doesn't replay queued sentences
-                    while not tts_q.empty():
-                        try: tts_q.get_nowait()
-                        except asyncio.QueueEmpty: break
-                    # Cancel any in-flight ASR utterance too — spec: barge-in
-                    # discards pending finals and resets to IDLE.
-                    if asr_manager is not None and state["asr_active"]:
-                        async with coord.acquire("asr"):
-                            await asr_manager.cancel("bargein")
-                        state["asr_active"] = False
-        except WebSocketDisconnect:
-            state["client_closed"] = True
-
-    async def asr_out_task():
-        """Drive partial polling + per-utterance finalize via the manager.
-
-        Each utterance is its own ``ASRSessionManager`` stream. We poll
-        the *active* stream (manager.stream) for partials, then on an
-        endpoint trigger (VAD speech-end, client asr_eos, or backend
-        is_endpoint) we call ``manager.finalize()`` which destroys the
-        stream and returns the final text.
-        """
-        last_streamed_final = None
-        while not state["client_closed"]:
-            # Pull a stream snapshot under the manager's lock so we can
-            # tag any partial with the generation it came from. If the
-            # generation has advanced by emit-time, drop the partial —
-            # it belongs to an utterance that's already been replaced
-            # (BUG 4: stale-stream partial leak).
-            partial, is_endpoint, partial_gen = "", False, 0
-            if state["asr_active"]:
-                try:
-                    async with coord.acquire("asr"):
-                        partial_gen, partial, is_endpoint = (
-                            await asr_manager.get_partial_for_generation()
-                        )
-                except Exception:
-                    partial, is_endpoint, partial_gen = "", False, 0
-                if partial and partial_gen == asr_manager.current_generation \
-                        and partial_gen == state["asr_active_gen"]:
-                    await send_json({"type": v2v_proto.SERVER_ASR_PARTIAL,
-                                     "text": partial, "is_stable": bool(is_endpoint)})
-
-            endpoint_reason = state["endpoint_pending"]
-            # Gen-race gate: if endpoint_pending was stamped against a
-            # generation that has since been preempted (VAD speech-start
-            # of a new utterance, or post-worker-restart on_speech_start),
-            # drop it on the floor instead of firing finalize against the
-            # *new* active utterance. Without this gate the new utterance
-            # gets finalized too early and the manager rejects the result
-            # with "finalize result discarded (state=ACTIVE)"
-            # (codex root-cause 2026-05-19).
-            if (
-                endpoint_reason
-                and state.get("endpoint_pending_gen") is not None
-                and state.get("endpoint_pending_gen") != state["asr_active_gen"]
-            ):
-                state["endpoint_pending"] = None
-                state["endpoint_pending_gen"] = None
-                endpoint_reason = None
-
-            endpoint_fired = (
-                bool(endpoint_reason)
-                or (is_endpoint and state["asr_active"])
-            )
-
-            if endpoint_fired:
-                # Drain pending flag now to avoid double-firing.
-                state["endpoint_pending"] = None
-                state["endpoint_pending_gen"] = None
-                # Emit asr_endpoint only for VAD / backend endpoints,
-                # not client-driven eos.
-                if endpoint_reason != "client_eos":
-                    await send_json({"type": v2v_proto.SERVER_ASR_ENDPOINT})
-
+                    elif typ == v2v_proto.CLIENT_ABORT:
+                        t = state["current_tts_task"]
+                        if t is not None and not t.done():
+                            t.cancel()
+                        stop = state["current_tts_stop"]
+                        if stop is not None:
+                            stop.set()
+                        # Drain queue so flush doesn't replay queued sentences
+                        while not tts_q.empty():
+                            try: tts_q.get_nowait()
+                            except asyncio.QueueEmpty: break
+                        # Cancel any in-flight ASR utterance too — spec: barge-in
+                        # discards pending finals and resets to IDLE.
+                        if asr_manager is not None and state["asr_active"]:
+                            async with coord.acquire("asr"):
+                                await asr_manager.cancel("bargein")
+                            state["asr_active"] = False
+            except WebSocketDisconnect:
+                state["client_closed"] = True
+    
+        async def asr_out_task():
+            """Drive partial polling + per-utterance finalize via the manager.
+    
+            Each utterance is its own ``ASRSessionManager`` stream. We poll
+            the *active* stream (manager.stream) for partials, then on an
+            endpoint trigger (VAD speech-end, client asr_eos, or backend
+            is_endpoint) we call ``manager.finalize()`` which destroys the
+            stream and returns the final text.
+            """
+            last_streamed_final = None
+            while not state["client_closed"]:
+                # Pull a stream snapshot under the manager's lock so we can
+                # tag any partial with the generation it came from. If the
+                # generation has advanced by emit-time, drop the partial —
+                # it belongs to an utterance that's already been replaced
+                # (BUG 4: stale-stream partial leak).
+                partial, is_endpoint, partial_gen = "", False, 0
                 if state["asr_active"]:
-                    finalize_gen = state["asr_active_gen"]
-                    async with coord.acquire("asr"):
-                        ran_gen, final_text, finalize_accepted = (
-                            await asr_manager.finalize_with_status(
-                                endpoint_reason or "backend_endpoint"
+                    try:
+                        async with coord.acquire("asr"):
+                            partial_gen, partial, is_endpoint = (
+                                await asr_manager.get_partial_for_generation()
                             )
-                        )
-                    # Only clear asr_active if the generation we finalized
-                    # is still the active one. If a new speech_start
-                    # bumped the generation while finalize was in flight,
-                    # leaving asr_active=True is correct — audio for the
-                    # new utterance must continue to flow (BUG 2).
-                    if finalize_accepted and state["asr_active_gen"] == finalize_gen:
-                        state["asr_active"] = False
-                else:
-                    final_text = ""
-                    ran_gen = state["asr_active_gen"]
-                    finalize_accepted = True
-
-                if not finalize_accepted:
-                    logger.info(
-                        "suppressing discarded asr_final from gen=%s current_gen=%s reason=%s",
-                        ran_gen,
-                        state["asr_active_gen"],
-                        endpoint_reason or "backend_endpoint",
-                    )
-                    continue
-
-                # Multi-utterance: mid-session finals carry
-                # session_complete=False; close-out final on
-                # asr_session_closed carries True.
-                if multi_utterance:
-                    is_closing = state["asr_session_closed"]
-                    if is_closing:
-                        duplicate = (final_text or "") == (last_streamed_final or "")
-                        await send_json({
-                            "type": v2v_proto.SERVER_ASR_FINAL,
-                            "text": final_text or "",
-                            "session_complete": True,
-                            "duplicate_of_streamed": duplicate,
-                        })
-                        return
+                    except Exception:
+                        partial, is_endpoint, partial_gen = "", False, 0
+                    if partial and partial_gen == asr_manager.current_generation \
+                            and partial_gen == state["asr_active_gen"]:
+                        await send_json({"type": v2v_proto.SERVER_ASR_PARTIAL,
+                                         "text": partial, "is_stable": bool(is_endpoint)})
+    
+                endpoint_reason = state["endpoint_pending"]
+                # Gen-race gate: if endpoint_pending was stamped against a
+                # generation that has since been preempted (VAD speech-start
+                # of a new utterance, or post-worker-restart on_speech_start),
+                # drop it on the floor instead of firing finalize against the
+                # *new* active utterance. Without this gate the new utterance
+                # gets finalized too early and the manager rejects the result
+                # with "finalize result discarded (state=ACTIVE)"
+                # (codex root-cause 2026-05-19).
+                if (
+                    endpoint_reason
+                    and state.get("endpoint_pending_gen") is not None
+                    and state.get("endpoint_pending_gen") != state["asr_active_gen"]
+                ):
+                    state["endpoint_pending"] = None
+                    state["endpoint_pending_gen"] = None
+                    endpoint_reason = None
+    
+                endpoint_fired = (
+                    bool(endpoint_reason)
+                    or (is_endpoint and state["asr_active"])
+                )
+    
+                if endpoint_fired:
+                    # Drain pending flag now to avoid double-firing.
+                    state["endpoint_pending"] = None
+                    state["endpoint_pending_gen"] = None
+                    # Emit asr_endpoint only for VAD / backend endpoints,
+                    # not client-driven eos.
+                    if endpoint_reason != "client_eos":
+                        await send_json({"type": v2v_proto.SERVER_ASR_ENDPOINT})
+    
+                    if state["asr_active"]:
+                        finalize_gen = state["asr_active_gen"]
+                        async with coord.acquire("asr"):
+                            ran_gen, final_text, finalize_accepted = (
+                                await asr_manager.finalize_with_status(
+                                    endpoint_reason or "backend_endpoint"
+                                )
+                            )
+                        # Only clear asr_active if the generation we finalized
+                        # is still the active one. If a new speech_start
+                        # bumped the generation while finalize was in flight,
+                        # leaving asr_active=True is correct — audio for the
+                        # new utterance must continue to flow (BUG 2).
+                        if finalize_accepted and state["asr_active_gen"] == finalize_gen:
+                            state["asr_active"] = False
                     else:
-                        await send_json({
-                            "type": v2v_proto.SERVER_ASR_FINAL,
-                            "text": final_text or "",
-                            "session_complete": False,
-                        })
-                        last_streamed_final = final_text or ""
-                        # keep the loop running for the next utterance
-                else:
-                    await send_json({"type": v2v_proto.SERVER_ASR_FINAL,
-                                     "text": final_text or ""})
+                        final_text = ""
+                        ran_gen = state["asr_active_gen"]
+                        finalize_accepted = True
+    
+                    if not finalize_accepted:
+                        logger.info(
+                            "suppressing discarded asr_final from gen=%s current_gen=%s reason=%s",
+                            ran_gen,
+                            state["asr_active_gen"],
+                            endpoint_reason or "backend_endpoint",
+                        )
+                        continue
+    
+                    # Multi-utterance: mid-session finals carry
+                    # session_complete=False; close-out final on
+                    # asr_session_closed carries True.
+                    if multi_utterance:
+                        is_closing = state["asr_session_closed"]
+                        if is_closing:
+                            duplicate = (final_text or "") == (last_streamed_final or "")
+                            await send_json({
+                                "type": v2v_proto.SERVER_ASR_FINAL,
+                                "text": final_text or "",
+                                "session_complete": True,
+                                "duplicate_of_streamed": duplicate,
+                            })
+                            return
+                        else:
+                            await send_json({
+                                "type": v2v_proto.SERVER_ASR_FINAL,
+                                "text": final_text or "",
+                                "session_complete": False,
+                            })
+                            last_streamed_final = final_text or ""
+                            # keep the loop running for the next utterance
+                    else:
+                        await send_json({"type": v2v_proto.SERVER_ASR_FINAL,
+                                         "text": final_text or ""})
+                        return
+    
+                # Exit only when the session is closed and there's nothing
+                # left to finalize — single-utterance terminates above on
+                # the endpoint; multi-utterance terminates on close-out.
+                if state["asr_session_closed"] and not state["asr_active"]:
                     return
-
-            # Exit only when the session is closed and there's nothing
-            # left to finalize — single-utterance terminates above on
-            # the endpoint; multi-utterance terminates on close-out.
-            if state["asr_session_closed"] and not state["asr_active"]:
-                return
-
-            await asyncio.sleep(0.05)
-
-    async def tts_out_task():
-        """Drain sentence queue → synthesize → emit audio.
-
-        Sends the 4-byte sample-rate header on first successful synth
-        (NOT first attempted synth — so a cancelled-mid-flight first
-        sentence doesn't leave the client with a header but no audio).
-        """
-        sr_header_sent = False
-        while not state["client_closed"]:
-            # Exit when client said flush and the queue is drained.
-            if state["tts_flush"] and tts_q.empty():
-                # Multi-utterance: per-turn flush ends one turn but not
-                # the SESSION. Reset the sticky flag, emit a per-turn
-                # tts_done (session_complete=False mirroring ASR's
-                # mid-session final at :1763-1779), then loop back to
-                # wait for the next turn. Without this the task returns
-                # after round 1 → asyncio.gather() unblocks → WS closes,
-                # which is the "TTS stuck after round 1" bug.
-                if multi_utterance and not state.get("asr_session_closed", False):
-                    state["tts_flush"] = False
-                    if not state["client_closed"]:
-                        await send_json({
-                            "type": v2v_proto.SERVER_TTS_DONE,
-                            "session_complete": False,
-                        })
+    
+                await asyncio.sleep(0.05)
+    
+        async def tts_out_task():
+            """Drain sentence queue → synthesize → emit audio.
+    
+            Sends the 4-byte sample-rate header on first successful synth
+            (NOT first attempted synth — so a cancelled-mid-flight first
+            sentence doesn't leave the client with a header but no audio).
+            """
+            sr_header_sent = False
+            while not state["client_closed"]:
+                # Exit when client said flush and the queue is drained.
+                if state["tts_flush"] and tts_q.empty():
+                    # Multi-utterance: per-turn flush ends one turn but not
+                    # the SESSION. Reset the sticky flag, emit a per-turn
+                    # tts_done (session_complete=False mirroring ASR's
+                    # mid-session final at :1763-1779), then loop back to
+                    # wait for the next turn. Without this the task returns
+                    # after round 1 → asyncio.gather() unblocks → WS closes,
+                    # which is the "TTS stuck after round 1" bug.
+                    if multi_utterance and not state.get("asr_session_closed", False):
+                        state["tts_flush"] = False
+                        if not state["client_closed"]:
+                            await send_json({
+                                "type": v2v_proto.SERVER_TTS_DONE,
+                                "session_complete": False,
+                            })
+                        continue
+                    break
+                try:
+                    sentence = await asyncio.wait_for(tts_q.get(), timeout=0.2)
+                except asyncio.TimeoutError:
                     continue
-                break
-            try:
-                sentence = await asyncio.wait_for(tts_q.get(), timeout=0.2)
-            except asyncio.TimeoutError:
-                continue
-            audio_queue: asyncio.Queue = asyncio.Queue()
-            # Likely #1 fix: signal the synth thread to stop mid-iteration
-            # on barge-in (single-thread TTS executor would otherwise be
-            # blocked by the orphaned generator until it completes).
-            import threading as _threading
-            stop_event = _threading.Event()
-            state["current_tts_stop"] = stop_event
-
-            def _run_synth(s, synth_be):
+                audio_queue: asyncio.Queue = asyncio.Queue()
+                # Likely #1 fix: signal the synth thread to stop mid-iteration
+                # on barge-in (single-thread TTS executor would otherwise be
+                # blocked by the orphaned generator until it completes).
+                import threading as _threading
+                stop_event = _threading.Event()
+                state["current_tts_stop"] = stop_event
+    
+                def _run_synth(s, synth_be):
+                    try:
+                        stream_kwargs = {"language": tts_language_norm}
+                        if tts_speaker_kwargs:
+                            stream_kwargs.update(tts_speaker_kwargs)
+                        elif tts_voice is not None:
+                            stream_kwargs["voice"] = tts_voice  # deprecated
+                        if tts_speed is not None:    stream_kwargs["speed"] = tts_speed
+                        # FIX_C: use the manager-acquired backend so a reload
+                        # waiting for drain sees this request as inflight.
+                        for chunk in synth_be.generate_streaming(s, **stream_kwargs):
+                            if stop_event.is_set():
+                                break
+                            loop.call_soon_threadsafe(audio_queue.put_nowait, chunk)
+                    except Exception as e:
+                        logger.exception("v2v tts synthesis failed for sentence=%r", s)
+                        loop.call_soon_threadsafe(audio_queue.put_nowait, ("__error__", str(e)))
+                    finally:
+                        loop.call_soon_threadsafe(audio_queue.put_nowait, None)
+    
+                async def drain():
+                    nonlocal sr_header_sent
+                    # PR5 / FIX_C: take BackendManager.acquire() *per utterance*
+                    # so admin reload's drain logic sees this synth as inflight.
+                    # Per-utterance (vs per-session) is intentional: v2v sessions
+                    # can run for minutes; holding acquire across the whole
+                    # session would block every reload until the user hangs up.
+                    # _v2v_tts_mgr is captured from the enclosing scope (set
+                    # earlier from _try_tts_manager()); fall back to the
+                    # already-bound tts_be when manager wiring is absent (partial
+                    # config / tests).
+                    tts_mgr_local = _v2v_tts_mgr
+                    if tts_mgr_local is not None:
+                        acquire_cm = tts_mgr_local.acquire()
+                        synth_backend = await acquire_cm.__aenter__()
+                    else:
+                        acquire_cm = None
+                        synth_backend = tts_be
+                    try:
+                        # Coord lock per-sentence: cheap on concurrent profiles;
+                        # serializes sentences against ASR on serialized profiles.
+                        async with coord.acquire("tts"):
+                            if not sr_header_sent:
+                                sr = tts_service.get_sample_rate() if hasattr(tts_service, "get_sample_rate") else 16000
+                                await send_bytes(struct.pack("<I", sr))
+                                sr_header_sent = True
+                            await send_json({"type": v2v_proto.SERVER_TTS_STARTED, "sentence": sentence})
+                            loop.run_in_executor(_get_tts_stream_executor(), _run_synth, sentence, synth_backend)
+                            state["tts_started"] = True
+                            while True:
+                                item = await audio_queue.get()
+                                if item is None:
+                                    break
+                                if isinstance(item, tuple) and item[0] == "__error__":
+                                    await send_error(f"tts: {item[1]}")
+                                    break
+                                await send_bytes(item)
+                            await send_json({"type": v2v_proto.SERVER_TTS_SENTENCE_DONE, "sentence": sentence})
+                    finally:
+                        if acquire_cm is not None:
+                            try:
+                                await acquire_cm.__aexit__(None, None, None)
+                            except Exception:
+                                logger.exception("v2v tts acquire exit failed")
+    
+                task = asyncio.create_task(drain())
+                state["current_tts_task"] = task
                 try:
-                    stream_kwargs = {"language": tts_language_norm}
-                    if tts_speaker_kwargs:
-                        stream_kwargs.update(tts_speaker_kwargs)
-                    elif tts_voice is not None:
-                        stream_kwargs["voice"] = tts_voice  # deprecated
-                    if tts_speed is not None:    stream_kwargs["speed"] = tts_speed
-                    # FIX_C: use the manager-acquired backend so a reload
-                    # waiting for drain sees this request as inflight.
-                    for chunk in synth_be.generate_streaming(s, **stream_kwargs):
-                        if stop_event.is_set():
-                            break
-                        loop.call_soon_threadsafe(audio_queue.put_nowait, chunk)
-                except Exception as e:
-                    logger.exception("v2v tts synthesis failed for sentence=%r", s)
-                    loop.call_soon_threadsafe(audio_queue.put_nowait, ("__error__", str(e)))
-                finally:
-                    loop.call_soon_threadsafe(audio_queue.put_nowait, None)
-
-            async def drain():
-                nonlocal sr_header_sent
-                # PR5 / FIX_C: take BackendManager.acquire() *per utterance*
-                # so admin reload's drain logic sees this synth as inflight.
-                # Per-utterance (vs per-session) is intentional: v2v sessions
-                # can run for minutes; holding acquire across the whole
-                # session would block every reload until the user hangs up.
-                # _v2v_tts_mgr is captured from the enclosing scope (set
-                # earlier from _try_tts_manager()); fall back to the
-                # already-bound tts_be when manager wiring is absent (partial
-                # config / tests).
-                tts_mgr_local = _v2v_tts_mgr
-                if tts_mgr_local is not None:
-                    acquire_cm = tts_mgr_local.acquire()
-                    synth_backend = await acquire_cm.__aenter__()
-                else:
-                    acquire_cm = None
-                    synth_backend = tts_be
-                try:
-                    # Coord lock per-sentence: cheap on concurrent profiles;
-                    # serializes sentences against ASR on serialized profiles.
-                    async with coord.acquire("tts"):
-                        if not sr_header_sent:
-                            sr = tts_service.get_sample_rate() if hasattr(tts_service, "get_sample_rate") else 16000
-                            await send_bytes(struct.pack("<I", sr))
-                            sr_header_sent = True
-                        await send_json({"type": v2v_proto.SERVER_TTS_STARTED, "sentence": sentence})
-                        loop.run_in_executor(_get_tts_stream_executor(), _run_synth, sentence, synth_backend)
-                        state["tts_started"] = True
+                    await task
+                except asyncio.CancelledError:
+                    # Barge-in: tell the synth thread to break out of the
+                    # generator loop, then drain any chunks it produced
+                    # before noticing the flag.
+                    stop_event.set()
+                    try:
                         while True:
-                            item = await audio_queue.get()
-                            if item is None:
-                                break
-                            if isinstance(item, tuple) and item[0] == "__error__":
-                                await send_error(f"tts: {item[1]}")
-                                break
-                            await send_bytes(item)
-                        await send_json({"type": v2v_proto.SERVER_TTS_SENTENCE_DONE, "sentence": sentence})
+                            item = audio_queue.get_nowait()
+                            if item is None: break
+                    except asyncio.QueueEmpty:
+                        pass
                 finally:
-                    if acquire_cm is not None:
-                        try:
-                            await acquire_cm.__aexit__(None, None, None)
-                        except Exception:
-                            logger.exception("v2v tts acquire exit failed")
-
-            task = asyncio.create_task(drain())
-            state["current_tts_task"] = task
-            try:
-                await task
-            except asyncio.CancelledError:
-                # Barge-in: tell the synth thread to break out of the
-                # generator loop, then drain any chunks it produced
-                # before noticing the flag.
-                stop_event.set()
-                try:
-                    while True:
-                        item = audio_queue.get_nowait()
-                        if item is None: break
-                except asyncio.QueueEmpty:
-                    pass
-            finally:
-                state["current_tts_task"] = None
-                state["current_tts_stop"] = None
-        if not state["client_closed"]:
-            # Session-final tts_done. In multi-utterance mode tag it as
-            # session_complete=True so the client can distinguish it from
-            # the per-turn dones emitted above. Single-utterance mode
-            # omits the field for backward compatibility.
-            payload = {"type": v2v_proto.SERVER_TTS_DONE}
-            if multi_utterance:
-                payload["session_complete"] = True
-            await send_json(payload)
-
-    # ── Stage 5: orchestrate ────────────────────────────────────────
-    # Bug #3 fix: dispatcher loops on ws.receive() forever (only exits
-    # on disconnect). If we asyncio.gather all three, the server hangs
-    # after asr_final / tts_done. Spawn work tasks separately, wait for
-    # them, then cancel the dispatcher.
-    dispatcher_task = asyncio.create_task(dispatcher())
-    work_tasks = []
-    if asr_enabled:
-        work_tasks.append(asyncio.create_task(asr_out_task()))
-    if tts_be is not None:
-        work_tasks.append(asyncio.create_task(tts_out_task()))
-
-    try:
-        if work_tasks:
-            await asyncio.gather(*work_tasks, return_exceptions=False)
-        else:
-            # No work tasks (shouldn't happen — config rejected earlier),
-            # just keep the dispatcher running until the client closes.
-            await dispatcher_task
-    except Exception as e:
-        logger.error("v2v stream error: %s", e, exc_info=True)
+                    state["current_tts_task"] = None
+                    state["current_tts_stop"] = None
+            if not state["client_closed"]:
+                # Session-final tts_done. In multi-utterance mode tag it as
+                # session_complete=True so the client can distinguish it from
+                # the per-turn dones emitted above. Single-utterance mode
+                # omits the field for backward compatibility.
+                payload = {"type": v2v_proto.SERVER_TTS_DONE}
+                if multi_utterance:
+                    payload["session_complete"] = True
+                await send_json(payload)
+    
+        # ── Stage 5: orchestrate ────────────────────────────────────────
+        # Bug #3 fix: dispatcher loops on ws.receive() forever (only exits
+        # on disconnect). If we asyncio.gather all three, the server hangs
+        # after asr_final / tts_done. Spawn work tasks separately, wait for
+        # them, then cancel the dispatcher.
+        dispatcher_task = asyncio.create_task(dispatcher())
+        work_tasks = []
+        if asr_enabled:
+            work_tasks.append(asyncio.create_task(asr_out_task()))
+        if tts_be is not None:
+            work_tasks.append(asyncio.create_task(tts_out_task()))
+    
         try:
-            await send_error(f"{type(e).__name__}: {e}")
-        except Exception:
-            pass
-    finally:
-        if not dispatcher_task.done():
-            dispatcher_task.cancel()
-            try:
+            if work_tasks:
+                await asyncio.gather(*work_tasks, return_exceptions=False)
+            else:
+                # No work tasks (shouldn't happen — config rejected earlier),
+                # just keep the dispatcher running until the client closes.
                 await dispatcher_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        for t in work_tasks:
-            if not t.done():
-                t.cancel()
-        # Tell the synth thread to bail (if running) so the TTS executor
-        # frees up for the next connection.
-        stop = state["current_tts_stop"]
-        if stop is not None:
-            stop.set()
-        # Cancel any in-flight ASR utterance before closing the socket
-        # so the worker doesn't leak the session.
-        if asr_manager is not None:
+        except Exception as e:
+            logger.error("v2v stream error: %s", e, exc_info=True)
             try:
-                await asr_manager.cancel("ws_close")
+                await send_error(f"{type(e).__name__}: {e}")
             except Exception:
                 pass
+        finally:
+            if not dispatcher_task.done():
+                dispatcher_task.cancel()
+                try:
+                    await dispatcher_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            for t in work_tasks:
+                if not t.done():
+                    t.cancel()
+            # Tell the synth thread to bail (if running) so the TTS executor
+            # frees up for the next connection.
+            stop = state["current_tts_stop"]
+            if stop is not None:
+                stop.set()
+            # Cancel any in-flight ASR utterance before closing the socket
+            # so the worker doesn't leak the session.
+            if asr_manager is not None:
+                try:
+                    await asr_manager.cancel("ws_close")
+                except Exception:
+                    pass
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            if _v2v_asr_mgr is not None:
+                _v2v_asr_mgr.unregister_ws(_v2v_handle)
+            if _v2v_tts_mgr is not None:
+                _v2v_tts_mgr.unregister_ws(_v2v_handle)
+            if _v2v_session_token is not None:
+                _v2v_session_token.release()
+            if _v2v_ws_metric_taken:
+                try:
+                    from app.core import metrics as _m_v2v
+                    _m_v2v.dec_active_ws_sessions()
+                    _v2v_ws_metric_taken = False
+                except Exception:
+                    pass
+            reset_request_context(_v2v_ctx_tokens)
+            logger.info("v2v stream closed")
+    except BaseException:
+        # MUST-FIX 1 round 2: covers CancelledError (BaseException) raised
+        # mid-setup before the inner main try/finally is established. The
+        # release helper is idempotent so this is safe even on the normal
+        # path where the inner finally already released.
+        _v2v_release_early()
         try:
-            await ws.close()
+            reset_request_context(_v2v_ctx_tokens)
         except Exception:
             pass
-        if _v2v_asr_mgr is not None:
-            _v2v_asr_mgr.unregister_ws(_v2v_handle)
-        if _v2v_tts_mgr is not None:
-            _v2v_tts_mgr.unregister_ws(_v2v_handle)
-        if _v2v_session_token is not None:
-            _v2v_session_token.release()
-        if _v2v_ws_metric_taken:
-            try:
-                from app.core import metrics as _m_v2v
-                _m_v2v.dec_active_ws_sessions()
-                _v2v_ws_metric_taken = False
-            except Exception:
-                pass
-        reset_request_context(_v2v_ctx_tokens)
-        logger.info("v2v stream closed")
+        raise
 
 
 # ── Admin: TTS runtime overrides ────────────────────────────────────────────
