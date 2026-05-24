@@ -153,6 +153,60 @@ def test_comparator_does_not_flag_when_explicitly_skipped():
     )
 
 
+def test_remote_mode_forces_strict_data_implicitly(monkeypatch, tmp_path):
+    """Round 3 BLOCKER 2: --mode remote must implicitly force --strict-data
+    so the default flag-only behaviour does not silently PASS reports
+    where the bundled collector ships data_incomplete=True for ASR/V2V.
+
+    Without this guard, remote runs would emit `FLAG` (exit 0) for every
+    device the collector can't fully exercise — exactly the silent PASS
+    codex flagged at the parity level.
+    """
+    # Build a fake remote collector that returns one device with the
+    # data_incomplete shape the real bundled collector emits.
+    incomplete_report = {
+        "device": "fake-orin-nx",
+        "device_class": "orin-nx",
+        "tts": _good_tts(),
+        "asr": {"data_incomplete": True,
+                "reason": "remote collector skipped ASR"},
+        "v2v": {"data_incomplete": True,
+                "reason": "remote collector skipped V2V"},
+    }
+
+    captured_strict = {"value": None}
+
+    def _fake_collect_remote(args):
+        # Snapshot what main() set on args BEFORE _collect_remote ran.
+        captured_strict["value"] = args.strict_data
+        return [incomplete_report]
+
+    monkeypatch.setattr(harness, "_collect_remote", _fake_collect_remote)
+
+    # Drive main() via argv so the strict-force branch is exercised.
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_parity.py",
+            "--mode", "remote",
+            "--out", str(out_dir),
+        ],
+    )
+
+    rc = harness.main()
+
+    # --strict-data must have been auto-forced before remote collection ran.
+    assert captured_strict["value"] is True, (
+        "remote mode did not force --strict-data implicitly; "
+        f"_collect_remote saw strict_data={captured_strict['value']}"
+    )
+    # And the comparator must have hard-failed (exit 2), not silent-PASSed.
+    assert rc == 2, (
+        f"remote mode with incomplete data must exit 2 (hard fail); got rc={rc}"
+    )
+
+
 def test_pre_fix_baseline_would_have_passed_incomplete():
     """Sanity: a report missing ASR/V2V entirely (the pre-fix shape) is
     what produced the silent PASS. Strict mode now refuses to pass it.

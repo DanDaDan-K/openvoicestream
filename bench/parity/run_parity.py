@@ -606,6 +606,19 @@ def main() -> int:
                          "on partial data.")
     args = ap.parse_args()
 
+    # Codex Week 4 round 3 BLOCKER 2: remote mode collectors routinely
+    # ship `data_incomplete: True` (the bundled collector script only
+    # smoke-tests TTS), so the default flag-only behaviour would silently
+    # PASS every remote run. Force --strict-data implicitly in remote mode
+    # so missing ASR/V2V coverage hard-fails instead of being swept under
+    # a "flag" tag. Mock mode (with fully synthetic fixtures) keeps the
+    # original opt-in semantics.
+    if args.mode == "remote" and not args.strict_data:
+        print("[parity] remote mode → forcing --strict-data "
+              "(round 3 BLOCKER 2: prevent silent PASS on incomplete data)",
+              file=sys.stderr)
+        args.strict_data = True
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
