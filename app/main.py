@@ -1094,6 +1094,27 @@ async def _tts_synthesize(req: TTSRequest):
     )
 
 
+async def _safe_cleanup_acquire_and_session(acquire_cm, release_session_fn):
+    """Codex round-4 GAP B: best-effort serial cleanup helper for TTS
+    streaming endpoints.
+
+    Both ``acquire_cm.__aexit__()`` and ``release_session_fn()`` must run
+    even if one of them raises. The previous pattern wrote them on
+    consecutive lines without protection — if ``__aexit__`` raised
+    (BackendManager bug, GeneratorExit re-raised, etc.) the slot release
+    was silently skipped. Using two independent try/except blocks
+    guarantees both run.
+    """
+    try:
+        await acquire_cm.__aexit__(None, None, None)
+    except BaseException:
+        pass
+    try:
+        release_session_fn()
+    except BaseException:
+        pass
+
+
 @app.options("/tts/stream")
 async def tts_stream_options():
     return Response(status_code=200)
@@ -1184,8 +1205,9 @@ async def tts_stream(
             try:
                 voice_kwargs = _request_voice_kwargs(req, backend=backend)
             except ValueError as exc:
-                await acquire_cm.__aexit__(None, None, None)
-                _release_session()
+                # Codex round-4 GAP B: best-effort serial cleanup so
+                # __aexit__ raising cannot skip _release_session().
+                await _safe_cleanup_acquire_and_session(acquire_cm, _release_session)
                 return JSONResponse({"error": str(exc)}, status_code=400)
             sr = backend.sample_rate
 
@@ -1398,8 +1420,9 @@ async def tts_stream(
                             await watcher_task
                         except (asyncio.CancelledError, Exception):
                             pass
-                    await acquire_cm.__aexit__(None, None, None)
-                    _release_session()
+                    # Codex round-4 GAP B: best-effort serial cleanup so
+                    # __aexit__ raising cannot skip _release_session().
+                    await _safe_cleanup_acquire_and_session(acquire_cm, _release_session)
 
             return StreamingResponse(stream(), media_type="application/octet-stream")
         except BaseException:
@@ -1743,8 +1766,9 @@ async def tts_clone_stream(
                                 break
                             yield chunk
                 finally:
-                    await acquire_cm.__aexit__(None, None, None)
-                    _release_session()
+                    # Codex round-4 GAP B: best-effort serial cleanup so
+                    # __aexit__ raising cannot skip _release_session().
+                    await _safe_cleanup_acquire_and_session(acquire_cm, _release_session)
 
             return StreamingResponse(stream(), media_type="application/octet-stream")
         except BaseException:
