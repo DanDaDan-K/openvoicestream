@@ -94,6 +94,23 @@ class InterpreterMode(AppMode):
             await ctx.run_default_dialogue_turn(text)
             return
 
+        # Phase 2a: tell the dashboard (and any other broadcast
+        # subscriber) what we translated so it can render side-by-side
+        # subtitles. Failures here must NOT block the spoken output —
+        # broadcast is best-effort UX.
+        try:
+            await ctx.broadcast("on_translation", {
+                "original": text,
+                "translated": translated,
+                "src_lang": src_lang,
+                "tgt_lang": tgt_lang,
+                "detected_language": ctx.detected_language,
+            })
+        except Exception:
+            logger.exception(
+                "InterpreterMode: on_translation broadcast failed (non-fatal)"
+            )
+
         await ctx.speak(translated)
 
 

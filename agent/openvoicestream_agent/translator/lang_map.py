@@ -6,6 +6,12 @@ expects FLORES-200 BCP-47-ish codes (e.g. ``"zho_Hans"``, ``"eng_Latn"``).
 This module owns the translation between them. Keep the table in sync
 with the language set declared in
 ``app/backends/jetson/trt_edge_llm_asr.py::_strip_language_prefix``.
+
+The dashboard's ``GET /api/translator/runtime`` endpoint also reads from
+this module to build its ``supported_targets`` list, so adding a new
+language here automatically surfaces it as a dashboard-switchable
+target. Keep ``FLORES_DISPLAY_NAMES`` in sync with
+``ASR_NAME_TO_FLORES`` for that reason.
 """
 from __future__ import annotations
 
@@ -28,6 +34,37 @@ ASR_NAME_TO_FLORES: dict[str, str] = {
     "Portuguese": "por_Latn",
     "Russian": "rus_Cyrl",
 }
+
+# Human-readable display names for each FLORES code we support as a
+# translator target. Used by the dashboard ``/api/translator/runtime``
+# endpoint to render a target-language picker. Keys MUST stay in lockstep
+# with the FLORES codes in ``ASR_NAME_TO_FLORES`` (every value in that
+# map should appear here as a key).
+FLORES_DISPLAY_NAMES: dict[str, str] = {
+    "zho_Hans": "中文 (简体)",
+    "yue_Hant": "粵語 (繁體)",
+    "eng_Latn": "English",
+    "jpn_Jpan": "日本語",
+    "kor_Hang": "한국어",
+    "fra_Latn": "Français",
+    "deu_Latn": "Deutsch",
+    "spa_Latn": "Español",
+    "ita_Latn": "Italiano",
+    "por_Latn": "Português",
+    "rus_Cyrl": "Русский",
+}
+
+
+def supported_target_languages() -> list[dict[str, str]]:
+    """Return the list of FLORES targets the dashboard can switch to.
+
+    Format matches what the ``GET /api/translator/runtime`` endpoint
+    serves: ``[{"code": "eng_Latn", "name": "English"}, ...]``. Order
+    is stable (insertion order of ``FLORES_DISPLAY_NAMES``).
+    """
+    return [{"code": code, "name": name}
+            for code, name in FLORES_DISPLAY_NAMES.items()]
+
 
 # Module-level dedupe set so an unmapped language only warns once per
 # process — otherwise an open-mic always-on pipeline that keeps
@@ -65,4 +102,9 @@ def asr_lang_to_flores(name: Optional[str]) -> Optional[str]:
     return code
 
 
-__all__ = ["ASR_NAME_TO_FLORES", "asr_lang_to_flores"]
+__all__ = [
+    "ASR_NAME_TO_FLORES",
+    "FLORES_DISPLAY_NAMES",
+    "asr_lang_to_flores",
+    "supported_target_languages",
+]
