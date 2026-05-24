@@ -68,7 +68,7 @@ def _load_translator() -> tuple[ctranslate2.Translator, object]:
         translator = ctranslate2.Translator(
             model_path,
             device=device,
-            device_index=[device_index] if device == "cuda" else None,
+            device_index=device_index,
         )
         logger.info("Translator model loaded successfully")
     except Exception as e:
@@ -124,12 +124,11 @@ async def translate(request: TranslateRequest):
         raise HTTPException(status_code=400, detail="Empty text")
 
     try:
-        # NLLB format: prefix source language code to input text
-        source_prefix = request.src_lang
-        input_text = f"{source_prefix} {text}"
-
-        # Tokenize
-        tokens = _tokenizer.EncodeAsIds(input_text)
+        # NLLB tokenization: source token pieces, then </s>, then the
+        # FLORES src_lang code. ctranslate2.Translator.translate_batch
+        # expects token-piece strings (not int IDs), so use
+        # EncodeAsPieces/DecodePieces — not EncodeAsIds/DecodeIds.
+        tokens = _tokenizer.EncodeAsPieces(text) + ["</s>", request.src_lang]
 
         # Translate
         results = _translator.translate_batch(
@@ -140,7 +139,7 @@ async def translate(request: TranslateRequest):
 
         # Decode (skip the language token at position 0)
         translated_tokens = results[0].hypotheses[0][1:]
-        translated = _tokenizer.DecodeIds(translated_tokens)
+        translated = _tokenizer.DecodePieces(translated_tokens)
 
         logger.debug(
             "Translated (%s→%s): %r → %r",
