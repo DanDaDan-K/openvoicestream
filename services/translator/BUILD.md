@@ -37,7 +37,8 @@ curl -s -X POST http://localhost:9001/translate \
 
 | Tag | Digest | Size | Built against |
 |---|---|---|---|
-| `translator-cuda-jetson-v1` | `sha256:ee4765c6fc2b0a1e2719aa136ccc0ff59e8b918a4dcd8ac04e312e165927d636` | 579 MB | JetPack 6.x (L4T R36.4.x), CUDA 12.6, cuDNN 9.3, Python 3.10, ct2 v4.7.2 |
+| `translator-cuda-jetson-v2` | `sha256:c47bde5b5794c7f9f385de2b48be6f1185dd5c2987000962112c5982f278065c` | 579 MB | JetPack 6.x (L4T R36.4.x), CUDA 12.6, cuDNN 9.3, Python 3.10, ct2 v4.7.2; threadpool for non-blocking translate |
+| `translator-cuda-jetson-v1` | `sha256:ee4765c6fc2b0a1e2719aa136ccc0ff59e8b918a4dcd8ac04e312e165927d636` | 579 MB | Same as v2 minus the threadpool; deprecated |
 
 ### Model
 

@@ -86,7 +86,7 @@ services:
     # for sm_87 — see services/translator/BUILD.md). To use the older
     # CPU-only image instead, override TRANSLATOR_IMAGE to
     # seeed-local-voice:translator-latest and TRANSLATOR_DEVICE=cpu.
-    image: ${TRANSLATOR_IMAGE:-sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:translator-cuda-jetson-v1}
+    image: ${TRANSLATOR_IMAGE:-sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:translator-cuda-jetson-v2}
     runtime: nvidia
     ports:
       - "9001:9001"
@@ -94,6 +94,12 @@ services:
       - TRANSLATOR_DEVICE=${TRANSLATOR_DEVICE:-cuda}
       - TRANSLATOR_DEVICE_INDEX=${TRANSLATOR_DEVICE_INDEX:-0}
       - TRANSLATOR_MODEL_PATH=${TRANSLATOR_MODEL_PATH:-/models/nllb-200-distilled-600m-ct2-int8}
+      # Worker threadpool size for offloading the blocking CT2 call off the
+      # event loop. GPU is single-tenant so this doesn't increase translate
+      # throughput, but it keeps /health (and any other endpoint) responsive
+      # while translates are in flight — important for docker healthchecks
+      # not to time out under load.
+      - TRANSLATOR_WORKERS=${TRANSLATOR_WORKERS:-4}
       # CSV-mode Jetson container runtime: must map /dev/nvmap into the
       # container or CUDA init fails with "NvRmMemInitNvmap failed".
       - NVIDIA_VISIBLE_DEVICES=all
