@@ -220,41 +220,53 @@ class ASRSessionManager:
 
         Returns ``(gen, "")`` on no-op / discarded paths.
         """
-        gen, text, _accepted = await self.finalize_with_status(reason)
+        gen, text, _accepted, _lang = await self.finalize_with_status(reason)
         return gen, text
 
-    async def finalize_with_status(self, reason: str = "vad_end") -> tuple[int, str, bool]:
-        """Like :meth:`finalize_with_generation`, plus an accepted flag.
+    async def finalize_with_status(
+        self, reason: str = "vad_end"
+    ) -> tuple[int, str, bool, Optional[str]]:
+        """Like :meth:`finalize_with_generation`, plus an accepted flag and
+        detected language.
 
         ``accepted`` is False when the manager discarded the finalize
         result because the stream was cancelled, no longer finalizable, or
         superseded by another generation. Callers that emit protocol frames
         should use this flag instead of comparing against mutable outer
         connection state.
+
+        ``detected_language`` is the per-utterance language reported by
+        the ASR backend (e.g. ``"Chinese"``), or ``None`` if the backend
+        does not perform language ID. Always ``None`` on discarded /
+        no-op paths.
         """
         async with self._lock:
             if self._state not in (SessionState.ACTIVE,):
-                return self._generation, "", False
+                return self._generation, "", False, None
             gen = self._generation
             self._state = SessionState.FINALIZING
             stream = self._stream
         if stream is None:
             async with self._lock:
                 self._state = SessionState.IDLE
-            return gen, "", False
+            return gen, "", False, None
         try:
-            final_text = await self._run_sync(stream.finalize)
+            raw = await self._run_sync(stream.finalize)
         except Exception as exc:  # noqa: BLE001
             async with self._lock:
                 await self._handle_error_locked(exc)
-            return gen, "", False
+            return gen, "", False, None
+        # Backends MUST return ``(text, language)``. Per the ASRStream
+        # ABC contract; missed migrations should fail loudly (TypeError
+        # at unpack) rather than silently degrade to ``language=None``.
+        final_text, detected_language = raw
         async with self._lock:
             # If a cancel raced past us (e.g. abort-during-FINALIZING),
             # the cancel routine will have moved us into CANCELLING and
             # already discarded the result. Honor that.
             if self._state != SessionState.FINALIZING:
                 logger.info("ASRSessionManager: finalize result discarded (state=%s)", self._state)
-                return gen, "", False
+                return gen, "", False, None
             # Also drop if the generation advanced (a new speech_start
             # raced past us via _inner_cancel/preempt).
             if self._generation != gen:
@@ -262,10 +274,10 @@ class ASRSessionManager:
                     "ASRSessionManager: finalize result discarded (stale gen %d != current %d)",
                     gen, self._generation,
                 )
-                return gen, "", False
+                return gen, "", False, None
             self._stream = None
             self._state = SessionState.IDLE
-            return gen, final_text or "", True
+            return gen, final_text or "", True, detected_language
 
     async def get_partial_for_generation(self) -> tuple[int, str, bool]:
         """Snapshot ``(generation, partial_text, is_endpoint)`` atomically.

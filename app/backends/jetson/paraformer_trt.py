@@ -556,13 +556,15 @@ class ParaformerTRTStream(ASRStream):
         # Drop residual audio so a follow-up finalize() never touches encoder.
         self._audio_buf = np.array([], dtype=np.float32)
 
-    def finalize(self) -> str:
+    def finalize(self):
         """Process remaining audio tail + flush CIF -> final text.
 
         Bug G fix: full-utterance CMVN, slice (history+new) for encoder.
+
+        Returns ``(text, None)`` — Paraformer is single-language (zh).
         """
         if self._cancelled:
-            return self._final_text_cache
+            return self._final_text_cache, None
         residual_audio = self._audio_buf
         if len(residual_audio) > 0:
             self._all_audio = np.concatenate([self._all_audio, residual_audio])
@@ -618,7 +620,7 @@ class ParaformerTRTStream(ASRStream):
             "Paraformer finalize: %d chunks, enc=%.0fms dec=%.0fms, text='%s'",
             chunk_count, total_enc_ms, total_dec_ms, text,
         )
-        return text
+        return text, None
 
     def _flush_cif_tail(self) -> None:
         """Fire final token for accumulated CIF weight if above threshold."""

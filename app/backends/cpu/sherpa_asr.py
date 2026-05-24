@@ -141,9 +141,9 @@ class SherpaASRStream(ASRStream):
             # Reset stream for next utterance
             self._stream = self._recognizer.create_stream()
 
-    def finalize(self) -> str:
+    def finalize(self) -> tuple[str, Optional[str]]:
         if self._cancelled:
-            return self._final_text_cache
+            return self._final_text_cache, None
         recognizer = self._recognizer
         stream = self._stream
 
@@ -160,7 +160,9 @@ class SherpaASRStream(ASRStream):
         text = recognizer.get_result(stream).strip()
         if self._language_mode == "en":
             text = _fix_bpe_splits(text)
-        return text
+        # Sherpa backends are single-language (LANGUAGE_MODE configured);
+        # no per-utterance language detection.
+        return text, None
 
     def get_partial(self) -> tuple[str, bool]:
         text = self._last_text

@@ -34,7 +34,10 @@ def test_trt_edgellm_asr_stream_accumulates_and_finalizes(monkeypatch):
     stream.accept_waveform(16000, np.zeros(8000, dtype=np.float32))
 
     assert stream.get_partial() == ("", False)
-    assert stream.finalize() == "你好"
+    # finalize() now returns (text, detected_language) per the
+    # language-pipeline migration. Backend's fake_transcribe returns a
+    # plain Result without language → detected stays None.
+    assert stream.finalize() == ("你好", None)
     assert calls[0][1] == "Chinese"
     assert calls[0][0][:4] == b"RIFF"
 

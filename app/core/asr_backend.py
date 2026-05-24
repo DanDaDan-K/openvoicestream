@@ -40,8 +40,14 @@ class ASRStream(ABC):
         ...
 
     @abstractmethod
-    def finalize(self) -> str:
-        """Signal end-of-audio and return final transcription text."""
+    def finalize(self) -> tuple[str, Optional[str]]:
+        """Signal end-of-audio.
+
+        Returns ``(final_text, detected_language)``. ``detected_language`` is
+        the human-readable language name (e.g. ``"Chinese"``, ``"English"``)
+        if the backend supports language ID and detected one, otherwise
+        ``None``. Backends without language detection return ``(text, None)``.
+        """
         ...
 
     def get_partial(self) -> tuple[str, bool]:

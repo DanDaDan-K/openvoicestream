@@ -1002,11 +1002,11 @@ class _TRTEdgeLLMAccumulatingASRStream(ASRStream):
         self._cancelled = True
         self._chunks = []
 
-    def finalize(self) -> str:
+    def finalize(self) -> tuple[str, Optional[str]]:
         if self._cancelled:
-            return self._final_text_cache
+            return self._final_text_cache, None
         if not self._chunks:
-            return ""
+            return "", None
         audio = np.concatenate(self._chunks)
         # The TRT audio_encoder engine is built with a fixed optimization profile
         # (~800-1500 mel frames ≈ 10-15s). Forwarding >10s of audio in one shot
@@ -1032,6 +1032,7 @@ class _TRTEdgeLLMAccumulatingASRStream(ASRStream):
         # — natural speech segments split by the VAD are >=1.0s by design.
         MIN_SEG_S = 0.4
         texts: list[str] = []
+        detected_language: Optional[str] = None
         for seg in segments:
             if len(seg) / 16000 < MIN_SEG_S:
                 continue
@@ -1051,6 +1052,11 @@ class _TRTEdgeLLMAccumulatingASRStream(ASRStream):
                 # over-eagerly punctuated the end. Keeps "变得 更善于"
                 # instead of "变得。 更善于".
                 texts.append(result.text)
+                # Take the first non-empty segment's detected language as
+                # the utterance language. (Mixed-language utterances are
+                # rare; first-segment language is a safe default.)
+                if detected_language is None and getattr(result, "language", None):
+                    detected_language = result.language
 
         # Join: use the request language to pick separator. CJK languages
         # never use spaces; everything else does. Don't infer from output
@@ -1068,7 +1074,7 @@ class _TRTEdgeLLMAccumulatingASRStream(ASRStream):
                     cleaned.append(t)
             texts = cleaned
         separator = "" if is_cjk else " "
-        return separator.join(texts).strip()
+        return separator.join(texts).strip(), detected_language
 
     def get_partial(self) -> tuple[str, bool]:
         return "", False
@@ -1093,6 +1099,7 @@ class _TRTEdgeLLMStreamingASRStream(ASRStream):
         self._samples_since_hop = 0
         self._partial_text = ""
         self._final_text = ""
+        self._detected_language: Optional[str] = None
         self._cancelled = False
         self._closed = False
         self._begin()
@@ -1130,14 +1137,20 @@ class _TRTEdgeLLMStreamingASRStream(ASRStream):
                 self._audio_accum = self._audio_accum[-carry_samples:].copy()
             return resp
         if event == "partial":
-            self._partial_text = self._backend._strip_language_prefix(
+            stripped, lang = self._backend._strip_language_prefix(
                 resp.get("text", "") or ""
-            )[0].strip()
+            )
+            self._partial_text = stripped.strip()
+            if lang:
+                self._detected_language = lang
             return resp
         if event == "final":
-            self._final_text = self._backend._strip_language_prefix(
+            stripped, lang = self._backend._strip_language_prefix(
                 resp.get("text", "") or ""
-            )[0].strip()
+            )
+            self._final_text = stripped.strip()
+            if lang:
+                self._detected_language = lang
             self._closed = True
             return resp
         raise RuntimeError(f"unexpected ASR streaming worker event: {resp}")
@@ -1166,15 +1179,15 @@ class _TRTEdgeLLMStreamingASRStream(ASRStream):
         # the last=true event and returns the final text.
         pass
 
-    def finalize(self) -> str:
+    def finalize(self) -> tuple[str, Optional[str]]:
         if self._cancelled or self._closed:
-            return self._final_text
+            return self._final_text, self._detected_language
         if len(self._audio_accum) == 0:
             self._backend._worker_request({"event": "end", "id": self._session_id})
             self._closed = True
-            return ""
+            return "", self._detected_language
         self._send_chunk(last=True)
-        return self._final_text
+        return self._final_text, self._detected_language
 
     def cancel_and_finalize(self) -> None:
         self._final_text = self._partial_text

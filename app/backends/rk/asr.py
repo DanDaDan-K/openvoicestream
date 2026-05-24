@@ -242,15 +242,15 @@ class _RKASRStreamAdapter(ASRStream):
         self._chunks.append(samples)
         inner.accept_waveform(sample_rate, samples)
 
-    def finalize(self) -> str:
+    def finalize(self):
         inner = self._live_inner()
         if not self._chunks:
-            return inner.finalize() or ""
+            return (inner.finalize() or ""), None
         audio = np.concatenate(self._chunks)
         dur_s = len(audio) / max(self._sample_rate, 1)
         if dur_s <= _LONG_AUDIO_THRESHOLD_S:
             text = inner.finalize() or ""
-            return _clean_segment_text(text)
+            return _clean_segment_text(text), None
 
         # Long path: segment + per-segment offline transcribe via inner.
         audio = _resample_to_16k(audio, self._sample_rate)
@@ -288,7 +288,7 @@ class _RKASRStreamAdapter(ASRStream):
         # Discard the inner's sliding-window result entirely — it's the
         # poisoned snowball. Some inners need their state torn down; trust
         # the GC and a fresh stream next call.
-        return _join_segments(texts, self._language)
+        return _join_segments(texts, self._language), None
 
     def prepare_finalize(self) -> None:
         self._live_inner().prepare_finalize()

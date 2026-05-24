@@ -443,15 +443,12 @@ def _get_asr_executor() -> ThreadPoolExecutor:
 def _unpack_finalize_result(raw):
     """Normalise ``ASRStream.finalize()`` return to ``(text, language)``.
 
-    Backends return ``(text, language)`` tuples post the language-pipeline
-    migration. Tolerate legacy bare-string returns so a missed migration
-    surfaces as ``(text, None)`` rather than a TypeError on subscript.
+    Per the ASRStream ABC contract, backends MUST return ``(text, language)``.
+    Missed migrations fail loudly here (TypeError at unpack) rather than
+    silently degrading to ``language=None``.
     """
-    if isinstance(raw, tuple):
-        text = raw[0] if len(raw) > 0 else ""
-        lang = raw[1] if len(raw) > 1 else None
-        return text or "", lang
-    return raw or "", None
+    text, lang = raw
+    return text or "", lang
 
 
 def _default_vad_backend() -> str:
