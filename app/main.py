@@ -328,8 +328,27 @@ def _get_tts_stream_executor() -> ThreadPoolExecutor:
         # max_workers=2 lets the optimization apply; if you observe
         # CUDA errors in production, set OVS_TTS_STREAM_MAX_WORKERS=1
         # to fall back to the C5b runtime-mutex stability gate.
+        # Week 3 spec §D1: backend-specific override env > global > default.
+        # Lets ops force one backend single-slot without muting the others.
+        max_workers_str = os.environ.get("OVS_TTS_STREAM_MAX_WORKERS", "2")
+        try:
+            from app.core import tts_service as _tts_svc
+            backend_name = (_tts_svc.backend_name() or "").lower() if _tts_svc.is_ready() else ""
+        except Exception:
+            backend_name = ""
+        for suffix, env_name in (
+            ("kokoro", "OVS_TTS_STREAM_MAX_WORKERS_KOKORO"),
+            ("matcha", "OVS_TTS_STREAM_MAX_WORKERS_MATCHA"),
+            ("qwen3", "OVS_TTS_STREAM_MAX_WORKERS_QWEN3"),
+            ("moss", "OVS_TTS_STREAM_MAX_WORKERS_MOSS"),
+        ):
+            if suffix in backend_name and os.environ.get(env_name):
+                max_workers_str = os.environ[env_name]
+                logger.info("TTS executor: backend=%s using %s=%s",
+                            backend_name, env_name, max_workers_str)
+                break
         _tts_stream_executor = ThreadPoolExecutor(
-            max_workers=int(os.environ.get("OVS_TTS_STREAM_MAX_WORKERS", "2")),
+            max_workers=int(max_workers_str),
             thread_name_prefix="tts-stream",
         )
     return _tts_stream_executor
