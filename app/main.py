@@ -2316,7 +2316,15 @@ async def v2v_stream(ws: WebSocket):
             if asr_be is None or not asr_be.is_ready() or not asr_be.has_capability(ASRCapability.STREAMING):
                 await ws.send_json({"type": v2v_proto.SERVER_ERROR,
                                     "error": "asr_language requested but no streaming ASR backend ready"})
-                await ws.close(code=1011); _v2v_release_early(); return
+                # Codex round-4 GAP A: ws.close() itself can raise (e.g. socket
+                # already torn down) — must not skip _v2v_release_early() or
+                # the session slot leaks. Wrap close, then release unconditionally.
+                try:
+                    await ws.close(code=1011)
+                except BaseException:
+                    pass
+                _v2v_release_early()
+                return
             # Defer stream creation until first speech-start (or first audio
             # without VAD) — the manager creates a fresh stream per utterance.
             from app.core.asr_session_manager import ASRSessionManager
@@ -2350,7 +2358,14 @@ async def v2v_stream(ws: WebSocket):
             if not tts_service.is_ready() or not tts_service.has_capability(TTSCapability.STREAMING):
                 await ws.send_json({"type": v2v_proto.SERVER_ERROR,
                                     "error": "tts_language requested but no streaming TTS backend ready"})
-                await ws.close(code=1011); _v2v_release_early(); return
+                # Codex round-4 GAP A: same guard as ASR backend-not-ready
+                # above — ws.close() raising must not skip slot release.
+                try:
+                    await ws.close(code=1011)
+                except BaseException:
+                    pass
+                _v2v_release_early()
+                return
             tts_be = tts_service.get_backend()
             low_latency_tts = os.environ.get("OVS_TTS_LOW_LATENCY_CHUNKING", "1").lower() not in (
                 "0",
