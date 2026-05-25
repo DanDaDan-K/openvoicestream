@@ -631,6 +631,38 @@ class _WorkerIO:
 class TRTEdgeLLMTTSBackend(TTSBackend):
     """TTS via TRT-Edge-LLM qwen3_tts_inference subprocess."""
 
+    @classmethod
+    def concurrency_capability(cls, profile=None):
+        from app.core.concurrency_capability import ConcurrencyCapability
+
+        # _WorkerIO multiplexes N in-flight requests with a single subprocess
+        # (one stdin lock + one stdout reader + per-request queues). See
+        # spec Section 1 table row "trt_edge_llm_tts" and
+        # app/backends/jetson/trt_edge_llm_tts.py:486 (_WorkerIO).
+        env_val = os.environ.get("OVS_TTS_WORKER_CONCURRENCY")
+        profile_val = None
+        if isinstance(profile, dict):
+            # accept both top-level and nested under tts_backend_config
+            profile_val = profile.get("tts_worker_concurrency")
+            if profile_val is None:
+                cfg = profile.get("tts_backend_config")
+                if isinstance(cfg, dict):
+                    profile_val = cfg.get("worker_concurrency")
+        try:
+            n = int(env_val) if env_val is not None else (
+                int(profile_val) if profile_val is not None else 1
+            )
+        except (TypeError, ValueError):
+            n = 1
+        n = max(1, n)
+        return ConcurrencyCapability(
+            supports_parallel=n > 1,
+            max_concurrent=n,
+            is_stateful=True,
+            requires_exclusive_device=True,
+            scaling_mode="single_runtime_multiplex",
+        )
+
     # PR5b: supports_hot_reload is mode-dependent. The default
     # edgellm_worker / official modes spawn a TRT subprocess that can be
     # terminated to fully release GPU memory (safe to hot-reload). The
