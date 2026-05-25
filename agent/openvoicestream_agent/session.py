@@ -123,6 +123,49 @@ class Session:
         self.history.append({"role": "assistant", "content": text})
         self._maybe_recover_from_echo()
 
+    def add_assistant_tool_calls(
+        self,
+        content: str | None,
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        """Append an assistant message that issues one or more tool_calls.
+
+        ``content`` may be ``None`` (pure tool-call turn) or a short
+        preamble ("好的，我查一下…"). We append ``content`` explicitly
+        rather than omitting it — OpenAI's wire format expects the key
+        to be present with an explicit ``null`` when there's no text."""
+        self.history.append({
+            "role": "assistant",
+            "content": content,
+            "tool_calls": list(tool_calls),
+        })
+
+    def add_tool_result(self, tool_call_id: str, content: str) -> None:
+        """Append a ``role:tool`` message linked to a prior tool_call."""
+        self.history.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+        })
+
+    def rollback_to(self, anchor: int) -> int:
+        """Truncate ``self.history`` back to ``anchor`` length.
+
+        Returns the number of messages dropped. Idempotent when
+        ``anchor >= len(history)``. Used on cancel / error / iteration
+        cap to keep history strict-valid for OpenAI (no orphan
+        ``assistant(tool_calls)`` without matching ``role:tool``
+        followup, no truncated tool round).
+        """
+        if anchor < 0:
+            anchor = 0
+        current = len(self.history)
+        if anchor >= current:
+            return 0
+        dropped = current - anchor
+        del self.history[anchor:]
+        return dropped
+
     # In-context learning latch: when the model (small / quantised) sees
     # a few short identical assistant replies in history, it pattern-matches
     # and keeps emitting that same canned response for every subsequent
@@ -144,8 +187,11 @@ class Session:
         """
         if len(self.history) < self.ECHO_WINDOW:
             return
+        # Skip tool-call-only assistant messages (content is None) — they
+        # carry no natural-language reply to echo on.
         assistant_turns = [
-            m for m in self.history if m.get("role") == "assistant"
+            m for m in self.history
+            if m.get("role") == "assistant" and m.get("content") is not None
         ]
         if len(assistant_turns) < self.ECHO_WINDOW:
             return
@@ -201,21 +247,44 @@ class Session:
         tok = _get_tokenizer(self.tokenizer_model)
         return _count_tokens(tok, text)
 
-    def _msg_tokens(self, msg: dict[str, str]) -> int:
+    def _msg_tokens(self, msg: dict[str, Any]) -> int:
         # Add a small per-message overhead (~4 tokens) to mirror
         # OpenAI's chat template framing — keeps the estimate honest
-        # without needing the full chat template here.
-        return self._count(msg.get("content", "")) + 4
+        # without needing the full chat template here. For tool-call
+        # carrying messages we also charge an estimate against the
+        # JSON-serialized tool_calls payload so a fat function-call
+        # turn isn't undercounted.
+        content = msg.get("content") or ""
+        tokens = self._count(content) if content else 0
+        tcs = msg.get("tool_calls")
+        if tcs:
+            try:
+                import json as _json
+                tokens += self._count(_json.dumps(tcs, ensure_ascii=False))
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return tokens + 4
 
     def _trim_to_budget(
-        self, messages: list[dict[str, str]], max_tokens: int
-    ) -> list[dict[str, str]]:
+        self, messages: list[dict[str, Any]], max_tokens: int
+    ) -> list[dict[str, Any]]:
         """Drop oldest *whole turns* until the prompt fits the budget.
+
+        A *turn* is a ``user`` message followed by all contiguous
+        non-user messages up to (but not including) the next ``user``.
+        With tools, a turn can contain multiple
+        ``assistant(tool_calls)`` + ``tool`` pairs followed by a final
+        ``assistant(text)``. The trim never splits a turn — either the
+        whole thing stays or the whole thing is dropped.
+
+        A trailing turn whose final message is not a normal
+        ``assistant(text)`` (e.g. user just sent a message and the
+        assistant hasn't replied, or an in-flight tool round) is pinned
+        to the tail and never dropped.
 
         Invariants:
           * messages[0] (system prompt) always kept.
-          * Latest user+assistant turn always kept.
-          * Turns are dropped as pairs (user+assistant) — never half.
+          * Latest turn always kept.
           * Budget is ``max_tokens * 0.75`` (25% margin for response).
         """
         budget = int(max_tokens * 0.75)
@@ -223,27 +292,40 @@ class Session:
             return messages
 
         system = messages[0]
-        rest = list(messages[1:])  # may be odd-length while a turn is in flight
+        rest = list(messages[1:])
         if not rest:
             return messages
 
-        # Detect a trailing single user message (turn in progress: assistant
-        # hasn't replied yet). Pin it to the tail; only the completed
-        # prefix is grouped into (user, assistant) turns.
-        trailing: list[dict[str, str]] = []
-        if len(rest) % 2 == 1:
-            trailing = [rest[-1]]
-            rest = rest[:-1]
-
-        # Group remaining history into (user, assistant) turns. Skip any
-        # leading orphan assistant defensively.
-        turns: list[list[dict[str, str]]] = []
+        # Group into turns: each starts at a `user` message and runs up to
+        # the next `user` (exclusive). Defensively skip leading non-user
+        # entries (orphan assistant/tool) — those couldn't form a valid
+        # turn anyway.
         i = 0
         while i < len(rest) and rest[i].get("role") != "user":
             i += 1
-        while i + 1 < len(rest):
-            turns.append([rest[i], rest[i + 1]])
-            i += 2
+        turns: list[list[dict[str, Any]]] = []
+        while i < len(rest):
+            start = i
+            i += 1  # skip the user message itself
+            while i < len(rest) and rest[i].get("role") != "user":
+                i += 1
+            turns.append(rest[start:i])
+
+        # A trailing "incomplete" turn = doesn't end in a normal
+        # assistant(text) message. Pin it; only completed turns are
+        # candidates for dropping.
+        trailing: list[dict[str, Any]] = []
+        if turns:
+            last = turns[-1]
+            last_msg = last[-1] if last else None
+            is_complete = (
+                last_msg is not None
+                and last_msg.get("role") == "assistant"
+                and last_msg.get("content") is not None
+                and not last_msg.get("tool_calls")
+            )
+            if not is_complete:
+                trailing = turns.pop()
 
         sys_tokens = self._msg_tokens(system)
         trailing_tokens = sum(self._msg_tokens(m) for m in trailing)
@@ -253,11 +335,15 @@ class Session:
         if total <= budget:
             return messages
 
-        # Drop from the front (oldest) until under budget OR only one
-        # turn remains — the latest completed turn must stay.
+        # Drop from the front (oldest) until under budget. Stop when:
+        #   * only one completed turn remains AND no trailing turn (must
+        #     keep at least one completed turn for context), or
+        #   * trailing turn exists AND no completed turns left (we can
+        #     drop everything completed; trailing is already pinned).
         kept_turns = list(turns)
         dropped = 0
-        while total > budget and len(kept_turns) > 1:
+        min_keep = 0 if trailing else 1
+        while total > budget and len(kept_turns) > min_keep:
             removed = kept_turns.pop(0)
             total -= sum(self._msg_tokens(m) for m in removed)
             dropped += 1
