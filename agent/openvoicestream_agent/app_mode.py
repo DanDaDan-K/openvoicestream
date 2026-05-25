@@ -143,9 +143,16 @@ class ModeContext:
             # Resolve tools_enabled + allowlist per-turn (mode override
             # > global default). Empty allowlist + tools_enabled=True is
             # equivalent to tools disabled (no tools schema sent to LLM).
-            tools_enabled = bool(self._resolve_mode_value("tools_enabled"))
-            if not tools_enabled:
+            #
+            # NOTE (codex review HIGH #1): distinguish "override not set"
+            # from "override explicitly set to False". Truthy fallback
+            # broke per-mode opt-out: a mode with tools_enabled=False
+            # would still inherit the global True. Use None sentinel.
+            override = self._resolve_mode_value("tools_enabled")
+            if override is None:
                 tools_enabled = bool(getattr(cfg, "tools_enabled", False))
+            else:
+                tools_enabled = bool(override)
             allowlist_raw = self._resolve_mode_value("tools_allowlist")
             if allowlist_raw is None:
                 allowlist_raw = getattr(cfg, "tools_default_allowlist", []) or []

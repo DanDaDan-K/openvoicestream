@@ -308,3 +308,21 @@ async def stream_with_tools(
             "tool round cancelled, rolled back %d messages", dropped
         )
         raise
+    except BaseException:
+        # Codex review (HIGH #2): any non-cancel exception escaping the
+        # dispatch loop after we've appended assistant(tool_calls) +
+        # tool result messages would pin an incomplete tool round in
+        # history. Tool timeout, JSON decode error on result, an
+        # upstream LLM error mid-continuation — all would leave the
+        # session strict-invalid (orphan assistant_tool_calls with no
+        # closing assistant text) and turn-aware trim would anchor
+        # forever on it. Roll back symmetrically with cancel, then
+        # re-raise so the caller's existing error path still fires.
+        dropped = session.rollback_to(rollback_anchor)
+        del messages[rollback_anchor + messages_offset:]
+        if dropped:
+            logger.info(
+                "tool round aborted by exception, rolled back %d messages",
+                dropped,
+            )
+        raise

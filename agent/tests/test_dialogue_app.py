@@ -362,6 +362,131 @@ async def test_app_mode_first_token_timeout_raises_llm_timeout_error():
 
 
 @pytest.mark.asyncio
+async def test_per_mode_tools_enabled_false_overrides_global_true():
+    """Codex review HIGH #1 regression: a mode declaring
+    ``tools_enabled=False`` must override a global ``tools_enabled=True``.
+    The earlier truthy-fallback logic treated False as "not set" and
+    inherited the global, leaking tools into modes that opted out."""
+    from openvoicestream_agent.llm.base import LLMEvent
+    from openvoicestream_agent.tools import ToolRegistry
+
+    cfg = Config(
+        system_prompt="SYS",
+        tools_enabled=True,
+        tools_default_allowlist=["time_now"],
+        mode_overrides={"chat": {"tools_enabled": False}},
+    )
+    slv = FakeSLV()
+    session = Session()
+    events = type("E", (), {"emit": lambda *a, **kw: None})()
+    reg = ToolRegistry()
+
+    @reg.tool()
+    def time_now() -> dict:  # pragma: no cover - should never fire
+        return {"now": "nope"}
+
+    class _FakeApp:
+        def __init__(self):
+            self.tool_registry = reg
+
+        async def broadcast(self, name, *args):
+            pass
+
+    fake_app = _FakeApp()
+    llm = _ScriptedEventsLLM([
+        [LLMEvent(kind="text", text="hi"), LLMEvent(kind="finish", finish_reason="stop")],
+    ])
+    ctx = ModeContext(
+        config=cfg, slv=slv, llm=llm, session=session, audio=None,
+        events=events, broadcast=fake_app.broadcast,
+    )
+    mgr = ModeManager(lambda: ctx)
+    mgr.register(ChatMode())
+    await mgr.start("chat")
+    await mgr.current.on_user_utterance(ctx, "say hi")
+
+    # No tools sent to LLM since the mode opted out.
+    assert llm.calls[0]["kwargs"].get("tools") is None
+
+
+@pytest.mark.asyncio
+async def test_exception_mid_tool_loop_rolls_back_history():
+    """Codex review HIGH #2 regression: an exception that escapes after
+    we've already committed assistant(tool_calls) + tool result messages
+    must roll the session.history back to the pre-turn anchor, otherwise
+    the orphan assistant_tool_calls pins forever and breaks subsequent
+    trim and prefix-cache invariants."""
+    from openvoicestream_agent.llm.base import LLMEvent
+    from openvoicestream_agent.tools import ToolRegistry
+
+    cfg = Config(
+        system_prompt="SYS",
+        tools_enabled=True,
+        tools_default_allowlist=["explode"],
+    )
+    slv = FakeSLV()
+    session = Session()
+    events = type("E", (), {"emit": lambda *a, **kw: None})()
+    reg = ToolRegistry()
+
+    @reg.tool()
+    def explode() -> dict:
+        return {"ok": True}
+
+    class _FakeApp:
+        def __init__(self):
+            self.tool_registry = reg
+
+        async def broadcast(self, name, *args):
+            pass
+
+    fake_app = _FakeApp()
+
+    # First iteration commits assistant(tool_calls) + tool result;
+    # second iteration's stream raises mid-flight. Rollback should
+    # remove everything added in this turn (the user msg too).
+    class _BoomLLM(_ScriptedEventsLLM):
+        async def stream_events(self, messages, **kw):  # type: ignore[override]
+            self.calls.append({"messages": list(messages), "kwargs": dict(kw)})
+            if self._i == 0:
+                self._i += 1
+                for ev in [
+                    LLMEvent(
+                        kind="tool_call_delta", tool_call_index=0,
+                        tool_call_id="c1", name="explode", arguments="{}",
+                    ),
+                    LLMEvent(kind="finish", finish_reason="tool_calls"),
+                ]:
+                    yield ev
+                return
+            raise RuntimeError("boom")
+
+    llm = _BoomLLM([])
+    ctx = ModeContext(
+        config=cfg, slv=slv, llm=llm, session=session, audio=None,
+        events=events, broadcast=fake_app.broadcast,
+    )
+    mgr = ModeManager(lambda: ctx)
+    mgr.register(ChatMode())
+    await mgr.start("chat")
+    with pytest.raises(RuntimeError, match="boom"):
+        await mgr.current.on_user_utterance(ctx, "do it")
+
+    # Rollback semantics: the runner's anchor was captured AFTER
+    # add_user(text), so user message stays; assistant_tool_calls
+    # and tool_result added inside the runner are dropped.
+    roles = [m["role"] for m in session.history]
+    assert "tool" not in roles, f"orphan tool message survived: {session.history}"
+    assistant_with_tc = [
+        m for m in session.history
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    ]
+    assert not assistant_with_tc, (
+        f"orphan assistant(tool_calls) survived: {session.history}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_multi_mode_app_class_is_back_compat_dialogue_shim():
     """The legacy `DialogueApp` import path now resolves to MultiModeApp."""
     from apps.multi_mode.app import MultiModeApp
