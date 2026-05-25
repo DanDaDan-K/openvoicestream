@@ -153,11 +153,11 @@ class TRTEdgeLLMASRBackend(ASRBackend):
         # keeps the C++ ``qwen3_asr_worker`` single-session contract
         # (the worker still rejects a second concurrent session).
         self._worker_lock = threading.Lock()
-        # Separate lock so restart_worker() can preempt a request thread
-        # that is blocked on stdout.readline() while holding _worker_lock.
-        # restart_worker() snapshots self._worker WITHOUT acquiring
-        # _worker_lock, then calls proc.kill() so the blocked readline
-        # returns and the request thread can release _worker_lock.
+        # Separate lock so restart_worker() can preempt a slow spawn
+        # without blocking on _worker_lock. Post-WorkerIO migration,
+        # request threads no longer hold _worker_lock during IO — they
+        # block on WorkerIO's per-request queue.get instead. The lock
+        # remaining here is purely the spawn gate.
         self._restart_lock = threading.Lock()
         self._worker_ready_meta: dict = {}
         self._worker_stderr_tail: deque[str] = deque(maxlen=80)
@@ -542,25 +542,30 @@ class TRTEdgeLLMASRBackend(ASRBackend):
     def restart_worker(self) -> None:
         """Forcibly kill the worker subprocess so the next request rebuilds it.
 
-        Crucially, this method MUST NOT acquire ``_worker_lock``. A request
-        thread may be blocked on ``stdout.readline()`` while holding
-        ``_worker_lock`` (typical "stuck cancel" scenario where the worker
-        is wedged and not emitting an ack). Acquiring the same lock here
-        would deadlock — the only way to release the readline is to kill
-        the subprocess so its stdout pipe EOFs.
+        Crucially, this method MUST NOT acquire ``_worker_lock``. After the
+        WorkerIO migration (capability-followups #5), ``_worker_lock`` only
+        gates ``_ensure_worker`` (spawn) — request threads now block on
+        ``WorkerIO``'s queue.get rather than on bare ``stdout.readline()``.
+        We still avoid taking ``_worker_lock`` here because a slow spawn
+        (cold start of qwen3_asr_worker is multiple seconds) holds it and
+        we want restart_worker() to be non-blocking from the caller's POV.
+
+        ``wio.close()`` (below) wakes any in-flight callers waiting on
+        ``WorkerIO``'s per-request queues with the ``_worker_exit``
+        sentinel; they surface ``WorkerExitError`` and unwind cleanly.
 
         Concurrent callers collapse to a single restart via
         ``_restart_lock`` (cheap, doesn't block on IO).
         """
-        # Snapshot WITHOUT _worker_lock — the lock holder is what we're
-        # trying to unstick. _restart_lock only serializes restarts.
+        # Snapshot WITHOUT _worker_lock — see docstring. _restart_lock
+        # only serializes concurrent restarts.
         with self._restart_lock:
             worker = self._worker
             if worker is None:
                 return
-            # Clear our reference first so other threads that finish their
-            # blocked readline (now EOF) see _worker = None and don't try
-            # to talk to a dead pipe.
+            # Clear our reference first so other threads that wake from
+            # WorkerIO's ``_worker_exit`` sentinel see ``_worker = None``
+            # and don't try to talk to a dead pipe.
             self._worker = None
             self._worker_ready_meta = {}
             # Drop the WorkerIO multiplexer first so its daemon reader
@@ -578,8 +583,10 @@ class TRTEdgeLLMASRBackend(ASRBackend):
                 if worker.poll() is None:
                     # Use kill() directly (SIGKILL on POSIX) so a wedged
                     # worker can't ignore SIGTERM. This force-closes its
-                    # stdout pipe, unblocking any readline holder of
-                    # _worker_lock so they release it on next op.
+                    # stdout pipe; the WorkerIO daemon reader thread sees
+                    # EOF and (defensively) wakes any remaining inflight
+                    # callers — though ``wio.close()`` above already did
+                    # so explicitly via the ``_worker_exit`` sentinel.
                     try:
                         worker.kill()
                     except Exception:
@@ -588,9 +595,9 @@ class TRTEdgeLLMASRBackend(ASRBackend):
                         worker.wait(timeout=1.0)
                     except subprocess.TimeoutExpired:
                         pass
-                # Close pipes after kill so the readline-blocked thread
-                # definitely unblocks. close() on a stdout already EOF'd
-                # is a no-op.
+                # Close pipes after kill for hygiene. WorkerIO's reader
+                # thread will exit on stdout EOF; this is purely defensive.
+                # close() on a stdout already EOF'd is a no-op.
                 for fh in (worker.stdin, worker.stdout, worker.stderr):
                     try:
                         if fh is not None and not fh.closed:
@@ -1274,6 +1281,19 @@ class _TRTEdgeLLMStreamingASRStream(ASRStream):
         # ``with ThreadPoolExecutor`` context manager here — its __exit__
         # waits for outstanding futures, so a wedged worker_request would
         # hold the cancel path forever, defeating the timeout.
+        #
+        # NB: post-WorkerIO migration (capability-followups #5), the
+        # leaked worker thread blocks inside ``wio.request()``'s q.get
+        # (60s timeout). When ``restart_worker()`` fires, ``wio.close()``
+        # wakes it with the ``_worker_exit`` sentinel and it exits with
+        # ``WorkerExitError`` — same end state, just unblocked sooner.
+        # We do NOT use ``wio.cancel(session_id)`` here: the C++
+        # ``qwen3_asr_worker`` (third_party/...qwen3_asr_worker.cpp ~L1395)
+        # has no cancel-event handler; a stray ``{"type":"cancel",...}``
+        # line lacking an ``event`` field would route to the legacy
+        # one-shot handler and corrupt session state. Cancel semantics
+        # remain unchanged from pre-migration ("end" event + Python-side
+        # timeout) per the spec zero-behavior-change requirement.
         import concurrent.futures as _cf
         pool = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr-cancel")
         try:
