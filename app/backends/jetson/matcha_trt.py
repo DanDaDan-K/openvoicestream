@@ -12,6 +12,7 @@ import ctypes
 import io
 import logging
 import os
+import queue
 import struct
 import time
 import numpy as np
@@ -168,6 +169,49 @@ def _istft(mag: np.ndarray, x: np.ndarray, y: np.ndarray, length: Optional[int] 
     return audio
 
 
+class _MatchaCtxSlot:
+    """One pre-allocated set of TRT contexts + persistent CudaMemoryPool.
+
+    A pool of K slots is built at preload() time. Each synthesize() acquires
+    one slot, runs the inference, then releases it back. This amortizes the
+    expensive create_execution_context() call (~900ms each on Jetson Orin
+    Nano) across the service lifetime instead of paying it per request.
+
+    Concurrency safety: each slot owns its own CUDA stream + execution
+    contexts, and the queue-based acquire/release guarantees no two threads
+    share a slot at the same time. Engines (weights) remain shared and
+    read-only across slots.
+    """
+
+    def __init__(self, vocos_engine, split_estimator_engines):
+        self.pool = CudaMemoryPool()  # persistent stream
+        self.vocos_ctx = (
+            vocos_engine.create_execution_context() if vocos_engine is not None else None
+        )
+        self.split_estimator_ctxs = [
+            eng.create_execution_context() for eng in split_estimator_engines
+        ]
+
+    def reset_per_request(self):
+        """Release device allocations after each synthesize but keep stream + ctxs."""
+        try:
+            self.pool.free_all()
+        except Exception:
+            logger.exception("MatchaCtxSlot.reset_per_request: pool.free_all raised")
+
+    def destroy(self):
+        try:
+            self.pool.synchronize()
+        except Exception:
+            pass
+        try:
+            self.pool.destroy()
+        except Exception:
+            pass
+        self.vocos_ctx = None
+        self.split_estimator_ctxs = []
+
+
 class MatchaTRTBackend(TTSBackend):
     """Matcha TTS backend.
 
@@ -201,6 +245,15 @@ class MatchaTRTBackend(TTSBackend):
         self._lexicon = None
         self._token_to_id = None
         self._ready = False
+        # Pre-allocated context pool (built in preload()). N slots, each owning
+        # one CUDA stream + per-engine execution contexts. synthesize() borrows
+        # one slot from the queue, returns it in a finally block. Amortizes the
+        # ~900ms-per-context create_execution_context() cost on Jetson Orin
+        # Nano across the service lifetime — see commit msg / docs for the
+        # latency regression that drove this refactor.
+        self._ctx_pool: "queue.Queue[_MatchaCtxSlot]" = queue.Queue()
+        self._slots: list[_MatchaCtxSlot] = []
+        self._pool_size: int = 0
         # Snapshot artifact paths from the *current* os.environ. BackendManager
         # rebuilds this backend after every apply_profile(), so __init__ always
         # sees the latest profile-applied env. See trt_edge_llm_tts.py and
@@ -261,6 +314,7 @@ class MatchaTRTBackend(TTSBackend):
             and not self._split_estimator_engines
             and self._vocos_engine is None
             and self._cuda_pool is None
+            and not self._slots
         ):
             return
 
@@ -272,7 +326,24 @@ class MatchaTRTBackend(TTSBackend):
                 except Exception:
                     logger.exception("Matcha unload: pool.synchronize failed; continuing")
 
-            # 2. Execution contexts before engines
+            # 2. Execution contexts before engines.
+            # 2a. Drain per-slot ctxs + stream + remaining device buffers.
+            while True:
+                try:
+                    self._ctx_pool.get_nowait()
+                except queue.Empty:
+                    break
+            for i, slot in enumerate(self._slots):
+                try:
+                    slot.destroy()
+                except Exception:
+                    logger.exception("Matcha unload: slot[%d] destroy raised", i)
+            self._slots = []
+            self._pool_size = 0
+
+            # 2b. Back-compat: legacy shared ctx list (always empty after
+            # pre-allocated pool refactor) is still cleared so tests that
+            # manually populate it for unload-ordering assertions still pass.
             for i, ctx in enumerate(self._split_estimator_ctxs):
                 try:
                     del ctx
@@ -329,8 +400,32 @@ class MatchaTRTBackend(TTSBackend):
         self._load_lexicon()
         self._load_acoustic_ort()
         self._load_engines()
+        self._build_ctx_pool()
         self._warmup()
         self._ready = True
+
+    def _build_ctx_pool(self) -> None:
+        """Pre-allocate K context slots and seed the queue.
+
+        K = OVS_TTS_STREAM_MAX_WORKERS (default 2). K=1 still goes through the
+        queue path for code-path uniformity. Logs the slot count so deploy
+        verification can grep for it.
+        """
+        try:
+            k = int(os.environ.get("OVS_TTS_STREAM_MAX_WORKERS", "2"))
+        except ValueError:
+            k = 2
+        k = max(1, k)
+        self._pool_size = k
+        self._slots = []
+        t0 = time.time()
+        for _ in range(k):
+            slot = _MatchaCtxSlot(self._vocos_engine, self._split_estimator_engines)
+            self._slots.append(slot)
+            self._ctx_pool.put(slot)
+        logger.info(
+            "Matcha ctx pool: %d slots pre-allocated (%.2fs)", k, time.time() - t0
+        )
 
     def _load_acoustic_ort(self):
         """Load acoustic frontend.
@@ -610,15 +705,32 @@ class MatchaTRTBackend(TTSBackend):
             speed = 1.0
         detected_language = detect_zh_en(text, language)
 
-        # Per-call concurrency rework (N>=2 safety):
-        #   * fresh CudaMemoryPool (own stream + allocations) per request
-        #   * fresh execution context per request for each shared engine
-        # Engines (weights) stay shared and read-only. Cleanup in finally.
-        pool = CudaMemoryPool()
-        vocos_ctx = self._vocos_engine.create_execution_context()
-        split_estimator_ctxs = [
-            eng.create_execution_context() for eng in self._split_estimator_engines
-        ]
+        # Borrow a pre-allocated context slot. Blocks if all slots are in
+        # use. Each slot owns its own CUDA stream + execution contexts so
+        # concurrent callers never share TRT IExecutionContext (not
+        # thread-safe). free_all() between requests releases device buffers
+        # while keeping the stream + ctxs warm.
+        #
+        # No-slot path: when called from a unit test that builds the backend
+        # without preload() (e.g. _pad_mel_axis tests), _slots is empty. We
+        # fall back to a one-off per-call set in that case so tests don't
+        # block on an empty queue.
+        if self._slots:
+            slot = self._ctx_pool.get()
+            pool = slot.pool
+            vocos_ctx = slot.vocos_ctx
+            split_estimator_ctxs = slot.split_estimator_ctxs
+        else:
+            slot = None
+            pool = CudaMemoryPool()
+            vocos_ctx = (
+                self._vocos_engine.create_execution_context()
+                if self._vocos_engine is not None else None
+            )
+            split_estimator_ctxs = [
+                eng.create_execution_context()
+                for eng in self._split_estimator_engines
+            ]
 
         try:
             t_start = time.time()
@@ -724,21 +836,18 @@ class MatchaTRTBackend(TTSBackend):
             }
             return wav_bytes, meta
         finally:
-            try:
-                pool.free_all()
-            except Exception:
-                logger.exception("matcha synth: pool.free_all failed")
-            try:
-                pool.destroy()
-            except Exception:
-                logger.exception("matcha synth: pool.destroy failed")
-            try:
-                del vocos_ctx
-            except Exception:
-                pass
-            for c in split_estimator_ctxs:
+            if slot is not None:
                 try:
-                    del c
+                    slot.reset_per_request()
+                finally:
+                    self._ctx_pool.put(slot)
+            else:
+                try:
+                    pool.free_all()
+                except Exception:
+                    pass
+                try:
+                    pool.destroy()
                 except Exception:
                     pass
 
