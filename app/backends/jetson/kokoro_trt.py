@@ -307,6 +307,17 @@ class _KokoroCtxSlot:
             raise ValueError(f"Unknown kokoro runtime_mode: {runtime_mode}")
 
     def reset_per_request(self):
+        # Defensive sync: device-resident chains in _run_split_generator skip
+        # per-stage pool.synchronize() to keep kernels back-to-back on the
+        # CUDA stream. On the success path the final host-output stage already
+        # syncs, so this is a no-op (GPU is idle). On exception paths, in-flight
+        # kernels may still be writing arena buffers; we must wait before
+        # free_all() returns those bytes to the arena for reuse by the next
+        # request — otherwise the next request can see stale/corrupt writes.
+        try:
+            self.pool.synchronize()
+        except Exception:
+            logger.exception("KokoroCtxSlot.reset_per_request: pool.synchronize raised; continuing free_all")
         try:
             self.pool.free_all()
         except Exception:
@@ -1327,6 +1338,13 @@ class KokoroTRTBackend(TTSBackend):
         if source_is_trt:
             # Pure TRT chain: decoder → generator (with style + source-Div_4
             # rebound on generator). source's Div_4 output overrides decoder's.
+            # Device-resident chain: decoder → source → generator all run on
+            # the same CUDA stream. CUDA stream ordering guarantees the next
+            # ctx.execute_async_v3() waits for prior kernels, so we skip the
+            # per-stage pool.synchronize() that would otherwise block the CPU
+            # waiting for the GPU. The final generator stage (host return)
+            # forces a sync before copy_dtoh, and reset_per_request() also
+            # sync's defensively before free_all() on exception paths.
             decoder_dev = self._run_split_bucket_engine(
                 bucket_engines, bucket_ctxs, "decoder", {
                     "/encoder/MatMul_1_output_0": stage["/encoder/MatMul_1_output_0"],
@@ -1335,13 +1353,13 @@ class KokoroTRTBackend(TTSBackend):
                     "/decoder/decoder/Unsqueeze_output_0": stage["/decoder/decoder/Unsqueeze_output_0"],
                     "style": stage["style"],
                 },
-                pool=pool, return_device=True,
+                pool=pool, return_device=True, sync=False,
             )
             source_dev = self._run_split_bucket_engine(
                 bucket_engines, bucket_ctxs, "source", {
                     "/decoder/decoder/Unsqueeze_output_0": stage["/decoder/decoder/Unsqueeze_output_0"],
                 },
-                pool=pool, return_device=True,
+                pool=pool, return_device=True, sync=False,
             )
             # Merge — source's outputs override decoder's where keys collide
             # (specifically Div_4 in the kokoro split topology).
@@ -1410,11 +1428,13 @@ class KokoroTRTBackend(TTSBackend):
         ctx,
         device_inputs: dict[str, "_DeviceTensor"] | None = None,
         return_device: bool = False,
+        sync: bool = True,
     ):
         engine = self._split_engines[name]
         return self._run_trt_context(
             engine, ctx, inputs, pool=pool,
             device_inputs=device_inputs, return_device=return_device,
+            sync=sync,
             meta=self._trt_meta.get(f"split_{name}"),
         )
 
@@ -1428,6 +1448,7 @@ class KokoroTRTBackend(TTSBackend):
         pool: "CudaMemoryPool",
         device_inputs: dict[str, "_DeviceTensor"] | None = None,
         return_device: bool = False,
+        sync: bool = True,
     ):
         # Identify bucket family (long vs base) by identity to pick the right
         # cached engine meta. _split_long_engines and _split_engines are
@@ -1439,6 +1460,7 @@ class KokoroTRTBackend(TTSBackend):
         return self._run_trt_context(
             engines[name], ctxs[name], inputs, pool=pool,
             device_inputs=device_inputs, return_device=return_device,
+            sync=sync,
             meta=self._trt_meta.get(meta_key),
         )
 
@@ -1451,6 +1473,7 @@ class KokoroTRTBackend(TTSBackend):
         pool: "CudaMemoryPool",
         device_inputs: dict[str, "_DeviceTensor"] | None = None,
         return_device: bool = False,
+        sync: bool = True,
         meta: "_TrtEngineMeta | None" = None,
     ):
         """Run a TRT context with optional device-resident I/O.
@@ -1540,7 +1563,13 @@ class KokoroTRTBackend(TTSBackend):
         ok = ctx.execute_async_v3(pool.stream_handle())
         if not ok:
             raise RuntimeError("Kokoro hybrid prefix TRT execute_async_v3 returned False")
-        pool.synchronize()
+        # When sync=False AND return_device=True, skip the host-blocking
+        # synchronize: subsequent TRT kernels enqueued on the same CUDA stream
+        # serialize automatically, so device-resident chain hops don't need a
+        # CPU round-trip. When we're returning host buffers (return_device
+        # False) we MUST sync before copy_dtoh (regardless of sync flag).
+        if sync or not return_device:
+            pool.synchronize()
 
         if return_device:
             return device_output_handles
