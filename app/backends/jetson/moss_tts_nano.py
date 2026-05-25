@@ -349,8 +349,11 @@ class MossTtsNanoBackend(TTSBackend):
         chunk_frames = int(kwargs.get("chunk_frames", 8))
         if chunk_frames <= 0:
             raise ValueError(f"chunk_frames must be positive, got {chunk_frames}")
+        # Emit both fields: ``request_id`` (spec-preferred, framework §1) and
+        # ``id`` (legacy worker protocol). N=2 worker reads request_id first.
         request: dict[str, Any] = {
             "id": request_id,
+            "request_id": request_id,
             "text": text,
             "stream": bool(stream),
             "chunk_transport": "base64",
@@ -445,7 +448,12 @@ class MossTtsNanoBackend(TTSBackend):
         if kind == "worker_ready":
             self._control_queue.put(event)
             return
-        request_id = event.get("id")
+        # N=2 concurrency: worker emits both ``request_id`` (spec-preferred)
+        # and ``id`` (legacy). Demux on request_id first so stale ORT-path
+        # binaries that only emit ``id`` keep working.
+        request_id = event.get("request_id")
+        if not (isinstance(request_id, str) and request_id):
+            request_id = event.get("id")
         if isinstance(request_id, str) and request_id:
             with self._queues_lock:
                 request_queue = self._request_queues.get(request_id)

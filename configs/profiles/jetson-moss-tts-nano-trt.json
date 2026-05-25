@@ -5,7 +5,7 @@
   "tts_backend": "jetson.moss_tts_nano",
   "tts_model_id": "moss-tts-nano-v1",
   "execution_policy": {
-    "mode": "serialized",
+    "mode": "concurrent",
     "shared_resource": "gpu"
   },
   "env": {
@@ -18,14 +18,14 @@
     "MOSS_ENGINE_DIR": "/opt/models/moss-tts-nano/engines",
     "MOSS_TOKENIZER": "/opt/models/moss-tts-nano/engines/tokenizer.model",
     "MOSS_CODEC_ONNX_DIR": "/opt/models/moss-tts-nano/codec_onnx",
-    "MOSS_MAX_SLOTS": "1",
+    "MOSS_MAX_SLOTS": "2",
     "MOSS_MAX_SEQ_LEN": "1024",
 
     "OVS_TTS_SAMPLE_RATE": "48000",
     "OVS_TTS_CHANNELS": "2",
     "OVS_TTS_SEED": "42"
   },
-  "moss_max_slots": 1,
+  "moss_max_slots": 2,
   "moss_max_seq_len": 1024,
   "moss_sample_rate": 48000,
   "moss_channels": 2,
