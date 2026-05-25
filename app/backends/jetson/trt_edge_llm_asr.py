@@ -27,6 +27,7 @@ from typing import Optional
 import numpy as np
 
 from app.core.asr_backend import ASRBackend, ASRCapability, ASRStream, TranscriptionResult
+from app.core.worker_io import WorkerIO, WorkerExitError as _WIOExitError
 
 from app.backends.jetson.trt_edge_llm_ipc import (
     ASR_BINARY,
@@ -144,6 +145,13 @@ class TRTEdgeLLMASRBackend(ASRBackend):
         self._config = self._load_config()
         self._ready = False
         self._worker: Optional[subprocess.Popen] = None
+        # ``_worker_lock`` guards the lifecycle gate (``_ensure_worker``)
+        # only — it no longer wraps the request stdin/stdout cycle.
+        # Per the WorkerIO migration (capability-followups #5), request
+        # demux is delegated to ``self._wio`` (single ``_stdin_lock`` +
+        # daemon reader thread). This mirrors the TTS backend shape and
+        # keeps the C++ ``qwen3_asr_worker`` single-session contract
+        # (the worker still rejects a second concurrent session).
         self._worker_lock = threading.Lock()
         # Separate lock so restart_worker() can preempt a request thread
         # that is blocked on stdout.readline() while holding _worker_lock.
@@ -153,6 +161,13 @@ class TRTEdgeLLMASRBackend(ASRBackend):
         self._restart_lock = threading.Lock()
         self._worker_ready_meta: dict = {}
         self._worker_stderr_tail: deque[str] = deque(maxlen=80)
+        # WorkerIO multiplexer — bound to ``self._worker`` on each spawn.
+        # Concurrency=1 to match the C++ worker's single-session limit
+        # (qwen3_asr_worker.cpp ~line 78 hard-rejects a second session).
+        # The WorkerIO semaphore is what serializes concurrent callers
+        # in the Python layer; we do NOT broaden this without first
+        # making the C++ worker multi-session.
+        self._wio: Optional[WorkerIO] = None
 
     def _load_config(self) -> dict:
         manifest: dict = {}
@@ -454,6 +469,12 @@ class TRTEdgeLLMASRBackend(ASRBackend):
         if ready.get("event") != "ready":
             raise RuntimeError(f"ASR worker did not become ready: {ready}")
         self._worker_ready_meta = ready
+        # Bind a fresh WorkerIO multiplexer to the new subprocess. concurrency=1
+        # matches the C++ worker's single-session limit (see __init__ note).
+        # NB: ``_ensure_worker`` reads the worker's initial ``ready`` line
+        # itself (above) BEFORE handing stdout to the WorkerIO reader thread,
+        # so the reader thread only sees subsequent per-request events.
+        self._wio = WorkerIO(self._worker, concurrency=1)
 
     def _worker_request(self, input_data: dict) -> dict:
         req_event = input_data.get("event") if isinstance(input_data, dict) else None
@@ -506,6 +527,17 @@ class TRTEdgeLLMASRBackend(ASRBackend):
             # to talk to a dead pipe.
             self._worker = None
             self._worker_ready_meta = {}
+            # Drop the WorkerIO multiplexer first so its daemon reader
+            # thread sees EOF cleanly when the subprocess is killed, and
+            # any in-flight callers wake with the ``_worker_exit`` sentinel
+            # raising ``WorkerExitError`` rather than hanging on q.get.
+            wio = self._wio
+            self._wio = None
+            if wio is not None:
+                try:
+                    wio.close()
+                except Exception:
+                    logger.debug("WorkerIO.close() during restart raised", exc_info=True)
             try:
                 if worker.poll() is None:
                     # Use kill() directly (SIGKILL on POSIX) so a wedged
