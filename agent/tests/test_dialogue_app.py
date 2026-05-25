@@ -289,6 +289,130 @@ async def test_tools_enabled_one_tool_round_trip_via_app_mode():
 
 
 @pytest.mark.asyncio
+async def test_barge_in_during_tool_execution_rolls_back_history():
+    """Barge-in (= ``_llm_turn_task.cancel()``) landing while a tool is
+    mid-execution must:
+
+      1. raise ``CancelledError`` out of ``run_default_dialogue_turn``;
+      2. leave ``session.history`` with ONLY the pre-turn anchor + the
+         user message — no orphan ``assistant(tool_calls)`` and no
+         ``tool`` result;
+      3. fire ``on_tool_started`` (tool was visibly initiated) but NOT
+         ``on_tool_completed`` (the tool never finished cleanly);
+      4. not call ``slv.flush_tts`` (no audible turn boundary).
+
+    Mirrors ``BaseApp._interrupt_current_turn_for_barge_in`` semantics
+    at the dialogue-turn level — the higher-level stop_playback +
+    slv.abort live on BaseApp and are out of scope here.
+    """
+    from openvoicestream_agent.llm.base import LLMEvent
+    from openvoicestream_agent.tools import ToolRegistry
+
+    cfg = Config(
+        system_prompt="SYS",
+        tools_enabled=True,
+        tools_default_allowlist=["slow_lookup"],
+    )
+    slv = FakeSLV()
+    audio = FakeAudio()
+    session = Session()
+    events_emitted: list[tuple[str, Any]] = []
+    events = type(
+        "E", (), {"emit": lambda self, n, p=None: events_emitted.append((n, p))}
+    )()
+    bcast_calls: list[tuple[str, tuple]] = []
+
+    reg = ToolRegistry()
+    tool_started = asyncio.Event()
+    tool_finished = asyncio.Event()
+
+    @reg.tool(timeout_s=30.0)
+    async def slow_lookup() -> dict:
+        tool_started.set()
+        try:
+            # Sleep longer than the test will tolerate. The point is that
+            # cancel must land while we're parked here.
+            await asyncio.sleep(30)
+        finally:
+            tool_finished.set()
+        return {"value": "should-never-be-recorded"}
+
+    class _FakeApp:
+        def __init__(self):
+            self.tool_registry = reg
+
+        async def broadcast(self, name, *args):
+            bcast_calls.append((name, args))
+
+    fake_app = _FakeApp()
+    llm = _ScriptedEventsLLM([
+        # iter 0: a tiny preamble (so we can observe TTS half-sentence
+        # behaviour) + a tool call. The runner will commit
+        # assistant(tool_calls) and then dispatch slow_lookup, which
+        # parks. Iter 1 is never reached.
+        [
+            LLMEvent(kind="text", text="稍等，"),
+            LLMEvent(
+                kind="tool_call_delta", tool_call_index=0,
+                tool_call_id="c1", name="slow_lookup", arguments="{}",
+            ),
+            LLMEvent(kind="finish", finish_reason="tool_calls"),
+        ],
+        # Never consumed.
+        [LLMEvent(kind="text", text="UNREACHED"),
+         LLMEvent(kind="finish", finish_reason="stop")],
+    ])
+
+    ctx = ModeContext(
+        config=cfg, slv=slv, llm=llm, session=session, audio=audio,
+        events=events, broadcast=fake_app.broadcast,
+    )
+    mgr = ModeManager(lambda: ctx)
+    mgr.register(ChatMode())
+    await mgr.start("chat")
+
+    task = asyncio.create_task(mgr.current.on_user_utterance(ctx, "查一下"))
+
+    # Wait until the tool has actually entered its parked sleep —
+    # otherwise we'd race with iter-0 stream completion and might cancel
+    # before the tool round was committed (a different code path).
+    await asyncio.wait_for(tool_started.wait(), timeout=2.0)
+
+    # The preamble token already streamed to TTS by this point.
+    assert slv.text_frames == ["稍等，"]
+
+    # This is what BaseApp._interrupt_current_turn_for_barge_in does
+    # to the LLM turn task: cancel + await.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Tool was parked → CancelledError unwound its sleep; finally fired.
+    assert tool_finished.is_set()
+
+    # ── invariants ────────────────────────────────────────────────
+    # (a) history holds ONLY the user message — assistant(tool_calls)
+    #     and any tool result were rolled back by the runner.
+    assert session.history == [{"role": "user", "content": "查一下"}], (
+        f"history not cleanly rolled back: {session.history}"
+    )
+
+    # (b) on_tool_started fired (tool visibly initiated); but no
+    #     on_tool_completed (interrupted before completion).
+    bnames = [n for n, _ in bcast_calls]
+    assert "on_tool_call_started" in bnames
+    assert "on_tool_call_completed" not in bnames, (
+        f"on_tool_call_completed must NOT fire on barge-in: {bnames}"
+    )
+
+    # (c) No TTS turn boundary. abort() lives on BaseApp; we only
+    #     assert flush did not fire here.
+    assert slv.flushed == 0, (
+        f"flush_tts must not fire on cancel; got {slv.flushed}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_tools_disabled_default_path_unchanged():
     """Regression: tools_enabled=False (default) must produce the exact
     same observable behaviour as before batch 1 — every text token

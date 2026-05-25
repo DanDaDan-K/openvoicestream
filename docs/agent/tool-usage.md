@@ -175,6 +175,12 @@ speak as a filler later.
   the in-flight `assistant(tool_calls)` + `tool` messages from
   `Session.history` so the next turn sees a clean shape.
 
+  **Tool authors MUST NOT swallow `asyncio.CancelledError`.** If a tool
+  catches it (e.g. via `except BaseException` or a bare `except:`), the
+  barge-in latency extends to the tool's full runtime — the runner can
+  only finish rolling back once the tool actually returns. Use
+  `try/finally` for cleanup; let `CancelledError` propagate.
+
 ## Complete example
 
 `config.yaml`:
