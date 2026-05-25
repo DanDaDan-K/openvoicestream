@@ -116,7 +116,23 @@ class WorkerIO:
         loop = asyncio.get_running_loop()
         # Run the blocking semaphore acquire off the loop. The semaphore is
         # a back-pressure gate; it can block when concurrency is saturated.
-        await loop.run_in_executor(None, self._sem.acquire)
+        # If the awaiting task is cancelled while the executor thread is
+        # still blocked in self._sem.acquire(), the thread cannot be
+        # interrupted — it may eventually grab the token after we're gone.
+        # Attach a done-callback so the late-acquired token is released
+        # back to the pool instead of leaking the slot.
+        _fut = loop.run_in_executor(None, self._sem.acquire)
+        try:
+            await _fut
+        except BaseException:
+            def _release_if_late_acquire(f: "asyncio.Future") -> None:
+                try:
+                    if f.result() is True:
+                        self._sem.release()
+                except Exception:
+                    pass
+            _fut.add_done_callback(_release_if_late_acquire)
+            raise
 
         q: "queue.Queue" = queue.Queue()
         with self._inflight_lock:

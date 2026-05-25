@@ -251,6 +251,60 @@ async def test_async_two_concurrent_streams_aclose_simultaneously():
 
 
 @asynctest
+async def test_async_cancel_during_saturated_acquire_does_not_leak_semaphore():
+    """Cancellation during sem acquire (saturated) must not leak the slot.
+
+    Regression: prior code put `await loop.run_in_executor(None, sem.acquire)`
+    outside the try/finally. When N slots are saturated and a new
+    send_request awaits acquire, then is cancelled, the executor thread
+    cannot be interrupted and may eventually grab the token from a
+    coroutine that no longer exists -> permanent slot leak.
+
+    Per Codex P1 final-review MUST_FIX. Fix attaches a done-callback to
+    the acquire future that releases the late-acquired token.
+    """
+    proc = _FakeProc()
+    wio = WorkerIO(proc, concurrency=1)
+
+    # Hold the only slot with a long-running first request.
+    def _feeder_long():
+        time.sleep(0.5)
+        proc.stdout.feed(json.dumps({"id": "rid-hold", "event": "done", "ok": True}))
+
+    threading.Thread(target=_feeder_long, daemon=True).start()
+    gen1 = wio.send_request("rid-hold", {"id": "rid-hold"})
+    task1 = asyncio.create_task(gen1.__anext__())
+    await asyncio.sleep(0.05)  # let it acquire + register inflight
+    assert wio._sem._value == 0, "slot 1 should be taken"
+
+    # Second request blocks on acquire (saturated).
+    gen2 = wio.send_request("rid-wait", {"id": "rid-wait"})
+    task2 = asyncio.create_task(gen2.__anext__())
+    await asyncio.sleep(0.05)  # let it start waiting on acquire
+    task2.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task2
+
+    # Drain task1 to release its slot.
+    await asyncio.wait_for(task1, timeout=2.0)
+    try:
+        await gen1.__anext__()
+    except StopAsyncIteration:
+        pass
+
+    # Now wait for the executor thread to actually wake up + late-release.
+    # The blocked acquire() call can only return once a token becomes
+    # available, which is the moment task1's finally releases it.
+    deadline = time.time() + 2.0
+    while wio._sem._value < 1 and time.time() < deadline:
+        await asyncio.sleep(0.05)
+
+    assert wio._sem._value == 1, (
+        f"semaphore leaked after cancel-during-acquire (sem={wio._sem._value})"
+    )
+
+
+@asynctest
 async def test_async_send_request_worker_exit():
     proc = _FakeProc()
     wio = WorkerIO(proc, concurrency=1)
