@@ -508,7 +508,11 @@ async def startup():
     # execution_policy block. Default to concurrent (no lock) when the
     # profile does not declare one — matches the previous behaviour.
     from app.core.coordinator import init_coordinator, get_coordinator
-    init_coordinator(current_profile().get("execution_policy", {"mode": "concurrent"}))
+    _prof = current_profile()
+    init_coordinator(
+        _prof.get("execution_policy", {"mode": "concurrent"}),
+        profile=_prof,
+    )
 
     # Week 2: launch the GPU/NPU watchdog background task. Failures here
     # never block startup — the task is purely diagnostic.
