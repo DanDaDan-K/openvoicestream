@@ -882,12 +882,12 @@ async def health():
         "tts_capabilities": [c.value for c in tts_service.capabilities()] if tts_service.is_ready() else [],
     }
 
-    # Part D disconnect-watcher instrumentation: expose _WorkerIO cancel
+    # Part D disconnect-watcher instrumentation: expose WorkerIO cancel
     # counter so stress harness can read it. Temporary; remove once stable.
     try:
-        from app.backends.jetson.trt_edge_llm_tts import _WorkerIO
-        with _WorkerIO._cancel_count_lock:
-            result["tts_worker_cancel_count"] = _WorkerIO._cancel_count
+        from app.core.worker_io import WorkerIO
+        with WorkerIO._cancel_count_lock:
+            result["tts_worker_cancel_count"] = WorkerIO._cancel_count
     except Exception:
         pass
 
