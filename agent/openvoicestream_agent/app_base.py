@@ -54,6 +54,11 @@ from .llm import EdgeLLMBackend, LLMBackend, LLMStreamError, OpenAICompatBackend
 from .plugins.llm_availability import LLMUnavailable
 from .session import Session
 from .state import ConvState
+# Importing .tools also imports .tools.builtin which @-decorates the
+# built-in tools onto default_registry as an import side-effect. Cheap
+# (no IO, no model load) so we pay it unconditionally — actual use is
+# gated by config.tools_enabled per turn in app_mode.
+from .tools import default_registry as _default_tool_registry
 from .translator import CTranslate2Translator, NoopTranslator, TranslatorBackend
 from .vad import create_vad
 from .slv_client import (
@@ -159,6 +164,9 @@ class BaseApp:
         )
         self.llm: LLMBackend = _build_llm(config)
         self.translator: TranslatorBackend = _build_translator(config)
+        # Tool registry — single global default. Tests may construct
+        # dedicated `ToolRegistry()` instances and inject via mode_ctx.
+        self.tool_registry = _default_tool_registry
         self.session = Session(
             locale=str(config.slv_config.get("asr_language", "zh")).lower()[:2],
             max_input_tokens=getattr(config, "session_max_input_tokens", None),

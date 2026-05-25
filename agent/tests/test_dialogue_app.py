@@ -161,6 +161,206 @@ async def test_midstream_llm_error_aborts_partial_tts_without_history_pollution(
     assert session.history == [{"role": "user", "content": "hi"}]
 
 
+# ── Batch 2: tool-runner integration into run_default_dialogue_turn ──
+
+
+class _ScriptedEventsLLM(LLMBackend):
+    """LLM that yields a scripted list of LLMEvent objects per call,
+    via the richer ``stream_events`` channel. ``stream`` is left as the
+    base-class default (text-only filter) so a smoke test through the
+    new path is realistic."""
+
+    def __init__(self, scripts):
+        from openvoicestream_agent.llm.base import LLMEvent  # noqa
+        self._scripts = list(scripts)
+        self.calls: list[dict[str, Any]] = []
+        self._i = 0
+
+    async def stream(self, messages, **kw):  # pragma: no cover - unused
+        if False:
+            yield ""
+        raise RuntimeError("stream() should not be called")
+
+    async def stream_events(self, messages, **kw):  # type: ignore[override]
+        self.calls.append({"messages": list(messages), "kwargs": dict(kw)})
+        if self._i >= len(self._scripts):
+            raise RuntimeError("script exhausted")
+        evs = self._scripts[self._i]
+        self._i += 1
+        for ev in evs:
+            yield ev
+
+
+@pytest.mark.asyncio
+async def test_tools_enabled_one_tool_round_trip_via_app_mode():
+    """End-to-end via ModeContext.run_default_dialogue_turn with tools
+    enabled: the assistant emits text → tool_call → final text. Each
+    text token still streams to SLV; dashboard events fire."""
+    from openvoicestream_agent.llm.base import LLMEvent
+    from openvoicestream_agent.tools import ToolRegistry
+
+    cfg = Config(
+        system_prompt="SYS",
+        tools_enabled=True,
+        tools_default_allowlist=["time_now"],
+    )
+    slv = FakeSLV()
+    session = Session()
+    events_emitted: list[tuple[str, Any]] = []
+    events = type(
+        "E", (), {"emit": lambda self, n, p=None: events_emitted.append((n, p))}
+    )()
+
+    # Per-test registry so we don't depend on global builtins.
+    reg = ToolRegistry()
+
+    @reg.tool()
+    def time_now() -> dict:
+        return {"now": "2026-01-01T12:00:00"}
+
+    llm = _ScriptedEventsLLM([
+        # iter 0: small preamble + a tool call
+        [
+            LLMEvent(kind="text", text="好的，"),
+            LLMEvent(
+                kind="tool_call_delta",
+                tool_call_index=0,
+                tool_call_id="c1",
+                name="time_now",
+                arguments="{}",
+            ),
+            LLMEvent(kind="finish", finish_reason="tool_calls"),
+        ],
+        # iter 1: final answer
+        [
+            LLMEvent(kind="text", text="现在是中午十二点。"),
+            LLMEvent(kind="finish", finish_reason="stop"),
+        ],
+    ])
+
+    bcast_calls: list[tuple[str, tuple]] = []
+
+    # Make the broadcast callable look like a bound method so app_mode's
+    # `__self__` lookup finds an "app" with a tool_registry attribute.
+    class _FakeApp:
+        def __init__(self):
+            self.tool_registry = reg
+
+        async def broadcast(self, name, *args):
+            bcast_calls.append((name, args))
+
+    fake_app = _FakeApp()
+
+    ctx = ModeContext(
+        config=cfg, slv=slv, llm=llm, session=session, audio=None,
+        events=events, broadcast=fake_app.broadcast,
+    )
+    mgr = ModeManager(lambda: ctx)
+    mgr.register(ChatMode())
+    await mgr.start("chat")
+
+    await mgr.current.on_user_utterance(ctx, "几点了")
+
+    # Every text token streamed to TTS (preamble + post-tool answer).
+    assert slv.text_frames == ["好的，", "现在是中午十二点。"]
+    assert slv.flushed == 1
+
+    # Session history: user, assistant(tc), tool_result, assistant(text).
+    assert len(session.history) == 4
+    assert session.history[0] == {"role": "user", "content": "几点了"}
+    assert session.history[1]["role"] == "assistant"
+    assert session.history[1]["content"] == "好的，"
+    assert session.history[1]["tool_calls"][0]["function"]["name"] == "time_now"
+    assert session.history[2]["role"] == "tool"
+    assert session.history[2]["tool_call_id"] == "c1"
+    assert session.history[3] == {
+        "role": "assistant",
+        "content": "现在是中午十二点。",
+    }
+
+    # Dashboard events emitted on the event bus.
+    names = [n for n, _ in events_emitted]
+    assert "tool_call_started" in names
+    assert "tool_call_completed" in names
+    # And broadcast to plugins.
+    bnames = [n for n, _ in bcast_calls]
+    assert "on_tool_call_started" in bnames
+    assert "on_tool_call_completed" in bnames
+
+
+@pytest.mark.asyncio
+async def test_tools_disabled_default_path_unchanged():
+    """Regression: tools_enabled=False (default) must produce the exact
+    same observable behaviour as before batch 1 — every text token
+    streams to SLV, history grows by user+assistant, no tool events."""
+    from openvoicestream_agent.llm.base import LLMEvent
+
+    cfg = Config(system_prompt="SYS")  # tools_enabled defaults to False
+    slv = FakeSLV()
+    session = Session()
+    events_emitted: list[str] = []
+    events = type(
+        "E", (), {"emit": lambda self, n, p=None: events_emitted.append(n)}
+    )()
+
+    llm = _ScriptedEventsLLM([
+        [
+            LLMEvent(kind="text", text="你"),
+            LLMEvent(kind="text", text="好"),
+            LLMEvent(kind="finish", finish_reason="stop"),
+        ],
+    ])
+    ctx = ModeContext(
+        config=cfg, slv=slv, llm=llm, session=session, audio=None,
+        events=events, broadcast=_noop_broadcast,
+    )
+    mgr = ModeManager(lambda: ctx)
+    mgr.register(ChatMode())
+    await mgr.start("chat")
+
+    await mgr.current.on_user_utterance(ctx, "hi")
+
+    assert slv.text_frames == ["你", "好"]
+    assert slv.flushed == 1
+    assert session.history == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "你好"},
+    ]
+    # No tool dashboard events fired.
+    assert "tool_call_started" not in events_emitted
+    assert "tool_call_completed" not in events_emitted
+    # No tools schema sent to the LLM (runner converts empty allowlist → None).
+    assert llm.calls[0]["kwargs"].get("tools") is None
+
+
+@pytest.mark.asyncio
+async def test_app_mode_first_token_timeout_raises_llm_timeout_error():
+    """Mocked LLM hangs without ever emitting an event → app_mode
+    surfaces LLMTimeoutError(kind='first_token')."""
+    from openvoicestream_agent.app_mode import LLMTimeoutError
+
+    cfg = Config(system_prompt="SYS")
+    # Use a tiny first-token timeout so the test runs fast.
+    cfg.llm_first_token_timeout_s = 0.05
+    slv = FakeSLV()
+    session = Session()
+    events = type("E", (), {"emit": lambda *a, **k: None})()
+
+    class HangLLM(LLMBackend):
+        async def stream(self, messages, **kw):
+            await asyncio.sleep(10)
+            if False:  # pragma: no cover
+                yield ""
+
+    ctx = ModeContext(
+        config=cfg, slv=slv, llm=HangLLM(), session=session, audio=None,
+        events=events, broadcast=_noop_broadcast,
+    )
+    with pytest.raises(LLMTimeoutError) as exc_info:
+        await ctx.run_default_dialogue_turn("hi")
+    assert exc_info.value.kind == "first_token"
+
+
 @pytest.mark.asyncio
 async def test_multi_mode_app_class_is_back_compat_dialogue_shim():
     """The legacy `DialogueApp` import path now resolves to MultiModeApp."""

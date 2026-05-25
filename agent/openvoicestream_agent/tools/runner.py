@@ -54,6 +54,28 @@ ToolStartedCB = Callable[[dict[str, Any]], Awaitable[None]]
 ToolCompletedCB = Callable[[dict[str, Any], dict[str, Any], float], Awaitable[None]]
 
 
+def _open_stream(llm: Any, messages: list[dict[str, Any]], kwargs: dict[str, Any]):
+    """Return an async iterator of LLMEvent regardless of which streaming
+    channel the backend exposes.
+
+    Tests + a handful of legacy callers implement only ``stream`` (text
+    deltas as ``str``). Wrap those on the fly so the runner only needs
+    to know about ``LLMEvent`` shape.
+    """
+    if hasattr(llm, "stream_events"):
+        return llm.stream_events(messages, **kwargs)
+    # Lazy import keeps the module loadable when LLMEvent isn't needed.
+    from ..llm.base import LLMEvent
+
+    async def _wrap():
+        async for tok in llm.stream(messages, **kwargs):
+            if tok:
+                yield LLMEvent(kind="text", text=tok)
+        yield LLMEvent(kind="finish", finish_reason="stop")
+
+    return _wrap()
+
+
 async def stream_with_tools(
     llm: Any,
     messages: list[dict[str, Any]],
@@ -67,6 +89,9 @@ async def stream_with_tools(
     on_tool_started: ToolStartedCB | None = None,
     on_tool_completed: ToolCompletedCB | None = None,
     llm_kwargs: dict[str, Any] | None = None,
+    first_token_timeout_s: float | None = None,
+    idle_timeout_s: float | None = None,
+    on_timeout: Callable[[str, float, str], BaseException] | None = None,
 ) -> str:
     """Run LLM ↔ tool rounds until a text-only final answer.
 
@@ -105,11 +130,65 @@ async def stream_with_tools(
                 caller_extra["prefix_cache"] = False
                 kwargs["extra_body"] = caller_extra
 
-            async for ev in llm.stream_events(messages, **kwargs):
+            stream = _open_stream(llm, messages, kwargs)
+            # Distinguish first-payload vs idle timeouts only when the
+            # caller configured them. A "payload" is any event that
+            # carries content (text or tool_call_delta) — finish-only
+            # events don't reset the first-token gate (matches the spec
+            # answer to Q3: any LLMEvent with payload counts as first).
+            received_payload = False
+            it = stream.__aiter__()
+            while True:
+                use_first = (
+                    first_token_timeout_s is not None
+                    and not received_payload
+                )
+                use_idle = (
+                    idle_timeout_s is not None
+                    and received_payload
+                )
+                try:
+                    if use_first:
+                        ev = await asyncio.wait_for(
+                            it.__anext__(), timeout=first_token_timeout_s
+                        )
+                    elif use_idle:
+                        ev = await asyncio.wait_for(
+                            it.__anext__(), timeout=idle_timeout_s
+                        )
+                    else:
+                        ev = await it.__anext__()
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    kind = "first_token" if not received_payload else "stream_idle"
+                    t_used = (
+                        float(first_token_timeout_s)
+                        if not received_payload
+                        else float(idle_timeout_s)
+                    )
+                    # Close the stream so the upstream backend sees a
+                    # cancel (matches the legacy behaviour in app_mode).
+                    aclose = getattr(stream, "aclose", None)
+                    if callable(aclose):
+                        try:
+                            await aclose()
+                        except Exception:  # pragma: no cover
+                            logger.debug(
+                                "stream aclose during timeout failed",
+                                exc_info=True,
+                            )
+                    if on_timeout is not None:
+                        raise on_timeout(kind, t_used, "".join(text_chunks))
+                    raise asyncio.TimeoutError(
+                        f"LLM {kind} timeout after {t_used:.1f}s"
+                    )
                 if ev.kind == "text" and ev.text:
+                    received_payload = True
                     text_chunks.append(ev.text)
                     await on_assistant_token(ev.text)
                 elif ev.kind == "tool_call_delta":
+                    received_payload = True
                     idx = (
                         ev.tool_call_index
                         if ev.tool_call_index is not None

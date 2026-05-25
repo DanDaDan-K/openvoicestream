@@ -141,6 +141,21 @@ class Config:
     translator_tgt_lang: str = "eng_Latn"
     # Request timeout for translator service (seconds).
     translator_timeout_s: float = 5.0
+    # ── Tool calling (see docs/agent/tool-usage.md) ────────────────
+    # Master switch. When False, app_mode bypasses the tool runner
+    # entirely and behaves identically to the pre-tool implementation
+    # (single LLM stream → TTS). When True, the runner is invoked with
+    # the effective allowlist resolved per turn.
+    tools_enabled: bool = False
+    # Global default allowlist. Per-mode override via
+    #   mode_overrides[<mode>].tools_allowlist
+    # takes precedence. Tools list MUST stay stable per session+mode for
+    # the edge-llm prefix_cache to hit (changing the list mid-session is
+    # safe but degrades to a cache miss).
+    tools_default_allowlist: list[str] = field(default_factory=list)
+    # Maximum number of LLM ↔ tool round trips per user turn. After this
+    # the runner rolls the partial round back and returns empty text.
+    tools_max_iterations: int = 5
     # Path the config was loaded from (set by `load_config`); used by
     # the dashboard's per-mode override editor to persist changes back
     # to disk. None when the Config was constructed in code.

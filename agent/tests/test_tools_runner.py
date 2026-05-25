@@ -333,6 +333,112 @@ async def test_iter_gt_zero_disables_prefix_cache():
     assert second_kw["extra_body"]["prefix_cache"] is False
 
 
+# ── (h) first-token + idle timeout kwargs ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_first_token_timeout_raises():
+    session = Session()
+    registry = ToolRegistry()
+
+    class _HangLLM:
+        async def stream_events(self, messages, **kw):
+            await asyncio.sleep(10)
+            if False:  # pragma: no cover
+                yield None
+
+    async def on_tok(t):
+        pass
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
+    with pytest.raises(asyncio.TimeoutError):
+        await stream_with_tools(
+            _HangLLM(), msgs,
+            session=session, registry=registry, allowed_tools=None,
+            ctx=_make_ctx(session), on_assistant_token=on_tok,
+            first_token_timeout_s=0.05,
+            idle_timeout_s=1.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_first_token_timeout_invokes_on_timeout_hook():
+    """Custom on_timeout should be called with (kind, t_used, partial)
+    and its return value is raised instead of TimeoutError."""
+    session = Session()
+    registry = ToolRegistry()
+
+    class _HangLLM:
+        async def stream_events(self, messages, **kw):
+            await asyncio.sleep(10)
+            if False:  # pragma: no cover
+                yield None
+
+    class _MyTimeoutError(RuntimeError):
+        def __init__(self, kind, t, partial):
+            super().__init__(f"{kind}@{t}")
+            self.kind = kind
+
+    seen: list[tuple[str, float, str]] = []
+
+    def _on_timeout(kind, t, partial):
+        seen.append((kind, t, partial))
+        return _MyTimeoutError(kind, t, partial)
+
+    async def on_tok(t):
+        pass
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
+    with pytest.raises(_MyTimeoutError) as exc_info:
+        await stream_with_tools(
+            _HangLLM(), msgs,
+            session=session, registry=registry, allowed_tools=None,
+            ctx=_make_ctx(session), on_assistant_token=on_tok,
+            first_token_timeout_s=0.05,
+            idle_timeout_s=1.0,
+            on_timeout=_on_timeout,
+        )
+    assert exc_info.value.kind == "first_token"
+    assert seen and seen[0][0] == "first_token"
+
+
+@pytest.mark.asyncio
+async def test_idle_timeout_after_first_token():
+    """After a payload event, a long gap should raise an idle (not
+    first-token) timeout."""
+    from openvoicestream_agent.llm import LLMEvent
+    session = Session()
+    registry = ToolRegistry()
+
+    class _SlowAfterFirstLLM:
+        async def stream_events(self, messages, **kw):
+            yield LLMEvent(kind="text", text="x")
+            await asyncio.sleep(10)
+            if False:  # pragma: no cover
+                yield None
+
+    kinds: list[str] = []
+
+    def _on_timeout(kind, t, partial):
+        kinds.append(kind)
+        return RuntimeError(f"timeout:{kind}")
+
+    async def on_tok(t):
+        pass
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
+    with pytest.raises(RuntimeError):
+        await stream_with_tools(
+            _SlowAfterFirstLLM(), msgs,
+            session=session, registry=registry, allowed_tools=None,
+            ctx=_make_ctx(session), on_assistant_token=on_tok,
+            first_token_timeout_s=5.0,
+            idle_timeout_s=0.05,
+            on_timeout=_on_timeout,
+        )
+    assert kinds == ["stream_idle"]
+
+
 @pytest.mark.asyncio
 async def test_iter_gt_zero_preserves_caller_extra_body():
     """A caller-supplied extra_body must survive the prefix_cache=False
