@@ -305,6 +305,52 @@ async def test_async_cancel_during_saturated_acquire_does_not_leak_semaphore():
 
 
 @asynctest
+async def test_close_while_request_blocked_on_acquire_aborts_cleanly():
+    """close() while a request is waiting on saturated acquire must abort
+    the request with WorkerExitError, not write to dead worker stdin.
+
+    Per Codex P1 third-pass MUST_FIX: previously close() did not set a
+    closed flag, so the blocked request would wake up, register inflight,
+    and write payload JSON to a worker stdin that may already be closed.
+    """
+    proc = _FakeProc()
+    wio = WorkerIO(proc, concurrency=1)
+
+    # Saturate the only slot with a request that never completes.
+    gen_hold = wio.send_request("rid-hold", {"id": "rid-hold"})
+    task_hold = asyncio.create_task(gen_hold.__anext__())
+    await asyncio.sleep(0.05)
+
+    # Second request will block on acquire.
+    gen_wait = wio.send_request("rid-wait", {"id": "rid-wait"})
+
+    async def consume_wait():
+        with pytest.raises(WorkerExitError):
+            async for _ in gen_wait:
+                pass
+
+    task_wait = asyncio.create_task(consume_wait())
+    await asyncio.sleep(0.05)
+
+    # close() should cancel task_hold (worker_exit) AND signal task_wait
+    # to abort when its acquire wakes up.
+    wio.close()
+
+    # task_hold gets _worker_exit
+    with pytest.raises(WorkerExitError):
+        await asyncio.wait_for(task_hold, timeout=2.0)
+    # task_wait must also raise WorkerExitError (closed flag honored)
+    await asyncio.wait_for(task_wait, timeout=2.0)
+
+    # No stdin writes should reference rid-wait — closed flag must prevent
+    # the abandoned request from posting its payload.
+    rid_wait_writes = [w for w in proc.stdin.writes if "rid-wait" in w and "cancel" not in w]
+    assert not rid_wait_writes, (
+        f"closed WorkerIO still wrote payload for blocked request: {rid_wait_writes!r}"
+    )
+
+
+@asynctest
 async def test_async_send_request_worker_exit():
     proc = _FakeProc()
     wio = WorkerIO(proc, concurrency=1)

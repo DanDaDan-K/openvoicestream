@@ -81,6 +81,9 @@ class WorkerIO:
         self._inflight: dict[str, "queue.Queue"] = {}
         self._inflight_lock = threading.Lock()
         self._sem = threading.Semaphore(max(1, int(concurrency)))
+        # Set by close(); requests that acquire the semaphore after this
+        # is True must abort instead of writing to a dead worker stdin.
+        self._closed = False
         self._reader_thread = threading.Thread(
             target=self._reader_loop,
             name="worker-io-stdout",
@@ -126,13 +129,24 @@ class WorkerIO:
             await _fut
         except BaseException:
             def _release_if_late_acquire(f: "asyncio.Future") -> None:
+                # f.result() can raise CancelledError if the wrapper
+                # future itself was cancelled before the executor thread
+                # ran. Catch BaseException (not Exception) so we don't
+                # propagate a cancel-trace out of a done-callback.
                 try:
                     if f.result() is True:
                         self._sem.release()
-                except Exception:
+                except BaseException:
                     pass
             _fut.add_done_callback(_release_if_late_acquire)
             raise
+
+        # Hold semaphore from here. If close() ran while we were waiting,
+        # abort immediately and release the slot back; do not register
+        # inflight and do not write to dead worker stdin.
+        if self._closed:
+            self._sem.release()
+            raise WorkerExitError("WorkerIO closed before request could start")
 
         q: "queue.Queue" = queue.Queue()
         with self._inflight_lock:
@@ -188,11 +202,15 @@ class WorkerIO:
 
         After ``close()``, in-flight ``send_request``/``request`` generators
         observe a ``_worker_exit`` sentinel and surface ``WorkerExitError``.
-        The reader thread itself is daemon and will exit naturally when
+        Sets a closed flag so that any request currently blocked in
+        ``self._sem.acquire()`` (saturation back-pressure) will abort
+        on wake-up instead of writing to a dead worker's stdin. The
+        reader thread itself is daemon and will exit naturally when
         the subprocess stdout EOFs; ``close()`` does not kill the
         subprocess — that is the owning backend's responsibility (proc
         lifecycle stays where it is today).
         """
+        self._closed = True
         with self._inflight_lock:
             queues = list(self._inflight.values())
             self._inflight.clear()
@@ -206,37 +224,38 @@ class WorkerIO:
         terminates when an ``event=="done"`` or ``event=="cancelled"`` is
         received, or raises ``WorkerExitError`` if the worker dies mid-request.
         """
+        # Wrap the entire body in try/finally so the semaphore is always
+        # released regardless of where we exit (including failures in
+        # setup between acquire and the inner try).
         self._sem.acquire()
-        req_id = payload["id"]
-        q: "queue.Queue" = queue.Queue()
-        # CRITICAL ordering: insert the queue BEFORE writing stdin so the
-        # reader thread can never observe an event for ``req_id`` before
-        # the queue exists (would otherwise be dropped as "stale").
-        with self._inflight_lock:
-            self._inflight[req_id] = q
+        req_id: str | None = None
         try:
+            # Mirror the async path: if close() ran while we waited on
+            # the semaphore, abort instead of writing to a dead worker.
+            if self._closed:
+                raise WorkerExitError("WorkerIO closed before request could start")
+            req_id = payload["id"]
+            q: "queue.Queue" = queue.Queue()
+            # CRITICAL ordering: insert the queue BEFORE writing stdin so
+            # the reader thread can never observe an event for ``req_id``
+            # before the queue exists (would otherwise be dropped as "stale").
+            with self._inflight_lock:
+                self._inflight[req_id] = q
             assert self._proc.stdin is not None
-            try:
-                with self._stdin_lock:
-                    self._proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                    self._proc.stdin.flush()
-            except Exception:
-                with self._inflight_lock:
-                    self._inflight.pop(req_id, None)
-                raise
+            with self._stdin_lock:
+                self._proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                self._proc.stdin.flush()
             while True:
-                try:
-                    event = q.get(timeout=60.0)
-                except Exception:
-                    raise
+                event = q.get(timeout=60.0)
                 if event.get("event") == "_worker_exit":
                     raise WorkerExitError("worker subprocess died mid-request")
                 yield event
                 if event.get("event") in ("done", "cancelled"):
                     return
         finally:
-            with self._inflight_lock:
-                self._inflight.pop(req_id, None)
+            if req_id is not None:
+                with self._inflight_lock:
+                    self._inflight.pop(req_id, None)
             self._sem.release()
 
     def cancel(self, req_id: str) -> None:
