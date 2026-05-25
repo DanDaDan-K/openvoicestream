@@ -7,6 +7,7 @@ from typing import Any, AsyncIterator
 from openai import APIError
 
 from ..session import Session
+from .base import LLMEvent
 from .openai_compat import LLMStreamError, OpenAICompatBackend
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ class EdgeLLMBackend(OpenAICompatBackend):
             return {
                 "prefix_cache": True,
                 "return_cache_metrics": True,
+                "enable_thinking": False,
             }
         # Cold path OR warm-but-disabled path. Both ask edge-llm to cache
         # the system prompt KV (cheap, no prefix-formatting risk) and to
@@ -75,6 +77,7 @@ class EdgeLLMBackend(OpenAICompatBackend):
         return {
             "save_system_prompt_kv_cache": True,
             "return_cache_metrics": True,
+            "enable_thinking": False,
         }
 
     def _disable_prefix_cache(
@@ -106,12 +109,12 @@ class EdgeLLMBackend(OpenAICompatBackend):
 
     async def _stream_once(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         session: Session | None,
         caller_kw: dict[str, Any],
         *,
         disable_inner_retry: bool = False,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[LLMEvent]:
         """One pass through the base streamer with our cache flags injected.
 
         ``disable_inner_retry`` is set when invoked from the A4 fallback
@@ -128,15 +131,15 @@ class EdgeLLMBackend(OpenAICompatBackend):
         kw["extra_body"] = cache_flags
         if disable_inner_retry:
             kw["_retry_disabled"] = True
-        async for delta in super().stream(messages, **kw):
-            yield delta
+        async for ev in super().stream_events(messages, **kw):
+            yield ev
 
-    async def stream(  # type: ignore[override]
+    async def stream_events(  # type: ignore[override]
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         session: Session | None = None,
         **kw: Any,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[LLMEvent]:
         used_prefix_cache = (
             session is not None
             and session.cache_warmed
@@ -145,9 +148,9 @@ class EdgeLLMBackend(OpenAICompatBackend):
 
         yielded_any = False
         try:
-            async for delta in self._stream_once(messages, session, kw):
+            async for ev in self._stream_once(messages, session, kw):
                 yielded_any = True
-                yield delta
+                yield ev
         except (APIError, LLMStreamError) as exc:
             if used_prefix_cache and _is_prefix_cache_failure(exc):
                 # Always latch the flag so future turns skip prefix_cache,
@@ -155,21 +158,15 @@ class EdgeLLMBackend(OpenAICompatBackend):
                 # failure → tokens already shipped → retry would duplicate).
                 self._disable_prefix_cache(session, exc)
                 if yielded_any:
-                    # Bubble up; A3 won't retry mid-stream errors either.
                     raise
                 logger.warning(
                     "prefix_cache failed (%s); retrying without prefix_cache",
                     exc,
                 )
-                # Immediate retry — same messages, but _build_extra_body
-                # now sees prefix_cache_disabled=True and omits the flag.
-                # Disable inner A3 retry: the base class already retried
-                # this call once before raising; doing so again here would
-                # double-count attempts (worst case 4 upstream hits/turn).
-                async for delta in self._stream_once(
+                async for ev in self._stream_once(
                     messages, session, kw, disable_inner_retry=True
                 ):
-                    yield delta
+                    yield ev
                 if session is not None:
                     session.cache_warmed = True
                 return
@@ -177,3 +174,16 @@ class EdgeLLMBackend(OpenAICompatBackend):
 
         if session is not None:
             session.cache_warmed = True
+
+    async def stream(  # type: ignore[override]
+        self,
+        messages: list[dict[str, Any]],
+        session: Session | None = None,
+        **kw: Any,
+    ) -> AsyncIterator[str]:
+        """Back-compat text-only iterator that preserves the ``session=``
+        kwarg expected by existing callers (the base ``stream`` filter
+        doesn't know about session)."""
+        async for ev in self.stream_events(messages, session=session, **kw):
+            if ev.kind == "text" and ev.text:
+                yield ev.text

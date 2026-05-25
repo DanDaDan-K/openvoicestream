@@ -2,15 +2,72 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Literal
+
+
+@dataclass
+class LLMEvent:
+    """One unit of streaming output from an LLM backend.
+
+    A single upstream chunk may produce one or more ``LLMEvent``s:
+      * ``kind="text"`` — incremental assistant text (``text`` set).
+      * ``kind="tool_call_delta"`` — partial tool_call info; the runner
+        accumulates fragments per ``tool_call_index``.
+      * ``kind="finish"`` — terminal marker; ``finish_reason`` carries
+        OpenAI's value ("stop" / "tool_calls" / "length" / "error").
+    """
+
+    kind: Literal["text", "tool_call_delta", "finish"]
+    # text fields
+    text: str | None = None
+    # tool_call_delta fields (per OpenAI index-based accumulation)
+    tool_call_index: int | None = None
+    tool_call_id: str | None = None
+    name: str | None = None
+    arguments: str | None = None
+    # finish field
+    finish_reason: str | None = None
 
 
 class LLMBackend(ABC):
-    """Streaming LLM backend."""
+    """Streaming LLM backend.
+
+    Implementations expose two channels:
+
+    * ``stream_events`` (preferred) — yields :class:`LLMEvent` instances
+      covering text, tool-call deltas, and a finish marker. This is the
+      channel the tool-calling runner consumes.
+    * ``stream`` (back-compat) — yields plain text strings. Default
+      implementation filters ``stream_events`` to text deltas only so
+      existing callers don't have to change.
+    """
+
+    async def stream_events(
+        self, messages: list[dict[str, Any]], **kw: Any
+    ) -> AsyncIterator[LLMEvent]:
+        """Yield :class:`LLMEvent`s from the model.
+
+        Default implementation delegates to :meth:`stream` (text-only
+        legacy channel) so subclasses that only override ``stream`` keep
+        working — their text is wrapped in ``LLMEvent(kind="text")`` plus
+        a synthetic ``finish`` event at end-of-stream.
+
+        Backends that produce real tool-call deltas (e.g.
+        :class:`OpenAICompatBackend`) override this method directly.
+        """
+        async for tok in self.stream(messages, **kw):
+            if tok:
+                yield LLMEvent(kind="text", text=tok)
+        yield LLMEvent(kind="finish", finish_reason="stop")
 
     @abstractmethod
-    async def stream(self, messages: list[dict[str, str]], **kw: Any) -> AsyncIterator[str]:
-        """Yield text deltas (already-decoded strings) from the model."""
+    async def stream(
+        self, messages: list[dict[str, Any]], **kw: Any
+    ) -> AsyncIterator[str]:
+        """Yield text deltas (already-decoded strings). Subclasses may
+        instead override :meth:`stream_events` for richer output and
+        leave ``stream`` as the default text filter."""
         # Concrete implementations must be async generators -- this stub
         # exists so the base class can be ABC-instantiated for typing.
         if False:  # pragma: no cover
