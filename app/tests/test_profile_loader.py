@@ -376,6 +376,41 @@ def test_apply_profile_two_pass_expansion_writes_env(tmp_path, monkeypatch):
     assert os.environ["EDGE_LLM_ASR_ENGINE_DIR"] == "/opt/X/engines/asr"
 
 
+def test_critical_key_conflict_raises(tmp_path, monkeypatch):
+    """LANGUAGE_MODE pre-set to a different value than the profile must
+    hard-fail (root cause of orin-nano Qwen3 silent-skip bug 2026-05-25)."""
+    monkeypatch.setenv("LANGUAGE_MODE", "zh_en")
+    monkeypatch.setattr(
+        profile_loader, "_OPERATOR_KEYS", frozenset({"LANGUAGE_MODE"})
+    )
+
+    p = _write_profile(
+        tmp_path, "needs-multilang",
+        {"env": {"LANGUAGE_MODE": "multilanguage"}},
+    )
+    with pytest.raises(RuntimeError, match="Remove LANGUAGE_MODE"):
+        profile_loader.apply_profile(str(p))
+
+
+def test_critical_key_matching_value_does_not_raise(tmp_path, monkeypatch):
+    """If the operator env matches the profile-declared value, no conflict."""
+    import os
+
+    monkeypatch.setenv("LANGUAGE_MODE", "multilanguage")
+    monkeypatch.setattr(
+        profile_loader, "_OPERATOR_KEYS", frozenset({"LANGUAGE_MODE"})
+    )
+
+    p = _write_profile(
+        tmp_path, "agrees",
+        {"env": {"LANGUAGE_MODE": "multilanguage"}},
+    )
+    # Must not raise.
+    profile = profile_loader.apply_profile(str(p))
+    assert profile["name"] == "agrees"
+    assert os.environ["LANGUAGE_MODE"] == "multilanguage"
+
+
 def test_apply_profile_returns_empty_when_no_ref(monkeypatch):
     """No env hints + no explicit ref → returns {} without touching state."""
     for k in ("OVS_PROFILE_JSON", "OVS_PROFILE", "OVS_PROFILE_DEFAULT",

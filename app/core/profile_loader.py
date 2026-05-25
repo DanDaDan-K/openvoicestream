@@ -52,6 +52,16 @@ def _snapshot_operator_keys() -> frozenset[str]:
 # Snapshot taken exactly once at module import.
 _OPERATOR_KEYS: frozenset[str] = _snapshot_operator_keys()
 
+# Keys for which an operator/profile mismatch is a hard failure (not a soft
+# "operator wins" silent override). These keys steer downstream backend
+# selection AND model-download routing; a silent mismatch produces
+# misleading runtime failures (e.g. profile picks Qwen3 ASR but
+# LANGUAGE_MODE=zh_en in env shadows it, so the Qwen3 artifacts never
+# download). Fail loud at startup instead.
+CRITICAL_KEYS: frozenset[str] = frozenset({
+    "LANGUAGE_MODE", "ASR_BACKEND", "TTS_BACKEND",
+})
+
 # Keys written by the most recent ``apply_profile`` call. Used to clear stale
 # values when reloading a different profile.
 _APPLIED_KEYS: set[str] = set()
@@ -246,6 +256,20 @@ def apply_profile(
         # 2. Write new values, unconditionally overwriting unless operator-owned.
         for k, v in merged.items():
             if k in _OPERATOR_KEYS:
+                existing = os.environ.get(k)
+                if existing != v:
+                    if k in CRITICAL_KEYS:
+                        raise RuntimeError(
+                            f"Profile {derived['OVS_PROFILE_NAME']} requires "
+                            f"{k}={v}, but environment has {k}={existing}. "
+                            f"Remove {k} from your environment "
+                            f"(compose/.env/shell) or change OVS_PROFILE to "
+                            f"one that matches."
+                        )
+                    logger.warning(
+                        "Profile %s wants %s=%s but env overrides to %s",
+                        derived["OVS_PROFILE_NAME"], k, v, existing,
+                    )
                 continue
             os.environ[k] = v
 
