@@ -169,6 +169,23 @@ def _istft(mag: np.ndarray, x: np.ndarray, y: np.ndarray, length: Optional[int] 
     return audio
 
 
+def _read_arena_size_bytes(env_var: str, default_mb: int = 16) -> int:
+    """Resolve a per-backend CUDA arena size in bytes from env.
+
+    Priority: specific env (``env_var``) → generic fallback
+    ``OVS_CUDA_ARENA_SIZE_MB`` → ``default_mb``. Returns bytes.
+    Invalid integers fall through to default with a warning.
+    """
+    fallback = os.environ.get("OVS_CUDA_ARENA_SIZE_MB", str(default_mb))
+    raw = os.environ.get(env_var, fallback)
+    try:
+        mb = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; falling back to %d MB", env_var, raw, default_mb)
+        mb = default_mb
+    return max(1, mb) * 1024 * 1024
+
+
 class _MatchaCtxSlot:
     """One pre-allocated set of TRT contexts + persistent CudaMemoryPool.
 
@@ -184,7 +201,12 @@ class _MatchaCtxSlot:
     """
 
     def __init__(self, vocos_engine, split_estimator_engines):
-        self.pool = CudaMemoryPool()  # persistent stream
+        # Arena-backed pool — eliminates per-stage cudaMalloc driver-lock
+        # cost on the matcha hot path. Size tunable via
+        # OVS_MATCHA_ARENA_SIZE_MB (or the shared OVS_CUDA_ARENA_SIZE_MB).
+        self.pool = CudaMemoryPool(
+            arena_size_bytes=_read_arena_size_bytes("OVS_MATCHA_ARENA_SIZE_MB"),
+        )
         self.vocos_ctx = (
             vocos_engine.create_execution_context() if vocos_engine is not None else None
         )
@@ -966,7 +988,21 @@ class MatchaTRTBackend(TTSBackend):
 
 
 class CudaMemoryPool:
-    """CUDA memory pool using cuda-python runtime API (initialized after TRT loads)."""
+    """CUDA memory pool with optional per-slot arena (sub-allocator).
+
+    Originally a thin wrapper around ``cudaMalloc`` / ``cudaFree`` driven by
+    one shared CUDA stream. To eliminate the per-stage driver-lock cost of
+    cudaMalloc on the hot TTS path, the pool now pre-allocates an arena (one
+    big cudaMalloc at first request) and serves subsequent ``allocate()``
+    requests as bump-pointer sub-allocations inside that arena.
+    ``free_all()`` resets the bump offset without re-allocating. Requests
+    larger than the remaining arena fall back to a per-call cudaMalloc that
+    is freed individually in ``free_all()`` (overflow path) so existing
+    callers continue to work even when the arena is undersized.
+
+    The arena size is fixed per slot — pick it large enough to cover the
+    peak per-request working set (see telemetry log printed at destroy).
+    """
 
     @staticmethod
     def _cuda_err(result):
@@ -975,10 +1011,24 @@ class CudaMemoryPool:
             return result[0]
         return result
 
-    def __init__(self):
+    def __init__(self, arena_size_bytes: int | None = None):
         self._stream = None
-        self._allocations = []
+        # Legacy free-list path (kept for back-compat with consumers that
+        # never set up an arena; e.g. unit tests that drive the pool with a
+        # mock cudart). Modern slot init always passes ``arena_size_bytes``.
+        self._allocations: list[int] = []
         self._initialized = False
+        # Arena (sub-allocator) state. Created lazily inside _ensure_arena()
+        # so unit tests that never allocate keep working without a real CUDA
+        # runtime.
+        self._arena_size: int | None = arena_size_bytes
+        self._arena_ptr: int | None = None
+        self._arena_offset: int = 0
+        self._overflow_allocs: list[int] = []
+        # Telemetry — logged at destroy() so we can size the arena.
+        self._peak_offset: int = 0
+        self._overflow_count: int = 0
+        self._overflow_bytes: int = 0
 
     def _init_cuda(self):
         """Initialize CUDA runtime after TRT has loaded."""
@@ -996,10 +1046,53 @@ class CudaMemoryPool:
         self._initialized = True
         logger.info("CudaMemoryPool initialized with stream %d", int(self._stream))
 
+    def _ensure_arena(self) -> None:
+        """Allocate the arena on first request. No-op if disabled or already done."""
+        if self._arena_size is None or self._arena_ptr is not None:
+            return
+        from cuda import cudart
+        err, ptr = cudart.cudaMalloc(self._arena_size)
+        if self._cuda_err(err) != cudart.cudaError_t.cudaSuccess:
+            raise RuntimeError(f"cudaMalloc(arena {self._arena_size}) failed: {err}")
+        self._arena_ptr = int(ptr)
+        logger.info(
+            "CudaMemoryPool arena ready: ptr=0x%x size=%d (%.1f MB)",
+            self._arena_ptr, self._arena_size, self._arena_size / (1024 * 1024),
+        )
+
     def allocate(self, size_bytes: int) -> int:
-        """Allocate device memory."""
+        """Allocate device memory.
+
+        Arena-enabled mode: bump-pointer sub-allocate from the per-slot arena;
+        oversized requests fall back to a per-call cudaMalloc (overflow).
+        Disabled mode (arena_size=None): legacy per-call cudaMalloc tracked
+        in ``_allocations`` and freed by ``free_all()``.
+        """
         self._init_cuda()
         from cuda import cudart
+        if self._arena_size is not None:
+            self._ensure_arena()
+            assert self._arena_ptr is not None
+            # 256-byte align so device pointers stay friendly to TRT's most
+            # restrictive expectations.
+            n_aligned = (size_bytes + 255) & ~255
+            if self._arena_offset + n_aligned <= self._arena_size:
+                ptr = self._arena_ptr + self._arena_offset
+                self._arena_offset += n_aligned
+                if self._arena_offset > self._peak_offset:
+                    self._peak_offset = self._arena_offset
+                return int(ptr)
+            # Overflow: arena is too small for this request. Fall back to
+            # per-call cudaMalloc so the request still succeeds; tracked
+            # separately so free_all() can release it deterministically.
+            err, ptr = cudart.cudaMalloc(size_bytes)
+            if self._cuda_err(err) != cudart.cudaError_t.cudaSuccess:
+                raise RuntimeError(f"cudaMalloc(overflow {size_bytes}) failed: {err}")
+            self._overflow_allocs.append(int(ptr))
+            self._overflow_count += 1
+            self._overflow_bytes += size_bytes
+            return int(ptr)
+        # Legacy path — arena disabled.
         err, ptr = cudart.cudaMalloc(size_bytes)
         if self._cuda_err(err) != cudart.cudaError_t.cudaSuccess:
             raise RuntimeError(f"cudaMalloc({size_bytes}) failed: {err}")
@@ -1037,7 +1130,21 @@ class CudaMemoryPool:
                 raise RuntimeError(f"cudaStreamSynchronize failed: {err}")
 
     def free_all(self):
-        """Free per-request device allocations while keeping the stream warm."""
+        """Reset per-request device allocations while keeping stream + arena warm.
+
+        Arena-enabled mode: reset the bump-pointer offset to 0 (the arena
+        itself stays mapped) and free any overflow allocations that escaped
+        the arena.
+        Disabled mode: cudaFree each tracked allocation (legacy behavior).
+        """
+        if self._arena_size is not None:
+            self._arena_offset = 0
+            if self._overflow_allocs:
+                from cuda import cudart
+                for ptr in self._overflow_allocs:
+                    cudart.cudaFree(ptr)
+                self._overflow_allocs.clear()
+            return
         if not self._allocations:
             return
         from cuda import cudart
@@ -1051,13 +1158,35 @@ class CudaMemoryPool:
         return int(self._stream)
 
     def destroy(self) -> None:
-        """Free remaining allocations and destroy the stream. Idempotent.
+        """Free remaining allocations + arena and destroy the stream. Idempotent.
 
         Distinct from free_all() which only frees per-request device buffers
         and keeps the stream warm for the next request. destroy() is the
         hot-reload teardown path.
         """
+        # Telemetry — log peak/overflow before we tear the arena down so
+        # operators can resize the arena from the deploy log.
+        if self._arena_size is not None and (
+            self._peak_offset > 0 or self._overflow_count > 0
+        ):
+            logger.info(
+                "CudaMemoryPool destroy: arena=%d B (%.1f MB) peak_used=%d B (%.1f MB %.1f%%) "
+                "overflow_count=%d overflow_bytes=%d",
+                self._arena_size, self._arena_size / (1024 * 1024),
+                self._peak_offset, self._peak_offset / (1024 * 1024),
+                100.0 * self._peak_offset / self._arena_size if self._arena_size else 0.0,
+                self._overflow_count, self._overflow_bytes,
+            )
         self.free_all()
+        # Free the arena itself.
+        if self._arena_ptr is not None:
+            try:
+                from cuda import cudart
+                cudart.cudaFree(self._arena_ptr)
+            except Exception:
+                logger.exception("CudaMemoryPool.destroy arena cudaFree raised; continuing")
+            self._arena_ptr = None
+            self._arena_offset = 0
         if self._stream is not None:
             try:
                 from cuda import cudart
