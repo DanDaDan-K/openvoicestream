@@ -330,8 +330,19 @@ def resolve(
             coordinator_mode = requested  # type: ignore[assignment]
 
     # ---- Executor max_workers (spec §5) -----------------------------------
+    # When no TTS backend is declared in profile, treat the cap as unknown
+    # (None) instead of the conservative default (max=1). Legacy
+    # ``_resolve_tts_stream_max_workers`` only consulted capability when
+    # profile.tts_backend resolved; otherwise it fell back to the legacy
+    # default of 2 / env value un-clamped. Preserve that surface.
+    tts_declared = isinstance(profile, Mapping) and profile.get("tts_backend") in (
+        _TTS_REGISTRY if isinstance(profile, Mapping) else {}
+    )
+    exec_cap = tts_cap if tts_declared else ConcurrencyCapability(
+        supports_parallel=False, max_concurrent=None,
+    )
     executor_max_workers, exec_warning = _resolve_executor_max_workers(
-        tts_cap=tts_cap,
+        tts_cap=exec_cap,
         tts_backend_name=tts_backend_name or "",
         env_map=env_map,
     )
@@ -423,12 +434,20 @@ def resolve_executor_for_tts(
     """
     env_map: Mapping[str, str] = env if env is not None else os.environ
     name = (tts_backend_name or "").lower()
+    prof_map = profile or {}
+    registry = _lazy_tts_registry()
+    tts_declared = (
+        isinstance(prof_map, Mapping) and prof_map.get("tts_backend") in registry
+    )
+    if tts_declared:
+        tts_cls = _resolve_backend_class(prof_map, "tts_backend", registry)
+        cap_for_exec = _capability_for(tts_cls, prof_map)
+    else:
+        cap_for_exec = ConcurrencyCapability(
+            supports_parallel=False, max_concurrent=None,
+        )
     workers, _warn = _resolve_executor_max_workers(
-        tts_cap=_capability_for(
-            _resolve_backend_class(profile or {}, "tts_backend",
-                                   _lazy_tts_registry()),
-            profile,
-        ),
+        tts_cap=cap_for_exec,
         tts_backend_name=name,
         env_map=env_map,
     )
@@ -451,12 +470,11 @@ def resolve_executor_for_tts(
         source = env_used
     else:
         # Match legacy: "concurrency_capability" when cap was the source,
-        # else "default".
-        prof_map = profile or {}
-        tts_cls = _resolve_backend_class(prof_map, "tts_backend",
-                                          _lazy_tts_registry())
-        cap = _capability_for(tts_cls, prof_map)
-        source = "concurrency_capability" if cap.max_concurrent is not None else "default"
+        # else "default". Only consult capability when profile declares it.
+        if tts_declared and cap_for_exec.max_concurrent is not None:
+            source = "concurrency_capability"
+        else:
+            source = "default"
     return workers, (name or None), source
 
 

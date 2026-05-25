@@ -222,15 +222,10 @@ def test_executor_falls_back_to_capability_when_no_env():
     assert r.executor_max_workers == 2
 
 
-def test_executor_legacy_default_when_no_env_no_cap():
-    """No env, capability=None (paraformer is ASR not TTS): legacy 2."""
-    # Use a TTS backend that exposes max_concurrent=None.
-    # cpu.sherpa is finite (4); to hit the None branch we use no tts_backend.
+def test_executor_legacy_default_when_no_tts_backend_declared():
+    """No tts_backend in profile → legacy default 2 (cap not consulted)."""
     r = resolve(profile={"name": "desktop-mac"}, env={})
-    # No tts_backend declared: tts_cap is default (max_concurrent=1) so
-    # executor_max_workers becomes 1, not the legacy 2 fallback. That is
-    # the conservative behavior — explicitly assert it.
-    assert r.executor_max_workers == 1
+    assert r.executor_max_workers == 2
 
 
 def test_executor_backend_specific_env_wins_over_global():
@@ -318,8 +313,7 @@ def test_resolve_executor_for_tts_source_default():
         tts_backend_name=None,
         env={},
     )
-    # No profile-declared TTS backend → default cap (max=1). Legacy
-    # function reported "default" only when cap_max was None; here cap
-    # default exposes max=1, so source is "concurrency_capability".
-    assert n == 1
-    assert src == "concurrency_capability"
+    # No profile-declared TTS backend → legacy default 2 + "default"
+    # source (mirrors pre-resolver behavior in app.main).
+    assert n == 2
+    assert src == "default"
