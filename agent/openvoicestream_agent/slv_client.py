@@ -380,6 +380,9 @@ class SLVClient:
             await self._queue.put(SLVError(f"bad json: {e}"))
             return
         t = evt.get("type")
+        # TEMP DEBUG: log every event type so we can see what SLV emits
+        # between turns. Cheap because events are sparse compared to PCM.
+        logger.info("SLV evt: %s", {k: v for k, v in evt.items() if k != "text" or len(str(v)) < 100})
         if t == SERVER_ASR_PARTIAL:
             await self._queue.put(
                 ASRPartial(text=evt.get("text", ""), is_stable=bool(evt.get("is_stable", False)))

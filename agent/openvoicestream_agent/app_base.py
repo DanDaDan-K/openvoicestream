@@ -236,6 +236,15 @@ class BaseApp:
         # on mic noise. Started in send_asr_eos_once, cancelled in the
         # ASRFinal / SLVError / reconnect paths.
         self._asr_watchdog_task: asyncio.Task | None = None
+        # Watchdog: SLV in jetson-qwen3asr-matcha-nx (and possibly others)
+        # can silently fail to produce TTS after a successful asr_final →
+        # tool_call → text-stream → tts_flush sequence. State stays
+        # THINKING forever waiting for tts_started that never arrives.
+        # Armed when we transition into THINKING; cancelled by the first
+        # TTSStarted / TTSDone / ASRFinal (real activity) or SLVError.
+        # On fire, force state back to IDLE so the next user turn isn't
+        # blocked. Configurable via ``thinking_timeout_s`` (default 20s).
+        self._thinking_watchdog_task: asyncio.Task | None = None
         # Dashboard mic RMS is a best-effort visualization signal. Never let
         # a slow browser/plugin backpressure the hot mic pump; at most one
         # RMS hook fanout may be in flight and newer samples are dropped.
@@ -799,6 +808,70 @@ class BaseApp:
         self._cancel_asr_watchdog()
         self._first_tts_seen = False
 
+    def _arm_thinking_watchdog(self) -> None:
+        """Re-arm the THINKING-state watchdog.
+
+        Idempotent: a prior task is cancelled. Called every time we
+        transition INTO THINKING (real asr_final, dashboard text inject).
+        """
+        if self._thinking_watchdog_task is not None and not self._thinking_watchdog_task.done():
+            self._thinking_watchdog_task.cancel()
+        self._thinking_watchdog_task = asyncio.create_task(
+            self._thinking_watchdog(), name="thinking-watchdog",
+        )
+
+    def _cancel_thinking_watchdog(self) -> None:
+        """Cancel the THINKING watchdog if armed. Idempotent."""
+        if self._thinking_watchdog_task is not None and not self._thinking_watchdog_task.done():
+            self._thinking_watchdog_task.cancel()
+        self._thinking_watchdog_task = None
+
+    async def _thinking_watchdog(self) -> None:
+        """Force state back to IDLE if THINKING never resolves into
+        SPEAKING (no ``tts_started`` event from SLV).
+
+        Observed failure on jetson-qwen3asr-matcha-nx: after a successful
+        ASR → LLM → tool_call → text-stream → flush_tts cycle, the SLV
+        server occasionally fails to start TTS playback (no further
+        events from the WS even though it stays connected). Without this
+        watchdog the FSM stays THINKING forever and every subsequent
+        user utterance is ignored. On fire we reconnect SLV (which gives
+        a fresh worker) and reset state to IDLE so the next turn can
+        proceed.
+        """
+        timeout = float(getattr(self.config, "thinking_timeout_s", 20.0))
+        try:
+            await asyncio.sleep(timeout)
+        except asyncio.CancelledError:
+            return
+        if getattr(self, "_state", ConvState.IDLE) != ConvState.THINKING:
+            return  # state moved on naturally; nothing to do
+        logger.warning(
+            "thinking watchdog fired (no tts_started in %.1fs after asr_final); "
+            "resetting state to IDLE and reconnecting SLV",
+            timeout,
+        )
+        # Drop any LLM turn task that's still believed to be in flight.
+        if self._llm_turn_task is not None and not self._llm_turn_task.done():
+            self._llm_turn_task.cancel()
+            try:
+                await self._llm_turn_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        # Force a fresh WS — the server-side TTS pipeline is likely
+        # wedged on the current session. Best-effort.
+        try:
+            await asyncio.wait_for(self.slv.reconnect(), timeout=3.0)
+            self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
+            await self._broadcast(
+                "on_slv_reconnect", {"count": self._slv_reconnect_count}
+            )
+        except Exception:
+            logger.exception("SLV reconnect failed during thinking-watchdog recovery")
+        self._first_tts_seen = False
+        self._set_state(ConvState.IDLE)
+        self._reset_sleep_timer()
+
     async def _asr_final_watchdog(self) -> None:
         """Force state back to IDLE if asr_final never arrives after asr_eos.
 
@@ -1212,6 +1285,11 @@ class BaseApp:
             # set it). Idempotent for client-VAD path which already set
             # THINKING in _update_vad.
             self._set_state(ConvState.THINKING)
+            # Arm the thinking watchdog so a wedged SLV TTS pipeline
+            # can't strand the FSM here forever (see _thinking_watchdog
+            # docstring). Cancelled by the first tts_started/tts_done
+            # event or by SLVError, whichever comes first.
+            self._arm_thinking_watchdog()
             self._llm_turn_task = asyncio.create_task(
                 self._run_user_utterance(evt.text, evt.language),
                 name="llm-turn",
@@ -1219,6 +1297,8 @@ class BaseApp:
             return
 
         if isinstance(evt, TTSStarted):
+            # Real TTS started — thinking watchdog can stand down.
+            self._cancel_thinking_watchdog()
             await self._broadcast("on_assistant_sentence_start", evt.sentence)
             return
 
@@ -1253,6 +1333,7 @@ class BaseApp:
         if isinstance(evt, TTSDone):
             # Reset first-frame flag so the NEXT turn re-emits SPEAKING.
             self._first_tts_seen = False
+            self._cancel_thinking_watchdog()
             # Authoritative is_playing reset (audio_io stopped doing this on
             # transient empty queue to keep barge-in checks reliable).
             mark = getattr(self.audio, "mark_playback_done", None)
@@ -1282,9 +1363,11 @@ class BaseApp:
             return
 
         if isinstance(evt, SLVError):
-            # Transport died — any pending asr_final watchdog is moot;
-            # SLVError handling below already drives state back to IDLE.
+            # Transport died — any pending asr_final / thinking watchdog
+            # is moot; SLVError handling below already drives state
+            # back to IDLE.
             self._cancel_asr_watchdog()
+            self._cancel_thinking_watchdog()
             old_state = getattr(self, "_state", ConvState.IDLE)
             await self._broadcast(
                 "on_error",
