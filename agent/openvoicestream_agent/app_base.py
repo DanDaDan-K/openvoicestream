@@ -1096,7 +1096,8 @@ class BaseApp:
             # SLV's silero VAD can fire spurious empty endpoints from breath/
             # ambient noise; ignore empty partials so we don't trigger
             # bogus barge-ins or noise the dashboard.
-            if not (evt.text or "").strip():
+            partial_text = (evt.text or "").strip()
+            if not partial_text:
                 return
             # Barge-in: user spoke (real text) while we were SPEAKING.
             #
@@ -1111,6 +1112,34 @@ class BaseApp:
             # into a loop of fake barge-ins on garbled partials. By
             # requiring SPEAKING/BARGED_IN here we treat a partial during
             # IDLE/THINKING as the start of a normal utterance.
+            #
+            # ALSO: require a MINIMUM partial length AND a minimum delay
+            # since TTS began. The reSpeaker XVF3800's hardware AEC isn't
+            # perfect — the speaker's first 200-500ms of output bleeds
+            # into the open mic, server silero triggers, and the FIRST
+            # partial we see is the agent's own "好的。" coming back. If
+            # we honour that as barge-in we cancel our own turn before
+            # the user could possibly speak. Min length (2 chars) +
+            # min delay since TTS started (500ms) suppresses the echo
+            # blip; a real barge-in of "Hey Jarvis ..." easily meets both.
+            now_ts = time.monotonic()
+            barge_min_chars = int(getattr(self.config, "barge_in_min_chars", 2))
+            barge_min_speaking_ms = int(getattr(self.config, "barge_in_min_speaking_ms", 500))
+            speaking_since = getattr(self, "_speaking_since_ts", 0.0)
+            elapsed_ms = (now_ts - speaking_since) * 1000 if speaking_since else 99999
+            if len(partial_text) < barge_min_chars:
+                logger.debug(
+                    "barge-in skipped: partial too short (len=%d < %d): %r",
+                    len(partial_text), barge_min_chars, partial_text,
+                )
+                return
+            if elapsed_ms < barge_min_speaking_ms:
+                logger.debug(
+                    "barge-in skipped: elapsed only %.0fms since TTS start (need >=%dms) — "
+                    "treating partial %r as echo",
+                    elapsed_ms, barge_min_speaking_ms, partial_text,
+                )
+                return
             if self._state in (ConvState.SPEAKING, ConvState.BARGED_IN) and self.audio.is_playing:
                 logger.info(
                     "BARGE-IN fired (state=%s, partial=%r)",
@@ -1342,6 +1371,11 @@ class BaseApp:
                 first_frame = True
                 self.audio.set_output_sample_rate(evt.sample_rate)
                 self._set_state(ConvState.SPEAKING)
+                # Stamp the moment TTS playback actually began so the
+                # barge-in gate (see ASRPartial handler) can suppress the
+                # echo blip from the speaker's first 200-500ms output
+                # leaking back through the open mic.
+                self._speaking_since_ts = time.monotonic()
             await self._broadcast(
                 "on_tts_audio_frame",
                 {
