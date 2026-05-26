@@ -3001,8 +3001,34 @@ async def v2v_stream(ws: WebSocket):
                             await send_json({"type": v2v_proto.SERVER_TTS_STARTED, "sentence": sentence})
                             loop.run_in_executor(_get_tts_stream_executor(), _run_synth, sentence, synth_backend)
                             state["tts_started"] = True
+                            # Watchdog: if the synth thread doesn't produce
+                            # a chunk within this many seconds, treat the
+                            # sentence as failed and continue. Without this
+                            # a wedged TTS backend (model load issue, GPU
+                            # OOM, etc.) leaves the client (and any
+                            # downstream agent) waiting forever on a
+                            # promise the server can never fulfil.
+                            tts_chunk_timeout_s = float(
+                                os.getenv("OVS_TTS_CHUNK_TIMEOUT_S", "10.0")
+                            )
                             while True:
-                                item = await audio_queue.get()
+                                try:
+                                    item = await asyncio.wait_for(
+                                        audio_queue.get(),
+                                        timeout=tts_chunk_timeout_s,
+                                    )
+                                except asyncio.TimeoutError:
+                                    logger.warning(
+                                        "v2v tts watchdog: no chunk within %.1fs for "
+                                        "sentence=%r — aborting synth and emitting error",
+                                        tts_chunk_timeout_s, sentence[:80],
+                                    )
+                                    stop_event.set()
+                                    await send_error(
+                                        f"tts: synth produced no chunks within "
+                                        f"{tts_chunk_timeout_s:.0f}s"
+                                    )
+                                    break
                                 if item is None:
                                     break
                                 if isinstance(item, tuple) and item[0] == "__error__":
