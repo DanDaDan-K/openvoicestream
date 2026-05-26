@@ -1277,6 +1277,22 @@ class BaseApp:
                 self._set_state(ConvState.IDLE)
             else:
                 logger.info("SLVError while SLEEPING; staying SLEEPING")
+            # Reconnect the transport so the next mic chunk has a live WS to
+            # land on. Without this, the agent stays alive but functionally
+            # mute: send_audio() silently drops every chunk into the dead
+            # connection, no asr_final ever arrives, and the user only gets
+            # the failure mode by restarting the container. Best-effort —
+            # if the SLV server is down we'll just SLVError again next try.
+            try:
+                await asyncio.wait_for(self.slv.reconnect(), timeout=2.0)
+                self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
+                await self._broadcast(
+                    "on_slv_reconnect", {"count": self._slv_reconnect_count}
+                )
+            except asyncio.TimeoutError:
+                logger.warning("SLV reconnect timed out after SLVError")
+            except Exception:
+                logger.exception("SLV reconnect failed after SLVError")
             return
 
     async def _run_user_utterance(
