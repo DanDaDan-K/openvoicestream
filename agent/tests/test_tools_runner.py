@@ -614,6 +614,165 @@ async def test_tool_preamble_callback_failure_is_swallowed():
     assert final == "done"
 
 
+@pytest.mark.asyncio
+async def test_response_mode_await_runs_llm_round_2():
+    """Default ``await`` mode (backward compat) — runner still calls
+    LLM round 2 after dispatch, final text comes from LLM."""
+    session = Session()
+    registry = ToolRegistry()
+
+    @registry.tool()  # response_mode defaults to "await"
+    def wave() -> dict:
+        return {"success": True}
+
+    llm = _FakeLLM([
+        [_tc(0, id="c1", name="wave", arguments="{}"), _finish("tool_calls")],
+        [_text("waved hello"), _finish("stop")],
+    ])
+
+    completion_texts: list[str] = []
+
+    async def on_tok(_):
+        pass
+
+    async def on_completion_text(t):
+        completion_texts.append(t)
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
+    final = await stream_with_tools(
+        llm, msgs,
+        session=session, registry=registry, allowed_tools={"wave"},
+        ctx=_make_ctx(session), on_assistant_token=on_tok,
+        on_tool_completion_text=on_completion_text,
+    )
+    # LLM round 2 produced the final text
+    assert final == "waved hello"
+    # No completion_text emitted (mode is "await")
+    assert completion_texts == []
+    # 2 LLM calls (round 1 + round 2)
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_response_mode_template_skips_llm_round_2():
+    """``template`` mode — runner skips LLM round 2 and emits fixed
+    completion_text via the callback. Final text matches completion_text."""
+    session = Session()
+    registry = ToolRegistry()
+
+    @registry.tool(response_mode="template", completion_text="挥完了")
+    def wave() -> dict:
+        return {"success": True}
+
+    llm = _FakeLLM([
+        [_tc(0, id="c1", name="wave", arguments="{}"), _finish("tool_calls")],
+        # 2nd entry exists only to assert it's NOT consumed
+        [_text("SHOULD NOT BE USED"), _finish("stop")],
+    ])
+
+    completion_texts: list[str] = []
+
+    async def on_tok(_):
+        pass
+
+    async def on_completion_text(t):
+        completion_texts.append(t)
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
+    final = await stream_with_tools(
+        llm, msgs,
+        session=session, registry=registry, allowed_tools={"wave"},
+        ctx=_make_ctx(session), on_assistant_token=on_tok,
+        on_tool_completion_text=on_completion_text,
+    )
+    assert final == "挥完了"
+    assert completion_texts == ["挥完了"]
+    # ONLY 1 LLM call — round 2 was skipped
+    assert len(llm.calls) == 1
+    # Session history must have the synth assistant text appended for
+    # next-turn coherence.
+    assert session.history[-1] == {"role": "assistant", "content": "挥完了"}
+
+
+@pytest.mark.asyncio
+async def test_response_mode_template_failure_falls_through_to_llm():
+    """If a template-mode tool returns success=False, runner must NOT
+    emit completion_text — instead run LLM round 2 so the model can
+    react to the error."""
+    session = Session()
+    registry = ToolRegistry()
+
+    @registry.tool(response_mode="template", completion_text="ok")
+    def wave() -> dict:
+        return {"success": False, "error": "boom"}
+
+    llm = _FakeLLM([
+        [_tc(0, id="c1", name="wave", arguments="{}"), _finish("tool_calls")],
+        [_text("sorry, failed"), _finish("stop")],
+    ])
+
+    completion_texts: list[str] = []
+
+    async def on_tok(_):
+        pass
+
+    async def on_completion_text(t):
+        completion_texts.append(t)
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
+    final = await stream_with_tools(
+        llm, msgs,
+        session=session, registry=registry, allowed_tools={"wave"},
+        ctx=_make_ctx(session), on_assistant_token=on_tok,
+        on_tool_completion_text=on_completion_text,
+    )
+    assert final == "sorry, failed"
+    assert completion_texts == []  # not emitted on failure
+    assert len(llm.calls) == 2  # LLM round 2 happened
+
+
+@pytest.mark.asyncio
+async def test_response_mode_parallel_runs_llm_round_2_on_fast_result():
+    """``parallel`` mode behaves like await in the runner (no special
+    branching) — the contract is that the TOOL BODY returns fast and
+    LLM round 2 acknowledges the started state. The runner doesn't
+    block on a background task; that's the tool's responsibility."""
+    session = Session()
+    registry = ToolRegistry()
+
+    @registry.tool(response_mode="parallel", completion_text="done")
+    def wave() -> dict:
+        # Simulate fast-return: real arm_plugin.dispatch_action returns
+        # {"started": True} after ~200ms.
+        return {"started": True, "success": True}
+
+    llm = _FakeLLM([
+        [_tc(0, id="c1", name="wave", arguments="{}"), _finish("tool_calls")],
+        [_text("ok, on it"), _finish("stop")],
+    ])
+
+    completion_texts: list[str] = []
+
+    async def on_tok(_):
+        pass
+
+    async def on_completion_text(t):
+        completion_texts.append(t)
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
+    final = await stream_with_tools(
+        llm, msgs,
+        session=session, registry=registry, allowed_tools={"wave"},
+        ctx=_make_ctx(session), on_assistant_token=on_tok,
+        on_tool_completion_text=on_completion_text,
+    )
+    assert final == "ok, on it"
+    # parallel mode does NOT auto-emit completion_text (that's template's
+    # job); the LLM round 2 covers the acknowledgement.
+    assert completion_texts == []
+    assert len(llm.calls) == 2
+
+
 def test_tool_dataclass_default_preamble_is_empty():
     """Bare ``@tool()`` registration must default preamble_text to ''
     (not None), so callers can ``if preamble:`` safely."""

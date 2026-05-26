@@ -219,6 +219,34 @@ def test_list_openai_tools_allow_filter():
     assert {t["function"]["name"] for t in r.list_openai_tools(None)} == {"a", "b"}
 
 
+def test_tool_response_mode_and_completion_text_defaults():
+    """New metadata fields default to ``await`` + empty string so existing
+    callers behave exactly as before."""
+    r = ToolRegistry()
+
+    @r.tool()
+    def t() -> dict:
+        return {}
+
+    meta = r._tools["t"]
+    assert meta.response_mode == "await"
+    assert meta.completion_text == ""
+
+
+def test_tool_response_mode_and_completion_text_kwargs_threaded():
+    """`response_mode` + `completion_text` kwargs on ``@tool`` are stored
+    on the Tool dataclass verbatim."""
+    r = ToolRegistry()
+
+    @r.tool(response_mode="parallel", completion_text="挥完了")
+    def wave() -> dict:
+        return {"started": True}
+
+    meta = r._tools["wave"]
+    assert meta.response_mode == "parallel"
+    assert meta.completion_text == "挥完了"
+
+
 def test_unregister_returns_true_when_present_false_when_absent():
     from openvoicestream_agent.tools import ToolRegistry
     reg = ToolRegistry()

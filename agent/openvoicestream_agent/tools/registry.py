@@ -44,6 +44,27 @@ class Tool:
     # Default empty string = no preamble (backward compat — old @tool
     # call sites that don't pass this field behave exactly as before).
     preamble_text: str = ""
+    # Fixed verbal acknowledgement spoken on successful tool completion
+    # — used when ``response_mode == "template"`` (skip LLM round 2
+    # entirely and synthesise this string instead) and as an optional
+    # post-dispatch confirmation for "parallel". Empty string = no
+    # completion text.
+    completion_text: str = ""
+    # How the runner should sequence the LLM round 2 / TTS reply after
+    # dispatching this tool:
+    #   * ``await``    — (default, backward compat) dispatch, wait for
+    #                    the result, then run LLM round 2 normally.
+    #   * ``parallel`` — dispatch returns fast (tool body is expected
+    #                    to be non-blocking, e.g. starts an async job
+    #                    and returns ``{"status":"started"}`` in ~200ms).
+    #                    LLM round 2 runs immediately on that quick
+    #                    result. Use when the tool's physical side-
+    #                    effect overlaps the spoken acknowledgement.
+    #   * ``template`` — dispatch normally, skip LLM round 2, emit the
+    #                    fixed ``completion_text`` via the on_tool_
+    #                    completion_text callback. Lowest latency post-
+    #                    tool reply; no LLM creativity.
+    response_mode: str = "await"
 
 
 def _py_type_to_schema(t: Any) -> dict[str, Any]:
@@ -122,6 +143,8 @@ class ToolRegistry:
         description: str = "",
         timeout_s: float = 10.0,
         preamble_text: str = "",
+        completion_text: str = "",
+        response_mode: str = "await",
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Decorator: register ``fn`` as a tool.
 
@@ -155,6 +178,8 @@ class ToolRegistry:
                 fn=fn,
                 timeout_s=timeout_s,
                 preamble_text=preamble_text,
+                completion_text=completion_text,
+                response_mode=response_mode,
             )
             return fn
 

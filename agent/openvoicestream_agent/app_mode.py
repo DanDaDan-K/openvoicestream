@@ -241,6 +241,23 @@ class ModeContext:
                         "tool preamble send_text failed", exc_info=True
                     )
 
+            async def _on_tool_completion_text(text: str) -> None:
+                # Counterpart to _on_tool_preamble — synthesised at the
+                # end of a "template" response_mode tool round in lieu of
+                # an LLM round 2. Fail-open: TTS drop must not abort
+                # the dialogue.
+                if not text:
+                    return
+                try:
+                    await self.slv.send_text(text)
+                    logger.info(
+                        "dispatched tool completion_text to SLV: %r", text
+                    )
+                except Exception:  # pragma: no cover - best effort
+                    logger.warning(
+                        "tool completion_text send_text failed", exc_info=True
+                    )
+
             async def _on_tool_completed(
                 tc: dict, result: dict, dt_ms: float
             ) -> None:
@@ -294,6 +311,7 @@ class ModeContext:
                 # ``tools_enabled`` directly — that's the real semantic.
                 on_tool_started=_on_tool_started if tools_enabled else None,
                 on_tool_preamble=_on_tool_preamble if tools_enabled else None,
+                on_tool_completion_text=_on_tool_completion_text if tools_enabled else None,
                 on_tool_completed=_on_tool_completed if tools_enabled else None,
                 llm_kwargs=llm_kwargs,
                 first_token_timeout_s=first_timeout,

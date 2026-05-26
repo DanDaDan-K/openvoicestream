@@ -57,6 +57,10 @@ ToolCompletedCB = Callable[[dict[str, Any], dict[str, Any], float], Awaitable[No
 # verbatim preamble (e.g. "好的。") — the app wires this to its TTS
 # channel. Callers that don't care can leave it None.
 ToolPreambleCB = Callable[[str], Awaitable[None]]
+# Fired in "template" response_mode INSTEAD of running LLM round 2.
+# Receives the registered Tool.completion_text and (like preamble) is
+# wired by app_mode to slv.send_text. Failures are swallowed.
+ToolCompletionTextCB = Callable[[str], Awaitable[None]]
 
 
 def _open_stream(llm: Any, messages: list[dict[str, Any]], kwargs: dict[str, Any]):
@@ -93,6 +97,7 @@ async def stream_with_tools(
     on_assistant_token: AssistantTokenCB,
     on_tool_started: ToolStartedCB | None = None,
     on_tool_preamble: ToolPreambleCB | None = None,
+    on_tool_completion_text: ToolCompletionTextCB | None = None,
     on_tool_completed: ToolCompletedCB | None = None,
     llm_kwargs: dict[str, Any] | None = None,
     first_token_timeout_s: float | None = None,
@@ -274,6 +279,10 @@ async def stream_with_tools(
             # fallback: tc_payload is built sorted by tool_accs keys, so
             # enumerate aligns with the original tool_call indexes.
             sorted_idxs = sorted(tool_accs.keys())
+            # Track per-tool response_mode + completion_text for the
+            # post-dispatch branch below. Filled in lock-step with the
+            # dispatch loop.
+            dispatched_modes: list[tuple[str, str, dict[str, Any]]] = []
             for tc_pos, tc in enumerate(tc_payload):
                 tc_idx = sorted_idxs[tc_pos] if tc_pos < len(sorted_idxs) else tc_pos
                 if on_tool_started is not None:
@@ -332,6 +341,56 @@ async def stream_with_tools(
                         logger.debug(
                             "on_tool_completed raised", exc_info=True
                         )
+                # Record response_mode + completion_text for post-loop
+                # template/parallel handling.
+                tname = tc.get("function", {}).get("name") or ""
+                tool_meta = registry._tools.get(tname) if tname else None
+                rmode = getattr(tool_meta, "response_mode", "await") or "await"
+                ctext = getattr(tool_meta, "completion_text", "") or ""
+                dispatched_modes.append((rmode, ctext, result))
+
+            # response_mode dispatch:
+            # * If ANY dispatched tool succeeded AND its mode is
+            #   "template", skip LLM round 2 entirely and emit the
+            #   per-tool completion_text via on_tool_completion_text.
+            # * On template failure, fall through to a normal LLM
+            #   round 2 so the model can apologise / re-plan.
+            template_handled = False
+            for rmode, ctext, result in dispatched_modes:
+                if rmode != "template":
+                    continue
+                ok = not (
+                    isinstance(result, dict) and result.get("success") is False
+                )
+                if not ok:
+                    template_handled = False
+                    break
+                template_handled = True
+                if ctext and on_tool_completion_text is not None:
+                    try:
+                        await on_tool_completion_text(ctext)
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "on_tool_completion_text raised", exc_info=True
+                        )
+            if template_handled:
+                # Synthesise an assistant text turn matching the spoken
+                # completion_text so session history stays coherent for
+                # the NEXT user turn (LLM sees we "responded").
+                synth_text = next(
+                    (
+                        ct
+                        for rm, ct, _ in dispatched_modes
+                        if rm == "template" and ct
+                    ),
+                    "",
+                )
+                if synth_text:
+                    session.add_assistant(synth_text)
+                    messages.append(
+                        {"role": "assistant", "content": synth_text}
+                    )
+                return synth_text
             # loop continues
 
         # Iteration cap hit. Must-fix #2 (codex review): the partial
