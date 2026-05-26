@@ -52,6 +52,11 @@ class _ToolCallAcc:
 AssistantTokenCB = Callable[[str], Awaitable[None]]
 ToolStartedCB = Callable[[dict[str, Any]], Awaitable[None]]
 ToolCompletedCB = Callable[[dict[str, Any], dict[str, Any], float], Awaitable[None]]
+# Fired right after on_tool_started, ONLY if the dispatched tool was
+# registered with a non-empty ``preamble_text``. The string is the
+# verbatim preamble (e.g. "好的。") — the app wires this to its TTS
+# channel. Callers that don't care can leave it None.
+ToolPreambleCB = Callable[[str], Awaitable[None]]
 
 
 def _open_stream(llm: Any, messages: list[dict[str, Any]], kwargs: dict[str, Any]):
@@ -87,6 +92,7 @@ async def stream_with_tools(
     max_iterations: int = 5,
     on_assistant_token: AssistantTokenCB,
     on_tool_started: ToolStartedCB | None = None,
+    on_tool_preamble: ToolPreambleCB | None = None,
     on_tool_completed: ToolCompletedCB | None = None,
     llm_kwargs: dict[str, Any] | None = None,
     first_token_timeout_s: float | None = None,
@@ -240,6 +246,23 @@ async def stream_with_tools(
                         await on_tool_started(tc)
                     except Exception:  # noqa: BLE001
                         logger.debug("on_tool_started raised", exc_info=True)
+                # Per-tool preamble: fire the metadata-declared verbal
+                # acknowledgement BEFORE the (potentially slow) tool
+                # dispatches. We pull the registered Tool directly off
+                # the registry so callers that bypass the decorator
+                # (programmatic ``registry.register(...)``) still
+                # benefit. Lookup-miss + empty preamble = no-op.
+                if on_tool_preamble is not None:
+                    tname = tc.get("function", {}).get("name") or ""
+                    tool_meta = registry._tools.get(tname) if tname else None
+                    preamble = getattr(tool_meta, "preamble_text", "") or ""
+                    if preamble:
+                        try:
+                            await on_tool_preamble(preamble)
+                        except Exception:  # noqa: BLE001
+                            logger.debug(
+                                "on_tool_preamble raised", exc_info=True
+                            )
                 t0 = time.monotonic()
                 args_raw = tc["function"]["arguments"]
                 try:

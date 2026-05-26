@@ -221,6 +221,23 @@ class ModeContext:
                     pass
                 await self.broadcast("on_tool_call_started", payload)
 
+            async def _on_tool_preamble(text: str) -> None:
+                # Stream the per-tool preamble verbatim to SLV. The
+                # server's sentence-boundary accumulator will synthesise
+                # this immediately (punctuation terminates the
+                # sentence) so the user hears an acknowledgement while
+                # the (potentially slow) tool dispatch is still in
+                # flight. Fail-open — a dropped/reconnecting SLV must
+                # not abort the tool round.
+                if not text:
+                    return
+                try:
+                    await self.slv.send_text(text)
+                except Exception:  # pragma: no cover - best effort
+                    logger.debug(
+                        "tool preamble send_text failed", exc_info=True
+                    )
+
             async def _on_tool_completed(
                 tc: dict, result: dict, dt_ms: float
             ) -> None:
@@ -273,6 +290,7 @@ class ModeContext:
                 # the truthy check below would skip the callbacks. Gate on
                 # ``tools_enabled`` directly — that's the real semantic.
                 on_tool_started=_on_tool_started if tools_enabled else None,
+                on_tool_preamble=_on_tool_preamble if tools_enabled else None,
                 on_tool_completed=_on_tool_completed if tools_enabled else None,
                 llm_kwargs=llm_kwargs,
                 first_token_timeout_s=first_timeout,

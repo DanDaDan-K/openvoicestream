@@ -32,6 +32,18 @@ class Tool:
     parameters: dict  # JSON Schema (OpenAI-style)
     fn: Callable[..., Any]
     timeout_s: float = 10.0
+    # Optional per-tool "preamble" — short verbal acknowledgement (e.g.
+    # "Okay." / "好的。") emitted via the agent's TTS channel the moment
+    # the tool starts executing, BEFORE its result is appended to
+    # history. Use for tools whose physical/real-world side-effect takes
+    # noticeable time (robot motion, deploy, long-running query) and
+    # whose hosting LLM structurally emits ``content=None + tool_calls``
+    # (e.g. Qwen3-AWQ in no-think mode), making prompt-side "say OK
+    # first" rules impossible to enforce.
+    #
+    # Default empty string = no preamble (backward compat — old @tool
+    # call sites that don't pass this field behave exactly as before).
+    preamble_text: str = ""
 
 
 def _py_type_to_schema(t: Any) -> dict[str, Any]:
@@ -109,6 +121,7 @@ class ToolRegistry:
         name: str | None = None,
         description: str = "",
         timeout_s: float = 10.0,
+        preamble_text: str = "",
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Decorator: register ``fn`` as a tool.
 
@@ -141,6 +154,7 @@ class ToolRegistry:
                 parameters=params,
                 fn=fn,
                 timeout_s=timeout_s,
+                preamble_text=preamble_text,
             )
             return fn
 

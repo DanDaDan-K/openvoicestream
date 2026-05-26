@@ -468,3 +468,156 @@ async def test_iter_gt_zero_preserves_caller_extra_body():
     second_kw = llm.calls[1]["kwargs"]
     assert second_kw["extra_body"]["custom_flag"] == "keep_me"
     assert second_kw["extra_body"]["prefix_cache"] is False
+
+
+# ── (k) per-tool preamble_text metadata fires on_tool_preamble ────────
+
+
+@pytest.mark.asyncio
+async def test_tool_preamble_text_fires_callback():
+    """A tool registered with ``preamble_text="..."`` must trigger the
+    ``on_tool_preamble`` callback after ``on_tool_started`` and before
+    the tool body runs. Tools without it must NOT fire the callback."""
+    session = Session()
+    registry = ToolRegistry()
+
+    @registry.tool(preamble_text="好的。")
+    def wave_hand() -> dict:
+        return {"ok": True}
+
+    @registry.tool()
+    def silent_tool() -> dict:
+        return {"ok": True}
+
+    llm = _FakeLLM([
+        # Round 1: model calls wave_hand → expect preamble fired
+        [
+            _tc(0, id="c1", name="wave_hand", arguments="{}"),
+            _finish("tool_calls"),
+        ],
+        # Round 2: model calls silent_tool → expect NO preamble
+        [
+            _tc(0, id="c2", name="silent_tool", arguments="{}"),
+            _finish("tool_calls"),
+        ],
+        # Round 3: model finishes with text
+        [_text("done"), _finish("stop")],
+    ])
+
+    events: list[tuple[str, Any]] = []
+
+    async def on_tok(t):
+        events.append(("tok", t))
+
+    async def on_started(tc):
+        events.append(("started", tc["function"]["name"]))
+
+    async def on_preamble(text):
+        events.append(("preamble", text))
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
+    final = await stream_with_tools(
+        llm, msgs,
+        session=session,
+        registry=registry,
+        allowed_tools=None,
+        ctx=_make_ctx(session),
+        on_assistant_token=on_tok,
+        on_tool_started=on_started,
+        on_tool_preamble=on_preamble,
+    )
+    assert final == "done"
+
+    # Expected ordering:
+    #   started:wave_hand, preamble:好的。, started:silent_tool, tok:done
+    started_events = [e for e in events if e[0] == "started"]
+    preamble_events = [e for e in events if e[0] == "preamble"]
+    assert started_events == [("started", "wave_hand"), ("started", "silent_tool")]
+    assert preamble_events == [("preamble", "好的。")]
+
+    # Ordering check: preamble for wave_hand must come AFTER its
+    # on_tool_started and BEFORE silent_tool's on_tool_started.
+    idx_wave_started = events.index(("started", "wave_hand"))
+    idx_preamble = events.index(("preamble", "好的。"))
+    idx_silent_started = events.index(("started", "silent_tool"))
+    assert idx_wave_started < idx_preamble < idx_silent_started
+
+
+@pytest.mark.asyncio
+async def test_tool_preamble_backward_compat_no_callback():
+    """Callers that don't pass ``on_tool_preamble`` must still work
+    (backward compat — voice-arm v1 and the rest of the test suite
+    rely on this default)."""
+    session = Session()
+    registry = ToolRegistry()
+
+    @registry.tool(preamble_text="hello.")
+    def t() -> dict:
+        return {"ok": True}
+
+    llm = _FakeLLM([
+        [_tc(0, id="c1", name="t", arguments="{}"), _finish("tool_calls")],
+        [_text("k"), _finish("stop")],
+    ])
+
+    async def on_tok(_):
+        pass
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
+    # No on_tool_preamble kwarg — must not raise.
+    final = await stream_with_tools(
+        llm, msgs,
+        session=session,
+        registry=registry,
+        allowed_tools=None,
+        ctx=_make_ctx(session),
+        on_assistant_token=on_tok,
+    )
+    assert final == "k"
+
+
+@pytest.mark.asyncio
+async def test_tool_preamble_callback_failure_is_swallowed():
+    """If ``on_tool_preamble`` raises, the tool dispatch must continue
+    (fail-open semantics — TTS hiccups must never break tool calls)."""
+    session = Session()
+    registry = ToolRegistry()
+
+    @registry.tool(preamble_text="oops.")
+    def t() -> dict:
+        return {"ok": True}
+
+    llm = _FakeLLM([
+        [_tc(0, id="c1", name="t", arguments="{}"), _finish("tool_calls")],
+        [_text("done"), _finish("stop")],
+    ])
+
+    async def on_tok(_):
+        pass
+
+    async def on_preamble(_text):
+        raise RuntimeError("simulated SLV drop")
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
+    final = await stream_with_tools(
+        llm, msgs,
+        session=session,
+        registry=registry,
+        allowed_tools=None,
+        ctx=_make_ctx(session),
+        on_assistant_token=on_tok,
+        on_tool_preamble=on_preamble,
+    )
+    assert final == "done"
+
+
+def test_tool_dataclass_default_preamble_is_empty():
+    """Bare ``@tool()`` registration must default preamble_text to ''
+    (not None), so callers can ``if preamble:`` safely."""
+    registry = ToolRegistry()
+
+    @registry.tool()
+    def t() -> dict:
+        return {}
+
+    assert registry._tools["t"].preamble_text == ""
