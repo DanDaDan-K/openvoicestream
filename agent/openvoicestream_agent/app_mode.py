@@ -282,6 +282,28 @@ class ModeContext:
             completed = True
         except asyncio.CancelledError:
             cancelled = True
+            # CRITICAL: tell SLV to drop the per-turn text buffer.
+            # Tokens already streamed via ``slv.send_text()`` sit on the
+            # server until a ``tts_flush`` or ``abort``. If this cancel
+            # was a barge-in (or a thinking-watchdog recovery, or a new
+            # asr_final pre-empting an in-flight turn), the next turn's
+            # tokens get APPENDED to ours → server TTSes the merge of
+            # both turns and our state machine sees confused replies.
+            # Best-effort; if SLV is unreachable we'll fail open and the
+            # next turn at least starts on a fresh connect.
+            if chunks:
+                try:
+                    await self.slv.abort()
+                except Exception:  # pragma: no cover - best effort
+                    logger.debug("SLV abort during cancel failed", exc_info=True)
+                stop = getattr(self.audio, "stop_playback", None)
+                if callable(stop):
+                    try:
+                        await stop()
+                    except Exception:  # pragma: no cover - best effort
+                        logger.debug(
+                            "stop_playback during cancel failed", exc_info=True
+                        )
             raise
         except Exception:
             # Partial tokens already flushed to SLV's TTS buffer — abort
