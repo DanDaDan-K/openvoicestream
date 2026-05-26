@@ -168,6 +168,20 @@ class ToolRegistry:
     def has(self, name: str) -> bool:
         return name in self._tools
 
+    def list_names(self) -> list[str]:
+        """Return registered tool names (registration order)."""
+        return list(self._tools.keys())
+
+    def unregister(self, name: str) -> bool:
+        """Remove a tool from the registry. Returns True if it was present.
+
+        Idempotent: unregistering an unknown name returns False without
+        raising. Use when a plugin needs to refresh its tool set at
+        runtime (e.g. ``actions.yaml`` edited via an HTTP endpoint) —
+        unregister the old names, then re-decorate with the new ones.
+        """
+        return self._tools.pop(name, None) is not None
+
     async def dispatch(
         self,
         name: str,

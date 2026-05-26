@@ -217,3 +217,32 @@ def test_list_openai_tools_allow_filter():
     assert names == {"a"}
     # None → expose all
     assert {t["function"]["name"] for t in r.list_openai_tools(None)} == {"a", "b"}
+
+
+def test_unregister_returns_true_when_present_false_when_absent():
+    from openvoicestream_agent.tools import ToolRegistry
+    reg = ToolRegistry()
+
+    @reg.tool()
+    def alpha() -> dict:
+        return {"ok": True}
+
+    @reg.tool()
+    def beta() -> dict:
+        return {"ok": True}
+
+    assert reg.has("alpha")
+    assert reg.has("beta")
+    assert set(reg.list_names()) == {"alpha", "beta"}
+
+    # First unregister removes; second returns False; idempotent.
+    assert reg.unregister("alpha") is True
+    assert reg.unregister("alpha") is False
+    assert not reg.has("alpha")
+    assert reg.has("beta")
+    assert reg.list_names() == ["beta"]
+
+    # list_openai_tools reflects the new state.
+    schemas = reg.list_openai_tools()
+    names = {t["function"]["name"] for t in schemas}
+    assert names == {"beta"}
