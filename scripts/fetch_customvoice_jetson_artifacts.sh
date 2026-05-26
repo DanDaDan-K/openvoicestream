@@ -29,22 +29,59 @@ FLEET_DEVICE="${FLEET_DEVICE:-orin-nx}"
 REMOTE_SNAPSHOT="${REMOTE_SNAPSHOT:-/home/harvest/customvoice-v071-snapshot/20260526}"
 FLEET_BIN="${FLEET_BIN:-uv run --project $HOME/project/_hub python $HOME/project/_hub/fleet.py}"
 
+# --build flag: build qwen3_tts_inference + ref embeds from source on this host
+# (must be a Jetson Orin with CUDA 12.6 toolkit installed). Falls back to
+# snapshot/fleet for the plugin .so since that one is not buildable from the
+# patched fork — see build_customvoice_jetson_binary.sh header.
+BUILD_FROM_SOURCE=0
+BUILD_ARGS=()
+parsed_args=()
+for arg in "$@"; do
+    case "$arg" in
+        --build) BUILD_FROM_SOURCE=1 ;;
+        *) parsed_args+=("$arg") ;;
+    esac
+done
+if [[ ${#parsed_args[@]} -gt 0 ]]; then
+    set -- "${parsed_args[@]}"
+else
+    set --
+fi
+
+if [[ "$BUILD_FROM_SOURCE" -eq 1 ]]; then
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    echo "==> --build: invoking build_customvoice_jetson_binary.sh"
+    "$script_dir/build_customvoice_jetson_binary.sh" \
+        --output-dir "$DEST" "${BUILD_ARGS[@]}"
+    echo
+    echo "==> Plugin .so (libNvInfer_edgellm_plugin.so.1.0) still needs to be"
+    echo "    fetched separately — continuing with snapshot/fleet for that file."
+fi
+
 declare -A EXPECTED_MD5=(
     [qwen3_tts_inference]="f50fedc960d8edf7304f897cddbbdaf7"
     [libNvInfer_edgellm_plugin.so.1.0]="3d6761ebbe0946720f9c1d35a56c1cda"
     [ref_talker_embeds_15row.bin]="fed8b23ca46246f5993ec26ab7d5c0f4"
 )
 
+# When --build was passed, binary + embeds were already produced from source;
+# only the plugin .so still needs to be fetched.
+if [[ "$BUILD_FROM_SOURCE" -eq 1 ]]; then
+    FETCH_FILES=("libNvInfer_edgellm_plugin.so.1.0")
+else
+    FETCH_FILES=("${!EXPECTED_MD5[@]}")
+fi
+
 mkdir -p "$DEST"
 
 if [[ -n "$SNAPSHOT" && -d "$SNAPSHOT" ]]; then
     echo "Copying from local snapshot: $SNAPSHOT"
-    for f in "${!EXPECTED_MD5[@]}"; do
+    for f in "${FETCH_FILES[@]}"; do
         cp -v "$SNAPSHOT/$f" "$DEST/$f"
     done
 else
     echo "Pulling from $FLEET_DEVICE:$REMOTE_SNAPSHOT via fleet"
-    for f in "${!EXPECTED_MD5[@]}"; do
+    for f in "${FETCH_FILES[@]}"; do
         $FLEET_BIN pull "$FLEET_DEVICE" "$REMOTE_SNAPSHOT/$f" "$DEST/$f"
     done
 fi
