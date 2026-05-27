@@ -2620,6 +2620,13 @@ async def v2v_stream(ws: WebSocket):
                                          # asr_out_task should finalize next tick
                                          # (BUG 3: avoids the flag-set/audio-accept
                                          # race that lost the tail of utterances)
+            # SLV #2 (2026-05-27): per-ASR-turn wall-clock deadline. Set when a
+            # turn starts (on_speech_start), cleared when it cleanly finalizes
+            # / cancels. asr_out_task polls this every tick; on expiry it forces
+            # a cancel + restart_worker so the WorkerIO semaphore slot is freed
+            # and the v2v handler can unwind (releases the SessionLimiter slot,
+            # preventing 4429 mute from a stuck Qwen3 inference).
+            "asr_turn_started_at": None,
         }
         tts_q: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_event_loop()
@@ -2695,6 +2702,7 @@ async def v2v_stream(ws: WebSocket):
                                 state["endpoint_pending_gen"] = None
                                 state["asr_active"] = True
                                 state["asr_active_gen"] = new_gen
+                                state["asr_turn_started_at"] = loop.time()
                                 speech_started_now = True
                             elif event == vad_mod.VADSession.SPEECH_END:
                                 # Defer setting endpoint_pending until AFTER we
@@ -2711,6 +2719,7 @@ async def v2v_stream(ws: WebSocket):
                             state["endpoint_pending_gen"] = None
                             state["asr_active"] = True
                             state["asr_active_gen"] = new_gen
+                            state["asr_turn_started_at"] = loop.time()
                         if state["asr_active"]:
                             async with coord.acquire("asr"):
                                 await asr_manager.accept_audio(samples)
@@ -2772,6 +2781,7 @@ async def v2v_stream(ws: WebSocket):
                             async with coord.acquire("asr"):
                                 await asr_manager.cancel("bargein")
                             state["asr_active"] = False
+                            state["asr_turn_started_at"] = None
             except WebSocketDisconnect:
                 state["client_closed"] = True
     
@@ -2785,7 +2795,83 @@ async def v2v_stream(ws: WebSocket):
             stream and returns the final text.
             """
             last_streamed_final = None
+            # SLV #2 (2026-05-27): wall-clock per-turn deadline. Env-driven so
+            # we can dial up on slow Jetsons. Covers the gap where the ASR
+            # backend gets wedged inside WorkerIO (qwen3_asr_worker stuck on
+            # an inference, GPU OOM deadlock, or stdout reader hung) — none of
+            # the existing per-stream timeouts (WorkerIO q.get 60s) fire when
+            # the worker is *producing* events that never lead to a final.
+            asr_turn_timeout_s = float(
+                os.getenv("OVS_ASR_TURN_TIMEOUT_S", "45.0")
+            )
             while not state["client_closed"]:
+                # ── Wall-clock turn deadline ────────────────────────────
+                # Active turn started but hasn't produced a final within
+                # the deadline → force cancel + worker restart so the
+                # WorkerIO semaphore slot is freed and this handler can
+                # unwind cleanly (releases the SessionLimiter slot).
+                turn_started = state.get("asr_turn_started_at")
+                if (
+                    state.get("asr_active")
+                    and turn_started is not None
+                    and (loop.time() - turn_started) > asr_turn_timeout_s
+                ):
+                    elapsed = loop.time() - turn_started
+                    logger.warning(
+                        "v2v ASR turn exceeded %.1fs wall-clock (elapsed=%.1fs); "
+                        "aborting turn + force-cancel ASR session",
+                        asr_turn_timeout_s, elapsed,
+                    )
+                    # Step 1: try cooperative cancel with a tight budget.
+                    if asr_manager is not None:
+                        try:
+                            await asyncio.wait_for(
+                                asr_manager.cancel("turn_timeout"),
+                                timeout=2.0,
+                            )
+                        except (asyncio.TimeoutError, Exception) as _exc:
+                            # cancel itself jammed → escalate to worker
+                            # restart directly. restart_worker uses the
+                            # default executor (not the wedged ASR slot),
+                            # so it cannot deadlock here.
+                            logger.error(
+                                "v2v ASR cancel timed out / failed (%s); "
+                                "force-restarting worker",
+                                _exc,
+                            )
+                            try:
+                                fn = getattr(asr_be, "restart_worker", None)
+                                if fn is not None:
+                                    loop2 = asyncio.get_event_loop()
+                                    await loop2.run_in_executor(None, fn)
+                            except Exception:
+                                logger.exception(
+                                    "v2v ASR restart_worker after turn timeout failed"
+                                )
+                    # Step 2: clear state + emit a final so the client side
+                    # cancels its turn promptly (instead of waiting for
+                    # its own thinking watchdog). Treat as empty final.
+                    state["asr_active"] = False
+                    state["asr_turn_started_at"] = None
+                    state["endpoint_pending"] = None
+                    state["endpoint_pending_gen"] = None
+                    try:
+                        await send_error(
+                            f"asr: per-turn deadline {asr_turn_timeout_s:.0f}s "
+                            f"exceeded"
+                        )
+                    except Exception:
+                        logger.exception("send_error after asr turn timeout failed")
+                    if multi_utterance and not state["asr_session_closed"]:
+                        # Multi-utterance: keep running; the next speech_start
+                        # will issue a new generation.
+                        await asyncio.sleep(0.05)
+                        continue
+                    else:
+                        # Single-utterance: terminate the task. The outer
+                        # try/finally will release the slot.
+                        return
+
                 # Pull a stream snapshot under the manager's lock so we can
                 # tag any partial with the generation it came from. If the
                 # generation has advanced by emit-time, drop the partial —
@@ -2852,6 +2938,7 @@ async def v2v_stream(ws: WebSocket):
                         # new utterance must continue to flow (BUG 2).
                         if finalize_accepted and state["asr_active_gen"] == finalize_gen:
                             state["asr_active"] = False
+                            state["asr_turn_started_at"] = None
                     else:
                         final_text = ""
                         ran_gen = state["asr_active_gen"]
