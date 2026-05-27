@@ -193,6 +193,15 @@ class SLVClient:
                     await old_ws.close()
                 except Exception:
                     pass
+            # Grace: let server SessionLimiter (limit=1, Qwen3-ASR worker is
+            # single-concurrent) observe the close + release the slot before
+            # we open a fresh WS. With proactive reconnects on tts_done /
+            # wake reverted (SLV server v1.15+ ASR turn timeout handles
+            # stuck workers), reconnect now only fires on genuine WS death
+            # — close-before-open races are no longer densely triggered,
+            # so 50ms of defensive grace is sufficient (was 150ms when
+            # proactive reconnect was active).
+            await asyncio.sleep(0.05)
             self._reader_done.clear()
             self._tts_sample_rate = None
             await self._open_with_retry()

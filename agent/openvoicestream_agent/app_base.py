@@ -438,48 +438,51 @@ class BaseApp:
         if getattr(self, "_state", ConvState.IDLE) != ConvState.SLEEPING:
             return
         logger.info("wake from %s", source)
-        # ALWAYS reconnect on wake. is_healthy() only checks TCP layer
-        # (ws present + reader task alive), but the Qwen3-ASR server worker
-        # can lock up silently while the WebSocket TCP connection stays
-        # alive — server stops processing audio frames, but client sees
-        # ws=alive, reader=alive, is_healthy=True → no reconnect → silent
-        # permanent mute. Force a fresh server-side session on every wake
-        # to guarantee no stale worker state. ~200ms reconnect cost is
-        # acceptable; silent mute is not.
-        try:
-            await asyncio.wait_for(self.slv.reconnect(), timeout=6.0)
-            self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
-            logger.info(
-                "wake: SLV reconnected fresh (count=%d)", self._slv_reconnect_count
-            )
+        # Health-gated reconnect on wake. SLV server v1.15+ added an ASR
+        # turn wall-clock timeout (SessionLimiter slot is force-released
+        # even when the Qwen3-ASR worker wedges), so the previous
+        # "always reconnect on wake" workaround is no longer needed —
+        # and was actively causing 4429 too_many_sessions because the
+        # new WS races the just-released slot. Only reconnect when
+        # is_healthy() reports the current WS is actually dead
+        # (ws missing or reader task exited). Healthy WS persists
+        # across multiple turns (correct per SLV multi_utterance
+        # protocol where session_complete=False).
+        if not self.slv.is_healthy():
             try:
-                await self._broadcast(
-                    "on_slv_reconnect",
-                    {"count": self._slv_reconnect_count},
+                await asyncio.wait_for(self.slv.reconnect(), timeout=6.0)
+                self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
+                logger.info(
+                    "wake: SLV reconnected fresh (count=%d)", self._slv_reconnect_count
                 )
-            except Exception:
-                logger.exception("on_slv_reconnect broadcast failed (wake)")
-        except (SLVReconnectError, asyncio.TimeoutError, ConnectionError) as e:
-            logger.error(
-                "wake: SLV reconnect failed (%s); staying SLEEPING to avoid silent mute",
-                e,
-            )
-            try:
-                await self._broadcast(
-                    "on_wake_failed",
-                    {"source": source, "reason": "slv_unhealthy"},
+                try:
+                    await self._broadcast(
+                        "on_slv_reconnect",
+                        {"count": self._slv_reconnect_count},
+                    )
+                except Exception:
+                    logger.exception("on_slv_reconnect broadcast failed (wake)")
+            except (SLVReconnectError, asyncio.TimeoutError, ConnectionError) as e:
+                logger.error(
+                    "wake: SLV reconnect failed (%s); staying SLEEPING to avoid silent mute",
+                    e,
                 )
+                try:
+                    await self._broadcast(
+                        "on_wake_failed",
+                        {"source": source, "reason": "slv_unhealthy"},
+                    )
+                except Exception:
+                    logger.exception("on_wake_failed broadcast failed")
+                # Do NOT transition to IDLE — caller (wake_source / dashboard)
+                # observes that we are still SLEEPING and can surface the
+                # failure to the user.
+                return
             except Exception:
-                logger.exception("on_wake_failed broadcast failed")
-            # Do NOT transition to IDLE — caller (wake_source / dashboard)
-            # observes that we are still SLEEPING and can surface the
-            # failure to the user.
-            return
-        except Exception:
-            logger.exception(
-                "wake: SLV reconnect raised unexpected error; staying SLEEPING"
-            )
-            return
+                logger.exception(
+                    "wake: SLV reconnect raised unexpected error; staying SLEEPING"
+                )
+                return
         try:
             await self._broadcast("on_wake", {"source": source})
         except Exception:
@@ -1640,43 +1643,20 @@ class BaseApp:
                 self._set_state(ConvState.IDLE)
                 self._reset_sleep_timer()
             await self._broadcast("on_assistant_done")
-            # Proactive reconnect after TTS done. On serialized profiles
-            # (e.g. jetson-qwen3asr-matcha-nx) the ASR worker shares a
-            # coord lock with TTS; observed in voice-arm validation that
-            # silero VAD on the server stops firing speech_start after
-            # the first tts_done — loud mic audio (RMS 0.12+) goes
-            # nowhere, no SLV event arrives, agent goes to sleep on the
-            # next sleep_timeout. A fresh WS forces a clean ASR session.
-            #
-            # The earlier removal of this reconnect (commit 1acf7f3) was
-            # because the SLV WS session-limiter would reject reconnects
-            # that landed inside the previous session's 3-40 ms teardown.
-            # That race is now handled by SLVClient.reconnect()'s
-            # 50 ms grace + backoff retry (commit 7e1b8c8), so reconnect
-            # here is safe again.
-            try:
-                await asyncio.wait_for(self.slv.reconnect(), timeout=4.0)
-                self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
-                self._first_tts_seen = False
-                self._eos_sent_this_turn = False
-                await self._broadcast(
-                    "on_slv_reconnect", {"count": self._slv_reconnect_count}
-                )
-            except (asyncio.TimeoutError, SLVReconnectError) as e:
-                # The tts_done reconnect can fail-silently in two ways:
-                # 1) wait_for cancels mid-_open_with_retry, leaving _ws=None
-                #    (the outer dispatch loop catches this via events()
-                #    returning and reconnects again on its own).
-                # 2) SLVReconnectError exhausts the limiter-race backoffs.
-                # In both cases, the next ``wake()`` performs its own
-                # is_healthy() gate + reconnect — that's the cure for the
-                # mute bug. Log at error (not warning) so it's visible.
-                logger.error(
-                    "SLV reconnect failed after tts_done (%s); next wake() will retry",
-                    e,
-                )
-            except Exception:
-                logger.exception("SLV reconnect failed after tts_done (unexpected)")
+            # NO proactive reconnect on tts_done. SLV server v1.15+ added
+            # an ASR turn wall-clock timeout that force-releases the
+            # SessionLimiter slot even when Qwen3-ASR worker wedges, so
+            # the worker-stuck workaround that this proactive reconnect
+            # was guarding against is now handled server-side. Keeping
+            # the reconnect here was actively causing 4429
+            # too_many_sessions because the new WS races the
+            # just-released slot. The WS stays alive across turns (per
+            # SLV multi_utterance protocol where session_complete=False
+            # means dialog continues). Real WS death is caught by the
+            # outer dispatch loop's events()-returns / reader-exit path,
+            # which reconnects on its own.
+            self._first_tts_seen = False
+            self._eos_sent_this_turn = False
             return
 
         if isinstance(evt, SLVError):
