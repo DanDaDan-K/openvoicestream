@@ -62,9 +62,36 @@ class EdgeLLMBackend(OpenAICompatBackend):
     """
 
     def _build_extra_body(self, session: Session | None) -> dict[str, Any]:
+        # edge-llm prefix-cache flag matrix:
+        #
+        # | Scenario                          | prefix_cache | save_system_prompt_kv_cache |
+        # |-----------------------------------|--------------|------------------------------|
+        # | First-ever request (cold)         |    false     |             true             |
+        # | Hot turn (prefix_cache_warmed)    |    true      |             true             |
+        # | Multi-iteration tool loop iter>0  |    true      |             true             |
+        # | backend.warmup() chat call (B)    |    true      |             true             |
+        # | prefix_cache_disabled latched     |    false     |             true             |
+        #
+        # Semantics on the server side:
+        #   * ``prefix_cache=true`` asks the server to LOOK UP an existing
+        #     cached prefix matching this request's token prefix and
+        #     skip prefill on the hit. Miss falls back to a normal cold
+        #     prefill (api_server.py:_build_prefix_formatted_request).
+        #   * ``save_system_prompt_kv_cache=true`` asks the server to
+        #     SAVE this request's prefix into the cache for future
+        #     lookup.
+        #   * Sending both makes every turn both CONSUME and PRODUCE
+        #     cache entries — which is exactly what the A1 design wants
+        #     for multi-turn KV reuse: each turn's history grows by one
+        #     turn, the new (larger) prefix is saved, the next turn hits
+        #     it.
+        #   * Server-side ``save_prefix_cache`` (api_server.py:739-740)
+        #     is OR-combined with ``save_system_prompt_kv_cache``; we
+        #     currently set only the latter. If a future server release
+        #     splits the semantics, set both explicitly here.
         use_prefix_cache = (
             session is not None
-            and session.cache_warmed
+            and session.prefix_cache_warmed
             and not session.prefix_cache_disabled
         )
         if use_prefix_cache:
@@ -148,7 +175,7 @@ class EdgeLLMBackend(OpenAICompatBackend):
     ) -> AsyncIterator[LLMEvent]:
         used_prefix_cache = (
             session is not None
-            and session.cache_warmed
+            and session.prefix_cache_warmed
             and not session.prefix_cache_disabled
         )
 
@@ -174,12 +201,12 @@ class EdgeLLMBackend(OpenAICompatBackend):
                 ):
                     yield ev
                 if session is not None:
-                    session.cache_warmed = True
+                    session.prefix_cache_warmed = True
                 return
             raise
 
         if session is not None:
-            session.cache_warmed = True
+            session.prefix_cache_warmed = True
 
     async def stream(  # type: ignore[override]
         self,

@@ -568,11 +568,26 @@ class BaseApp:
             )
             if warmup_result:
                 logger.info("LLM backend warmup result: %s", warmup_result)
-                if warmup_result.get("cache_warmed") and self.session is not None:
-                    self.session.cache_warmed = True
+                if self.session is not None:
+                    if warmup_result.get("cache_warmed"):
+                        self.session.prefix_cache_warmed = True
+                        logger.info(
+                            "session.prefix_cache_warmed=True after backend "
+                            "warmup; first turn will use prefix_cache"
+                        )
+                    if warmup_result.get("graph_warmed"):
+                        self.session.graph_warmed = True
+                # Partial warmup hint (Plan D item 7): prefix is hot but
+                # graph isn't — first tool_call decode may still pay JIT
+                # / CUDA-graph capture cost. Surface so operators can
+                # diagnose unexpected first-turn latency.
+                if (
+                    warmup_result.get("cache_warmed")
+                    and not warmup_result.get("graph_warmed")
+                ):
                     logger.info(
-                        "session.cache_warmed=True after backend warmup; "
-                        "first turn will use prefix_cache"
+                        "partial warmup: prefix cached but engine graph "
+                        "not warmed; first tool_call decode may be slow"
                     )
         except Exception:
             logger.warning("LLM warmup failed; first turn may be cold", exc_info=True)
