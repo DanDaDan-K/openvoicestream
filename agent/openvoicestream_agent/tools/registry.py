@@ -64,6 +64,21 @@ class Tool:
     #                    fixed ``completion_text`` via the on_tool_
     #                    completion_text callback. Lowest latency post-
     #                    tool reply; no LLM creativity.
+    #
+    # Response modes (full contract):
+    #   - "await" (default): runner waits for the tool body to complete,
+    #     feeds the result to LLM round 2.
+    #   - "parallel": tool body MUST return within ~200ms (hard ceiling
+    #     ~500ms — runner warns above that). Runner kicks off LLM round 2
+    #     in parallel with the real-world side-effect (motion / deploy)
+    #     assuming the body returned ``{"started": True}``. For
+    #     multi-stage operations split into ``dispatch_action`` (fast
+    #     return) + ``wait_completion`` (background poller) — see
+    #     ``arm_plugin.py`` for the canonical reference implementation.
+    #   - "template": skip LLM round 2 entirely; runner uses
+    #     ``completion_text`` directly via on_tool_completion_text.
+    #     EMPTY ``completion_text`` falls back to "await" semantics
+    #     (and logs a WARNING) so the user always hears a reply.
     response_mode: str = "await"
 
 

@@ -41,6 +41,24 @@ class LLMBackend(ABC):
     * ``stream`` (back-compat) — yields plain text strings. Default
       implementation filters ``stream_events`` to text deltas only so
       existing callers don't have to change.
+
+    Lifecycle hook contract:
+
+    * ``warmup(**kwargs)`` — optional pre-flight call from app startup.
+      Default is a no-op that returns ``{}`` and never raises. Backends
+      override this to pay engine cold-start costs (KV prefix cache,
+      CUDA-graph capture, etc.) before the first user turn. Always
+      treated as fire-and-forget: the dict return value is opportunistic
+      metadata (``cache_warmed``, ``graph_warmed``, ``prompt_chars``,
+      ``cache_warmup_ms``, ``graph_warmup_ms`` for EdgeLLMBackend; may
+      include ``engine_max_seq_len`` when the server exposes ``/v1/info``),
+      never required for correctness.
+    * ``aclose()`` — optional resource release on shutdown. Default
+      no-op. Backends that hold network/transport handles
+      (httpx.AsyncClient, websocket) override this.
+
+    Both hooks are safe to call multiple times (idempotent) and on
+    backends that don't override them.
     """
 
     async def stream_events(
