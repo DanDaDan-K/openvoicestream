@@ -438,51 +438,48 @@ class BaseApp:
         if getattr(self, "_state", ConvState.IDLE) != ConvState.SLEEPING:
             return
         logger.info("wake from %s", source)
-        # Health-gate the wake. Cheap is_healthy() check first — no I/O.
-        if not self.slv.is_healthy():
-            logger.warning(
-                "wake: SLV stream unhealthy (ws=%r reader_done=%r); reconnecting before listen",
-                self.slv._ws is not None,
-                self.slv._reader_task is not None and self.slv._reader_task.done(),
+        # ALWAYS reconnect on wake. is_healthy() only checks TCP layer
+        # (ws present + reader task alive), but the Qwen3-ASR server worker
+        # can lock up silently while the WebSocket TCP connection stays
+        # alive — server stops processing audio frames, but client sees
+        # ws=alive, reader=alive, is_healthy=True → no reconnect → silent
+        # permanent mute. Force a fresh server-side session on every wake
+        # to guarantee no stale worker state. ~200ms reconnect cost is
+        # acceptable; silent mute is not.
+        try:
+            await asyncio.wait_for(self.slv.reconnect(), timeout=6.0)
+            self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
+            logger.info(
+                "wake: SLV reconnected fresh (count=%d)", self._slv_reconnect_count
             )
             try:
-                # Generous timeout — wake is rare, _open_with_retry can
-                # legitimately take ~2s on the limiter race. Use 6s so
-                # we cover full backoff schedule (0.25+0.5+1.0=1.75s)
-                # plus 3 attempts of grace window + WS handshake.
-                await asyncio.wait_for(self.slv.reconnect(), timeout=6.0)
-                self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
-                logger.info(
-                    "wake: SLV reconnected (count=%d)", self._slv_reconnect_count
+                await self._broadcast(
+                    "on_slv_reconnect",
+                    {"count": self._slv_reconnect_count},
                 )
-                try:
-                    await self._broadcast(
-                        "on_slv_reconnect",
-                        {"count": self._slv_reconnect_count},
-                    )
-                except Exception:
-                    logger.exception("on_slv_reconnect broadcast failed (wake)")
-            except (SLVReconnectError, asyncio.TimeoutError, ConnectionError) as e:
-                logger.error(
-                    "wake: SLV reconnect failed (%s); staying SLEEPING to avoid silent mute",
-                    e,
-                )
-                try:
-                    await self._broadcast(
-                        "on_wake_failed",
-                        {"source": source, "reason": "slv_unhealthy"},
-                    )
-                except Exception:
-                    logger.exception("on_wake_failed broadcast failed")
-                # Do NOT transition to IDLE — caller (wake_source / dashboard)
-                # observes that we are still SLEEPING and can surface the
-                # failure to the user.
-                return
             except Exception:
-                logger.exception(
-                    "wake: SLV reconnect raised unexpected error; staying SLEEPING"
+                logger.exception("on_slv_reconnect broadcast failed (wake)")
+        except (SLVReconnectError, asyncio.TimeoutError, ConnectionError) as e:
+            logger.error(
+                "wake: SLV reconnect failed (%s); staying SLEEPING to avoid silent mute",
+                e,
+            )
+            try:
+                await self._broadcast(
+                    "on_wake_failed",
+                    {"source": source, "reason": "slv_unhealthy"},
                 )
-                return
+            except Exception:
+                logger.exception("on_wake_failed broadcast failed")
+            # Do NOT transition to IDLE — caller (wake_source / dashboard)
+            # observes that we are still SLEEPING and can surface the
+            # failure to the user.
+            return
+        except Exception:
+            logger.exception(
+                "wake: SLV reconnect raised unexpected error; staying SLEEPING"
+            )
+            return
         try:
             await self._broadcast("on_wake", {"source": source})
         except Exception:
