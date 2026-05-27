@@ -448,12 +448,25 @@ class BaseApp:
         # (ws missing or reader task exited). Healthy WS persists
         # across multiple turns (correct per SLV multi_utterance
         # protocol where session_complete=False).
-        if not self.slv.is_healthy():
+        # Idle-based reconnect: TCP-alive WS doesn't guarantee SLV's ASR
+        # session is still alive — after long idle (>30s) the server may
+        # have internally recycled the session, in which case is_healthy()
+        # returns True but mic data flows into a dead ASR worker (silent
+        # mute bug, observed 2026-05-26 after tts_done→wake at +4min).
+        # Force a reconnect on long idle to refresh the ASR session.
+        # Hot-turn case (continuous dialogue) stays cheap: activity is
+        # touched on every WS recv/send so seconds_since_activity stays
+        # small and no reconnect fires — avoiding the 4429 limiter race.
+        _idle_s = self.slv.seconds_since_activity()
+        _healthy = self.slv.is_healthy()
+        should_reconnect = (not _healthy) or _idle_s > 30.0
+        if should_reconnect:
             try:
                 await asyncio.wait_for(self.slv.reconnect(), timeout=6.0)
                 self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
                 logger.info(
-                    "wake: SLV reconnected fresh (count=%d)", self._slv_reconnect_count
+                    "wake: SLV reconnect (healthy=%s idle=%.1fs count=%d)",
+                    _healthy, _idle_s, self._slv_reconnect_count,
                 )
                 try:
                     await self._broadcast(

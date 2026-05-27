@@ -122,6 +122,38 @@ class SLVClient:
         # Set when reader exits for any reason; events() uses this to
         # break out of `await queue.get()` instead of hanging forever.
         self._reader_done: asyncio.Event = asyncio.Event()
+        # Track wall-clock of last WS activity (recv from server OR send
+        # audio/json from us). is_healthy() only checks TCP layer; the
+        # server-side ASR session may be GC'd after long idle while the
+        # TCP socket stays open. wake() consults seconds_since_activity()
+        # to decide whether to force a reconnect (refresh ASR session)
+        # even when is_healthy() reports True. See app_base.wake().
+        self._last_activity_ts: float = 0.0
+
+    def _touch_activity(self) -> None:
+        try:
+            self._last_activity_ts = asyncio.get_event_loop().time()
+        except RuntimeError:
+            # No running loop (e.g. unit test using time module). Fall back
+            # gracefully — treat as if we just had activity.
+            import time as _time
+            self._last_activity_ts = _time.monotonic()
+
+    def seconds_since_activity(self) -> float:
+        """Wall-clock seconds since last observed WS activity.
+
+        Returns inf if no activity has ever been recorded (fresh client
+        with no traffic yet — caller should treat as "stale" / reconnect
+        candidate after the first turn).
+        """
+        if self._last_activity_ts == 0:
+            return float("inf")
+        try:
+            now = asyncio.get_event_loop().time()
+        except RuntimeError:
+            import time as _time
+            now = _time.monotonic()
+        return now - self._last_activity_ts
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -217,7 +249,29 @@ class SLVClient:
             self._reader_done.clear()
             self._tts_sample_rate = None
             self._ws = await ws_connect(self.url, max_size=None)
-            await self._ws.send(json.dumps({"type": CLIENT_CONFIG, **self.config}))
+            try:
+                await self._ws.send(json.dumps({"type": CLIENT_CONFIG, **self.config}))
+            except websockets.ConnectionClosed as e:
+                # Server slammed the door before we could send config
+                # (4429 limiter race, etc.). Treat as failed attempt and
+                # fall through to backoff. Without this catch the
+                # exception escapes wake() as "unexpected error".
+                logger.info(
+                    "SLV reconnect attempt %d: send(config) closed by server (%s)",
+                    attempt_idx + 1, e,
+                )
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+                self._ws = None
+                if backoff is None:
+                    raise SLVReconnectError(
+                        f"SLV reconnect: server closed CLIENT_CONFIG send on all "
+                        f"{len(attempts)} attempts ({e})"
+                    )
+                await asyncio.sleep(backoff)
+                continue
             self._reader_task = asyncio.create_task(
                 self._reader_loop(), name="slv-reader"
             )
@@ -231,6 +285,10 @@ class SLVClient:
                 )
             except asyncio.TimeoutError:
                 # Healthy: reader is still running after grace window.
+                # Mark fresh WS as just-active so the next wake doesn't
+                # see "infinite idle" and immediately re-reconnect on top
+                # of our brand new session (and trip the limiter).
+                self._touch_activity()
                 return
             # Reader fired → connection died inside grace window.
             # Tear down what we just built and back off.
@@ -306,6 +364,10 @@ class SLVClient:
                 await self.connect()
             try:
                 await self._ws.send(pcm)
+                # Do NOT touch activity on outgoing audio — the mute bug
+                # is exactly "we keep sending into a dead session". Only
+                # server-originated frames (handled in _handle_json /
+                # _handle_binary) signal that the SLV session is alive.
             except websockets.ConnectionClosed:
                 # Reader will notice and signal _reader_done; dispatch can
                 # decide to reconnect. Audio chunks during reconnect are
@@ -399,6 +461,7 @@ class SLVClient:
             self._reader_done.set()
 
     async def _handle_binary(self, data: bytes) -> None:
+        self._touch_activity()
         if self._tts_sample_rate is None:
             if len(data) < 4:
                 await self._queue.put(SLVError("first binary frame < 4 bytes"))
@@ -414,6 +477,7 @@ class SLVClient:
         await self._queue.put(TTSAudio(pcm=data, sample_rate=self._tts_sample_rate))
 
     async def _handle_json(self, raw: str) -> None:
+        self._touch_activity()
         try:
             evt = json.loads(raw)
         except json.JSONDecodeError as e:

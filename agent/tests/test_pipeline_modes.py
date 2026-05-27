@@ -61,6 +61,8 @@ def _fresh_app(pipeline_mode: str = "always_on", sleep_timeout_s: float = 30.0) 
     slv.asr_eos = AsyncMock()
     slv.reconnect = AsyncMock()
     slv.is_healthy = MagicMock(return_value=True)
+    # Default: just had activity → no idle-based reconnect on wake.
+    slv.seconds_since_activity = MagicMock(return_value=0.0)
     slv._ws = object()  # truthy placeholder used by wake() log line
     slv._reader_task = None
     app.slv = slv
