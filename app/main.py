@@ -3272,6 +3272,17 @@ async def v2v_stream(ws: WebSocket):
             stop = state["current_tts_stop"]
             if stop is not None:
                 stop.set()
+            # Race #6: await the cancelled work tasks before releasing the
+            # ASR/TTS slot. Otherwise the next WS connection on this
+            # SessionLimiter slot can grab the limited ASR executor while
+            # the previous worker thread is still running, producing
+            # spurious "ASR busy" or worker-protocol errors on the very
+            # first turn of the new connection.
+            if work_tasks:
+                try:
+                    await asyncio.gather(*work_tasks, return_exceptions=True)
+                except Exception:
+                    pass
             # Cancel any in-flight ASR utterance before closing the socket
             # so the worker doesn't leak the session.
             if asr_manager is not None:
