@@ -276,18 +276,24 @@ class BaseApp:
         except Exception:
             return 0
 
+    # Minimum history headroom we want to leave after the fixed prefix
+    # before we ERROR. Anything below this means even a single user turn
+    # may overflow ``session_max_input_tokens``.
+    _MIN_HISTORY_HEADROOM = 1000
+
     def _validate_session_budget(
         self, system_prompt: str, tools: list[dict] | None
     ) -> None:
         """Sanity-check session_max_input_tokens vs the fixed prefix.
 
-        The trim threshold is ``session_max_input_tokens * 0.75``. The
-        fixed prefix (system_prompt + tools schema) is charged against
-        the same budget on every turn. If the fixed prefix is already
-        at or above the trim threshold, *every* turn trims, which
-        clears ``Session.cache_warmed`` and defeats the upstream
-        KV-cache hot path permanently. This validator surfaces that
-        misconfiguration at startup with an explicit ERROR.
+        A1-step2 semantics: ``Session._trim_to_budget`` only counts
+        dynamic turns (user/assistant/tool) against
+        ``session_max_input_tokens * 0.75``. The fixed prefix
+        (system_prompt + tools schema) is NOT in the trim budget but
+        IS still charged against the engine ``max_seq_len`` on every
+        request. This validator therefore checks whether the fixed
+        prefix leaves enough room inside ``session_max_input_tokens``
+        for a reasonable history window.
         """
         max_input = getattr(self.config, "session_max_input_tokens", None)
         if not max_input:
@@ -299,30 +305,36 @@ class BaseApp:
         sys_tokens = self._approx_tokens(system_prompt or "")
         tools_tokens = self._approx_tokens_for_tools(tools)
         fixed_tokens = sys_tokens + tools_tokens
-        budget = int(max_input * 0.75)
-        pct = (fixed_tokens / budget * 100) if budget else 0.0
-        if fixed_tokens >= budget:
-            recommended = int(fixed_tokens / 0.75) + 2000
+        history_headroom = max_input - fixed_tokens
+        pct = (fixed_tokens / max_input * 100) if max_input else 0.0
+        if history_headroom < self._MIN_HISTORY_HEADROOM:
+            recommended = fixed_tokens + 2 * self._MIN_HISTORY_HEADROOM
             logger.error(
-                "FIXED PREFIX (system_prompt %d + tools %d = %d tokens) >= trim "
-                "budget %d tokens (%.0f%% of max %d). Every turn will trim, KV "
-                "cache will be invalidated, hot path disabled. Raise "
-                "session_max_input_tokens to at least %d.",
-                sys_tokens, tools_tokens, fixed_tokens, budget, pct,
-                max_input, recommended,
+                "FIXED PREFIX (system_prompt %d + tools %d = %d tokens) leaves "
+                "only %d tokens of history headroom inside "
+                "session_max_input_tokens=%d (need >=%d). Even a single user "
+                "turn may overflow. Raise session_max_input_tokens to at "
+                "least %d.",
+                sys_tokens, tools_tokens, fixed_tokens, history_headroom,
+                max_input, self._MIN_HISTORY_HEADROOM, recommended,
             )
-        elif fixed_tokens > budget * 0.5:
+        elif fixed_tokens > max_input * 0.6:
             logger.warning(
-                "Fixed prefix uses %.0f%% of trim budget (%d / %d tokens, "
-                "system=%d tools=%d). Few turns of history will fit before "
-                "trim. Consider raising session_max_input_tokens.",
-                pct, fixed_tokens, budget, sys_tokens, tools_tokens,
+                "Fixed prefix uses %.0f%% of session_max_input_tokens "
+                "(%d / %d tokens, system=%d tools=%d). Trim only counts "
+                "dynamic turns so behaviour is OK, but history headroom "
+                "(%d tokens) is tight. Consider raising "
+                "session_max_input_tokens.",
+                pct, fixed_tokens, max_input, sys_tokens, tools_tokens,
+                history_headroom,
             )
         else:
             logger.info(
-                "Session budget OK: fixed prefix %d / budget %d tokens "
-                "(%.0f%% used, system=%d tools=%d, max_input=%d).",
-                fixed_tokens, budget, pct, sys_tokens, tools_tokens, max_input,
+                "Session budget OK: fixed prefix %d tokens (system=%d "
+                "tools=%d), history headroom %d, max_input=%d. Trim budget "
+                "(history only) = %d.",
+                fixed_tokens, sys_tokens, tools_tokens, history_headroom,
+                max_input, int(max_input * 0.75),
             )
 
     # ── v2: state machine + stop intent ─────────────────────────────

@@ -268,7 +268,7 @@ class Session:
     def _trim_to_budget(
         self, messages: list[dict[str, Any]], max_tokens: int
     ) -> list[dict[str, Any]]:
-        """Drop oldest *whole turns* until the prompt fits the budget.
+        """Drop oldest *whole turns* until the dynamic history fits the budget.
 
         A *turn* is a ``user`` message followed by all contiguous
         non-user messages up to (but not including) the next ``user``.
@@ -282,10 +282,21 @@ class Session:
         assistant hasn't replied, or an in-flight tool round) is pinned
         to the tail and never dropped.
 
+        Budget semantics (A1-step2):
+          * Budget = ``max_tokens * 0.75`` and applies ONLY to dynamic
+            turns (user / assistant / tool messages).
+          * The system prompt (messages[0]) is a fixed prefix and is
+            NOT charged against the budget. Tools schemas, which the
+            LLM backend prepends outside of ``Session.history``, are
+            likewise out of scope here.
+          * This decouples trim decisions from system_prompt / tools
+            growth: when those grow we adjust ``session_max_input_tokens``
+            (or the engine ``max_seq_len``) at config time, not at trim
+            time.
+
         Invariants:
           * messages[0] (system prompt) always kept.
           * Latest turn always kept.
-          * Budget is ``max_tokens * 0.75`` (25% margin for response).
         """
         budget = int(max_tokens * 0.75)
         if not messages:
@@ -327,10 +338,12 @@ class Session:
             if not is_complete:
                 trailing = turns.pop()
 
-        sys_tokens = self._msg_tokens(system)
+        # A1-step2: budget covers only dynamic turns (history). The
+        # system prompt is a fixed prefix and is excluded so config
+        # changes there don't silently shift trim behaviour.
         trailing_tokens = sum(self._msg_tokens(m) for m in trailing)
         turn_tokens = [sum(self._msg_tokens(m) for m in t) for t in turns]
-        total = sys_tokens + trailing_tokens + sum(turn_tokens)
+        total = trailing_tokens + sum(turn_tokens)
 
         if total <= budget:
             return messages
