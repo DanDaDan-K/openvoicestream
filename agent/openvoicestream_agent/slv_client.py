@@ -78,7 +78,13 @@ class TTSSentenceDone(V2VEvent):
 
 @dataclass
 class TTSDone(V2VEvent):
-    pass
+    # SLV signals session_complete=True when the TTS turn ended at a
+    # session boundary (slot will release, WS may close), False when
+    # the turn ended cleanly but the slot is still held (multi-utterance
+    # continuation expected). Race #4: previously this field was dropped
+    # by the dataclass and the app treated every TTSDone as session-end,
+    # producing spurious reconnects.
+    session_complete: bool = True
 
 
 @dataclass
@@ -524,8 +530,9 @@ class SLVClient:
         elif t == SERVER_TTS_SENTENCE_DONE:
             await self._queue.put(TTSSentenceDone(sentence=evt.get("sentence", "")))
         elif t == SERVER_TTS_DONE:
-            logger.info("SLV tts_done")
-            await self._queue.put(TTSDone())
+            session_complete = bool(evt.get("session_complete", True))
+            logger.info("SLV tts_done session_complete=%s", session_complete)
+            await self._queue.put(TTSDone(session_complete=session_complete))
         elif t == SERVER_ERROR:
             await self._queue.put(SLVError(evt.get("error", "unknown")))
         else:

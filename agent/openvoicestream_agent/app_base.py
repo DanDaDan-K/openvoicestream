@@ -1676,6 +1676,13 @@ class BaseApp:
             return
 
         if isinstance(evt, TTSDone):
+            # Race #4: preserve and log session_complete so downstream
+            # reconnect logic can branch on True (session ends, slot
+            # released) vs False (turn done, slot held for continuation).
+            session_complete = getattr(evt, "session_complete", True)
+            logger.debug(
+                "TTSDone received (session_complete=%s)", session_complete
+            )
             # Reset first-frame flag so the NEXT turn re-emits SPEAKING.
             self._first_tts_seen = False
             self._cancel_thinking_watchdog()
