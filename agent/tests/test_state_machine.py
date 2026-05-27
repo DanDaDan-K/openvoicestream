@@ -14,11 +14,28 @@ from openvoicestream_agent.slv_client import TTSAudio
 
 def _fresh_app() -> BaseApp:
     """Build a BaseApp without touching audio/llm/slv (via __new__)."""
+    from openvoicestream_agent.config import Config
+
     app = BaseApp.__new__(BaseApp)
+    app.config = Config()
     app.events = EventBus()
     app.plugins = []
     app._state = ConvState.IDLE
     app._slv_reconnect_count = 0
+    app._llm_turn_task = None
+    app._first_tts_seen = False
+    app._eos_sent_this_turn = False
+    app._asr_watchdog_task = None
+    app._thinking_watchdog_task = None
+    app._sleep_task = None
+    app._ptt_explicit_eos_pending = False
+    app._vad_state = "idle"
+    app._vad_speech_ms = 0
+    app._vad_silence_ms = 0
+    app._vad_eos_sent = False
+    app._client_vad = None
+    app._mic_rms_broadcast_task = None
+    app._stop_words_cache = None
     return app
 
 

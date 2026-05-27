@@ -129,6 +129,8 @@ async def test_playback_uses_callback_buffer_and_stop_clears_it():
     audio._discard_playback = False
     audio._is_playing = False
     audio._output_stream = object()
+    audio.output_sr = 24000
+    audio._source_sr = 24000
 
     await audio.play(b"\x01\x02\x03\x04")
     assert audio.is_playing is True
