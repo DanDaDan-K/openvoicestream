@@ -34,6 +34,15 @@ from typing import Any, Awaitable, Callable, Optional
 logger = logging.getLogger(__name__)
 
 
+class ASRSessionUnavailable(RuntimeError):
+    """Raised when on_speech_start cannot produce a working ASR stream.
+
+    Signals to the caller that the ASR worker is unrecoverable for this
+    turn — caller MUST NOT flag the session as active (race #1: silent
+    no-op accept_audio loop with client stuck THINKING).
+    """
+
+
 class SessionState(str, Enum):
     IDLE = "idle"
     ACTIVE = "active"
@@ -181,8 +190,19 @@ class ASRSessionManager:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("ASRSessionManager: create_stream failed: %s", exc)
                 await self._handle_error_locked(exc)
-                # After recovery the stream is created lazily on next
-                # accept; for now flag ACTIVE so callers can proceed.
+                # After _handle_error_locked runs the full rebuild ladder
+                # (incl. worker restart). If even that failed, state will
+                # have been set to IDLE and stream remains None — in which
+                # case we MUST surface the failure to the caller rather
+                # than silently flagging ACTIVE (race #1: WS would stay
+                # alive with a dead ASR, audio dropped, no final, client
+                # stuck THINKING forever). If a stream was rebuilt during
+                # recovery, state is already ACTIVE and we can proceed.
+                if self._stream is None:
+                    self._state = SessionState.IDLE
+                    raise ASRSessionUnavailable(
+                        "ASR worker unavailable after rebuild"
+                    ) from exc
             self._state = SessionState.ACTIVE
             return self._generation
 

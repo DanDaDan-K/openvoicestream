@@ -2532,7 +2532,10 @@ async def v2v_stream(ws: WebSocket):
                 return
             # Defer stream creation until first speech-start (or first audio
             # without VAD) — the manager creates a fresh stream per utterance.
-            from app.core.asr_session_manager import ASRSessionManager
+            from app.core.asr_session_manager import (
+                ASRSessionManager,
+                ASRSessionUnavailable,
+            )
             asr_manager = ASRSessionManager(
                 backend=asr_be,
                 language=asr_language,
@@ -2689,8 +2692,25 @@ async def v2v_stream(ws: WebSocket):
                                 stop = state["current_tts_stop"]
                                 if stop is not None:
                                     stop.set()
-                                async with coord.acquire("asr"):
-                                    new_gen = await asr_manager.on_speech_start()
+                                try:
+                                    async with coord.acquire("asr"):
+                                        new_gen = await asr_manager.on_speech_start()
+                                except ASRSessionUnavailable as e:
+                                    # Race #1: ASR worker rebuild ladder
+                                    # exhausted — surface to client + skip
+                                    # this turn rather than silently
+                                    # accepting audio with no transcript.
+                                    logger.warning(
+                                        "v2v: on_speech_start failed (VAD): %s", e
+                                    )
+                                    await send_json({
+                                        "type": v2v_proto.SERVER_ERROR,
+                                        "error": "asr_unavailable",
+                                    })
+                                    state["asr_active"] = False
+                                    state["endpoint_pending"] = None
+                                    state["endpoint_pending_gen"] = None
+                                    continue
                                 # Clear any stale endpoint from the previous
                                 # utterance — a VAD speech-end that was pending
                                 # finalize while this new speech-start preempted
@@ -2713,8 +2733,20 @@ async def v2v_stream(ws: WebSocket):
                                 speech_ended_now = True
                         # No-VAD mode: open the session lazily on first audio.
                         if vad is None and not state["asr_active"]:
-                            async with coord.acquire("asr"):
-                                new_gen = await asr_manager.on_speech_start()
+                            try:
+                                async with coord.acquire("asr"):
+                                    new_gen = await asr_manager.on_speech_start()
+                            except ASRSessionUnavailable as e:
+                                # Race #1: same as VAD path above.
+                                logger.warning(
+                                    "v2v: on_speech_start failed (no-VAD): %s", e
+                                )
+                                await send_json({
+                                    "type": v2v_proto.SERVER_ERROR,
+                                    "error": "asr_unavailable",
+                                })
+                                state["asr_active"] = False
+                                continue
                             state["endpoint_pending"] = None
                             state["endpoint_pending_gen"] = None
                             state["asr_active"] = True
