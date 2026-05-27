@@ -129,6 +129,13 @@ class SLVClient:
         # to decide whether to force a reconnect (refresh ASR session)
         # even when is_healthy() reports True. See app_base.wake().
         self._last_activity_ts: float = 0.0
+        # Race #3: set True while reconnect() is tearing down + reopening.
+        # mic_pump consults is_reconnecting() to skip forwarding audio
+        # during the outage (otherwise chunks queue up on _send_lock,
+        # 0.5s send_audio timeout starves the mic pump, dropped-chunk
+        # logs flood, and post-reconnect first utterance still carries
+        # pre-reconnect preroll).
+        self._reconnecting: bool = False
 
     def _touch_activity(self) -> None:
         try:
@@ -209,34 +216,43 @@ class SLVClient:
         """
         if self._closed:
             return
-        async with self._send_lock:
-            old_reader = self._reader_task
-            old_ws = self._ws
-            self._ws = None
-            self._reader_task = None
-            if old_reader is not None and not old_reader.done():
-                old_reader.cancel()
-                try:
-                    await old_reader
-                except (asyncio.CancelledError, Exception):
-                    pass
-            if old_ws is not None:
-                try:
-                    await old_ws.close()
-                except Exception:
-                    pass
-            # Grace: let server SessionLimiter (limit=1, Qwen3-ASR worker is
-            # single-concurrent) observe the close + release the slot before
-            # we open a fresh WS. With proactive reconnects on tts_done /
-            # wake reverted (SLV server v1.15+ ASR turn timeout handles
-            # stuck workers), reconnect now only fires on genuine WS death
-            # — close-before-open races are no longer densely triggered,
-            # so 50ms of defensive grace is sufficient (was 150ms when
-            # proactive reconnect was active).
-            await asyncio.sleep(0.05)
-            self._reader_done.clear()
-            self._tts_sample_rate = None
-            await self._open_with_retry()
+        self._reconnecting = True
+        try:
+            async with self._send_lock:
+                old_reader = self._reader_task
+                old_ws = self._ws
+                self._ws = None
+                self._reader_task = None
+                if old_reader is not None and not old_reader.done():
+                    old_reader.cancel()
+                    try:
+                        await old_reader
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                if old_ws is not None:
+                    try:
+                        await old_ws.close()
+                    except Exception:
+                        pass
+                # Grace: let server SessionLimiter (limit=1, Qwen3-ASR
+                # worker is single-concurrent) observe the close + release
+                # the slot before we open a fresh WS. With proactive
+                # reconnects on tts_done / wake reverted (SLV server
+                # v1.15+ ASR turn timeout handles stuck workers),
+                # reconnect now only fires on genuine WS death — close-
+                # before-open races are no longer densely triggered, so
+                # 50ms of defensive grace is sufficient (was 150ms when
+                # proactive reconnect was active).
+                await asyncio.sleep(0.05)
+                self._reader_done.clear()
+                self._tts_sample_rate = None
+                await self._open_with_retry()
+        finally:
+            self._reconnecting = False
+
+    def is_reconnecting(self) -> bool:
+        """True while reconnect() is mid-flight (race #3 gate)."""
+        return self._reconnecting
 
     async def _open_with_retry(self) -> None:
         """Open a WS and verify it survived the limiter grace window.

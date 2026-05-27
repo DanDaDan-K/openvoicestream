@@ -873,8 +873,17 @@ class BaseApp:
         chunks. Pre-roll is still preserved for the *current* speech
         segment whose onset already won the VAD race.
         """
+        # Race #3 fast path: while SLV is actively reconnecting, skip the
+        # send_lock entirely — otherwise every mic chunk queues behind the
+        # reconnect's grace+_open_with_retry chain (~50-2000ms), the 0.5s
+        # ceiling was too tight (false-positive drop log floods) and 2.0s
+        # is still too long if a hundred chunks pile up.
+        is_reconn = getattr(self.slv, "is_reconnecting", None)
+        if callable(is_reconn) and is_reconn():
+            logger.debug("send_audio skipped (slv reconnecting)")
+            return
         try:
-            await asyncio.wait_for(self.slv.send_audio(pcm), timeout=0.5)
+            await asyncio.wait_for(self.slv.send_audio(pcm), timeout=2.0)
         except asyncio.TimeoutError:
             # SLV is mid-reconnect / unreachable; don't wedge the mic pump.
             # Logged at debug to avoid floods during normal reconnect blips.
@@ -931,6 +940,15 @@ class BaseApp:
                 if getattr(self, "_state", ConvState.IDLE) == ConvState.SLEEPING:
                     # Also clear pre-roll so we don't leak pre-sleep audio
                     # into the next wake's first utterance.
+                    preroll.clear()
+                    continue
+                # Race #3: while SLV is reconnecting, drop chunks and
+                # clear pre-roll. Carrying pre-reconnect audio into the
+                # new WS produces partial garbled finals on the next turn
+                # (audio fragment from before + speech after the gap →
+                # ASR sees one mashed utterance).
+                is_reconn = getattr(self.slv, "is_reconnecting", None)
+                if callable(is_reconn) and is_reconn():
                     preroll.clear()
                     continue
                 # Per-chunk mic RMS for the dashboard. Rate-limited so a
