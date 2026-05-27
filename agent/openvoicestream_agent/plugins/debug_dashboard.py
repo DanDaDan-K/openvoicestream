@@ -154,9 +154,23 @@ class DebugDashboardPlugin(Plugin):
 
         self._runner = web.AppRunner(web_app)
         await self._runner.setup()
-        self._site = web.TCPSite(self._runner, "0.0.0.0", self._port)
+        # Default-bind to loopback. The dashboard exposes unauthenticated
+        # control endpoints (e.g. /api/control/inject_user_text can trigger
+        # arbitrary tool/arm actions); binding to 0.0.0.0 by default would
+        # let any host on the LAN drive the robot. Operators who need
+        # remote access can opt-in via OVS_DEBUG_DASHBOARD_BIND=0.0.0.0
+        # (and should put a firewall / SSH tunnel in front).
+        bind_host = os.environ.get("OVS_DEBUG_DASHBOARD_BIND", "127.0.0.1").strip() or "127.0.0.1"
+        self._site = web.TCPSite(self._runner, bind_host, self._port)
         await self._site.start()
-        logger.info("debug_dashboard listening on http://0.0.0.0:%d", self._port)
+        logger.info("debug_dashboard listening on http://%s:%d", bind_host, self._port)
+        if bind_host != "127.0.0.1":
+            logger.warning(
+                "debug_dashboard bound to %s — /api/control/inject_user_text "
+                "and other control endpoints are UNAUTHENTICATED. Restrict "
+                "access via firewall / SSH tunnel.",
+                bind_host,
+            )
 
         self._stats_task = asyncio.create_task(self._stats_loop(), name="dashboard-stats")
 
