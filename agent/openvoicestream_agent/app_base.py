@@ -461,7 +461,11 @@ class BaseApp:
         # small and no reconnect fires — avoiding the 4429 limiter race.
         _idle_s = self.slv.seconds_since_activity()
         _healthy = self.slv.is_healthy()
-        should_reconnect = (not _healthy) or _idle_s > 30.0
+        # reconnect_on_wake: a single streaming-ASR worker can degrade after
+        # several utterances on one persistent session (empty finals); force
+        # a fresh worker on every wake so re-saying the wake word recovers.
+        _force_wake_reconnect = bool(getattr(self.config, "reconnect_on_wake", False))
+        should_reconnect = _force_wake_reconnect or (not _healthy) or _idle_s > 30.0
         if should_reconnect:
             try:
                 await asyncio.wait_for(self.slv.reconnect(), timeout=6.0)
