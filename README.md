@@ -512,12 +512,14 @@ Pre-built `.so` files live in `patches/sherpa-onnx-lib/` (aarch64, Python 3.10, 
 
 ```text
 openvoicestream/
-├── app/                     # FastAPI service
+├── server/                  # FastAPI voice service (the product server)
 │   ├── main.py              # Endpoints and startup
-│   ├── backends/            # Per-engine backends (sherpa / jetson / rk)
-│   ├── core/                # VAD, ASR/TTS contracts, streaming primitives
-│   └── model_downloader.py  # On-demand model download + voice patching
-├── agent/                   # LLM voice agent (session, plugin system, audio I/O)
+│   ├── core/                # VAD, ASR/TTS contracts, streaming, HF artifact download
+│   └── utils/               # numpy mel + helpers
+├── agent/                   # the voice agent — a SEPARATE package + container
+│   └── ovs_agent/           #   framework + apps/ (voice_arm = SO-ARM app)
+├── voices/                  # Custom voice embeddings (auto-patched into model)
+# (per-engine ASR/TTS backends now live in the sibling `voxedge` library, not here)
 ├── voices/                  # Custom voice embeddings (auto-patched into model)
 ├── bench/                   # Streaming + V2V latency benchmarks (perf harness)
 ├── patches/                 # Paraformer EOF truncation fix

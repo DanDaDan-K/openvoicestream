@@ -10,8 +10,8 @@ uv pip install -e ../voxedge        # or the absolute path
 ```
 
 `import voxedge` then resolves to the standalone repo. The product's backend
-registry (`app/core/asr_backend.py` / `tts_backend.py`) points at
-`voxedge.backends.*`; `app/core/voxedge_backend_config.py` builds each backend's
+registry (`server/core/asr_backend.py` / `tts_backend.py`) points at
+`voxedge.backends.*`; `server/core/voxedge_backend_config.py` builds each backend's
 config from env/profile (voxedge backends are env-free).
 
 ### Deployment (docker) — TODO, deferred
