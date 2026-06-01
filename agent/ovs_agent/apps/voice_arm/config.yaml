@@ -1,7 +1,7 @@
 # voice_arm agent config — actuator (SO-ARM) voice controller.
 #
 # Anything ${...} is substituted from environment at load time (see
-# openvoicestream_agent/config.py _expand_env). Anything not listed here
+# ovs_agent/config.py _expand_env). Anything not listed here
 # falls back to the Config dataclass defaults.
 #
 # The actuator is pluggable: metadata.actuator.backend selects the

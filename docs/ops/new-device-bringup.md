@@ -101,7 +101,7 @@ fleet transfer recomputer-desktop:/home/recomputer/ort-from-container/ jetson-ne
 ```bash
 fleet exec jetson-new -- "bash -c '
   docker create --name tmp jetson-voice-speech:v3.1-with-vad
-  docker cp tmp:/opt/speech/app/ /tmp/img_app
+  docker cp tmp:/opt/speech/server/ /tmp/img_app
   docker rm tmp
   mkdir -p /home/recomputer/jetson-voice/app_overlay
   cp /tmp/img_app/*.py /home/recomputer/jetson-voice/app_overlay/

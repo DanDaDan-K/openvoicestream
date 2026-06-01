@@ -35,8 +35,10 @@ orchestrates LLM streaming and barge-in.
 5. **Plugin hooks are observer broadcasts**, not routers.
    `MultiModeApp.on_user_utterance` is the single router; modes decide
    behavior behind that stable entrypoint.
-6. **Protocol constants come from `app.core.v2v`** (SLV's module).
-   Never redeclare them in the agent.
+6. **Protocol constants are vendored in `ovs_agent/protocol.py`**, kept
+   byte-for-byte in sync with the server's `server/core/v2v.py`. The agent
+   has NO import dependency on the server source tree. Never redeclare the
+   constants elsewhere in the agent.
 7. **Prefix-cache metrics are streaming-safe**. The EdgeLLM backend asks
    for `return_cache_metrics` on every turn and the dashboard updates
    when the final SSE chunk carries `cache_metrics`.
@@ -47,7 +49,8 @@ orchestrates LLM streaming and barge-in.
 agent/
 ├── pyproject.toml
 ├── ovs_agent/
-│   ├── __init__.py        # sys.path shim so `from app.core.v2v ...` resolves
+│   ├── __init__.py        # package init (no sys.path shim; self-contained)
+│   ├── protocol.py        # vendored V2V wire constants (sync w/ server/core/v2v.py)
 │   ├── app_base.py        # BaseApp orchestrator
 │   ├── app_mode.py        # AppMode / ModeManager strategy framework
 │   ├── audio_io.py        # sounddevice mic + speaker
@@ -128,14 +131,14 @@ uv run ovs-agent run companion_robot
 Use this when the downstream product is a robot-style assistant and should keep
 project-specific wiring out of the generic `multi_mode` app.
 
-## Why the `sys.path` shim?
+## Self-contained protocol constants
 
-SLV has no `pyproject.toml`, so we can't `pip install` it.
-`ovs_agent/__init__.py` prepends the SLV repo root to
-`sys.path` at import time so `from app.core.v2v import CLIENT_TEXT, ...`
-works without restructuring SLV. The Docker image accomplishes the same
-thing by copying SLV's `app/` directory next to the agent and setting
-`PYTHONPATH=/opt/slv`.
+`ovs_agent` has NO import dependency on the SLV server source tree. The V2V
+wire-protocol constants are vendored in `ovs_agent/protocol.py`, kept
+byte-for-byte in sync with the server's `server/core/v2v.py` (the single
+source of truth). This means the agent image ships only `agent/` — no
+`sys.path` shim and no `PYTHONPATH=/opt/slv` are needed. If you add a new
+message type to the server protocol, mirror it in `ovs_agent/protocol.py`.
 
 ## Writing a plugin
 

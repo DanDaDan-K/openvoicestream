@@ -15,7 +15,7 @@ VoiceArm @ seeed-orin-nx is **3 containers**:
 | `voice-arm` (agent) | 8765 | The **client** that owns the LLM + tool loop. Connects to SLV `/v2v/stream`, receives `asr_final`, calls edge-llm with its 10 arm tools, streams the reply text back into SLV (`CLIENT_TEXT`), then `tts_flush`. The 10 robot-arm tools are registered HERE, not in SLV. |
 
 So **the LLM + tool loop runs in the agent client, not in SLV.** Evidence
-(`agent/openvoicestream_agent/`):
+(`agent/ovs_agent/`):
 - `slv_client.py:113` — "One persistent WS to /v2v/stream for the entire App lifetime."
 - `slv_client.py:400-403` `send_text` (CLIENT_TEXT), `:405-407` `flush_tts` —
   the agent pushes LLM output text into SLV for synthesis.

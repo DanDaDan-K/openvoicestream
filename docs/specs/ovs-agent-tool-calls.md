@@ -3,11 +3,11 @@
 **Status**: spec draft, pending review
 **Owner**: harvest
 **Date**: 2026-05-25
-**Related**: `evals/mcp_llm/` in `warehouse_system` repo (reference impl), `agent/openvoicestream_agent/llm/edge_llm.py` (existing prefix_cache fallback)
+**Related**: `evals/mcp_llm/` in `warehouse_system` repo (reference impl), `agent/ovs_agent/llm/edge_llm.py` (existing prefix_cache fallback)
 
 ## Motivation
 
-`openvoicestream_agent` currently has no way to invoke tools. The LLM
+`ovs_agent` currently has no way to invoke tools. The LLM
 backend yields plain text deltas, the session model only knows
 `{role, content}`, and `app_mode.py` runs a single-pass stream→TTS
 pipeline. Voice users frequently ask for actions ("what time is it",
@@ -205,7 +205,7 @@ Drop oldest *whole turns*; never split. Same 0.75 budget rule.
 `m for m in history if m.role == "assistant"` — keep that but skip
 assistant messages whose `content is None` (tool-call-only messages).
 
-### 3. Tools module (`agent/openvoicestream_agent/tools/`)
+### 3. Tools module (`agent/ovs_agent/tools/`)
 
 #### 3a. `registry.py`
 

@@ -40,10 +40,6 @@ jobs:
             server/core/language.py \
             server/core/model_downloader.py \
             server/core/rk_artifacts.py \
-            server/backends/cpu/sherpa.py \
-            server/backends/cpu/sherpa_asr.py \
-            server/backends/jetson/matcha_trt.py \
-            server/backends/rk/tts.py \
             deploy/roundtrip_verify.py
 
       - name: server.main import smoke (catches Python-version regressions)

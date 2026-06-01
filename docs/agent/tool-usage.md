@@ -1,6 +1,6 @@
 # Tool Calling — User Guide
 
-`openvoicestream_agent` supports local, in-process **tool calling**: the
+`ovs_agent` supports local, in-process **tool calling**: the
 LLM can decide to invoke a Python function (a "tool") instead of (or in
 addition to) producing text. The result is fed back into the same
 conversation and the LLM either answers or chains another tool.
@@ -56,14 +56,14 @@ Resolution order per turn: `mode_overrides[<mode>]` → global config.
 | `time_now`  | `() -> {"now": iso8601}` | Returns the agent's local time. |
 | `set_mode`  | `(mode_name: str)`       | Switches the active `AppMode`. |
 
-They live in `agent/openvoicestream_agent/tools/builtin.py` and are
+They live in `agent/ovs_agent/tools/builtin.py` and are
 registered on `default_registry` at import time.
 
 ## Writing a custom tool
 
 ```python
 # my_plugin.py
-from openvoicestream_agent.tools import default_registry
+from ovs_agent.tools import default_registry
 
 @default_registry.tool(description="Turn the kitchen light on or off.")
 def kitchen_light(on: bool) -> dict:
@@ -112,7 +112,7 @@ Declare `ctx` (or `ctx: ToolCallCtx`) in your signature and the
 registry will inject it without exposing it to the LLM:
 
 ```python
-from openvoicestream_agent.tools import ToolCallCtx
+from ovs_agent.tools import ToolCallCtx
 
 @default_registry.tool(description="Switch agent mode.")
 def set_mode(mode_name: str, ctx: ToolCallCtx) -> dict:
@@ -217,7 +217,7 @@ mode_overrides:
 `my_plugin.py` (loaded via the plugin discovery mechanism):
 
 ```python
-from openvoicestream_agent.tools import default_registry
+from ovs_agent.tools import default_registry
 
 @default_registry.tool(description="Turn the kitchen light on or off.")
 def kitchen_light(on: bool) -> dict:
