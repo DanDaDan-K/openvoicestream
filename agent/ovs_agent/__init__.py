@@ -17,22 +17,16 @@ HARD invariants (see agent/README.md):
   3. Session history is sent FULL to the LLM, no client-side trimming.
   4. Barge-in: on `asr_partial` while playing -> send `abort`.
   5. Plugin hooks are observer broadcasts, NOT routers.
-  6. Protocol constants are imported from `app.core.v2v` (SLV's module),
-     never redeclared here.
+  6. Protocol constants live in `ovs_agent.protocol` (vendored from the
+     server's `app/core/v2v.py`, kept as the single source of truth) — never
+     redeclared ad-hoc elsewhere.
 
-SLV is sibling-packaged (no pyproject), so we splice the SLV repo root
-onto `sys.path` here so `from app.core.v2v import ...` resolves.  The
-agent package lives at `<slv_repo>/agent/ovs_agent/`, so the
-SLV repo root is two levels up.
+The agent package is fully self-contained: it has NO import dependency on the
+SLV server source tree (the wire-protocol constants are vendored in
+`ovs_agent/protocol.py`), so the image ships only `agent/` and survives the
+server-side `app/`→`server/` rename.
 """
 from __future__ import annotations
-
-import sys as _sys
-from pathlib import Path as _Path
-
-_SLV_ROOT = _Path(__file__).resolve().parents[2]
-if str(_SLV_ROOT) not in _sys.path:
-    _sys.path.insert(0, str(_SLV_ROOT))
 
 # Public re-exports.
 from .config import Config, load_config  # noqa: E402

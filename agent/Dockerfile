@@ -1,19 +1,32 @@
-# OpenVoiceStream Agent runtime image.
+# OpenVoiceStream Agent runtime image (ovs_agent + its apps, incl. voice_arm).
 #
-# IMPORTANT: build context MUST be the SLV repo root (one level up),
-# because the agent imports SLV's `app.core.v2v` constants (invariant 6).
+# The agent is self-contained: wire-protocol constants are vendored in
+# ovs_agent/protocol.py, so it has NO dependency on the SLV server source tree.
 #
-# Build:
+# Build context = repo root (so `COPY agent` resolves):
 #   docker build -f agent/Dockerfile -t ovs-agent:latest .
 #
 FROM python:3.11-slim
 
+# Build-time mirrors. Default = Tsinghua (CN-fast; the edge build hosts have no
+# cross-wall route to deb.debian.org / pypi.org). Override for non-CN builders:
+#   --build-arg APT_MIRROR=deb.debian.org --build-arg PIP_INDEX=https://pypi.org/simple
+ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=${PIP_INDEX} \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Point apt at the CN mirror (bookworm ships deb822 sources.list.d/debian.sources;
+# older layout uses /etc/apt/sources.list — rewrite whichever exists).
+RUN if [ -n "$APT_MIRROR" ]; then \
+        sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" \
+            /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+    fi && \
+    apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 \
         libsndfile1 \
         ca-certificates \
@@ -21,13 +34,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /opt/slv
 
-# SLV source (read-only) -- agent imports from app.core.v2v.
-COPY app /opt/slv/app
-
-# Agent source.
+# Agent source (self-contained; no SLV server tree needed).
 COPY agent /opt/slv/agent
 
-ENV PYTHONPATH=/opt/slv:/opt/slv/agent
+ENV PYTHONPATH=/opt/slv/agent
 
 RUN pip install --no-cache-dir \
         "websockets>=12" \
@@ -38,4 +48,4 @@ RUN pip install --no-cache-dir \
         "pysbd>=0.3.4" \
     && pip install --no-cache-dir /opt/slv/agent
 
-CMD ["python", "-m", "openvoicestream_agent.cli", "run", "dialogue"]
+CMD ["ovs-agent", "run", "voice_arm"]

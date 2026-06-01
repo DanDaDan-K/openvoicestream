@@ -17,8 +17,11 @@ from typing import Any, AsyncIterator
 import websockets
 from websockets.asyncio.client import connect as ws_connect
 
-# Re-use SLV's protocol constants (invariant 6: never redeclare).
-from app.core.v2v import (  # type: ignore[import-not-found]
+# Protocol constants, vendored from the server's app/core/v2v.py into a local
+# module (invariant 6: single source of truth — ovs_agent/protocol.py MUST
+# stay in sync with the server). Vendored so the agent package has NO import
+# dependency on the SLV server tree (survives the app/→server/ rename).
+from .protocol import (
     CLIENT_ABORT,
     CLIENT_ASR_EOS,
     CLIENT_CONFIG,
