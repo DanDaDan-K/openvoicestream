@@ -353,7 +353,7 @@ curl -X POST http://orin-nx:8080/asr \
 | HTTP smoke + ASR | bench/perf 脚本 | 0.7 PD |
 | Docker / compose | env vars + Dockerfile 路径 | 0.5 PD |
 
-具体接口在 `docs/runbooks/tts-phase-b-deployment.md` 和 `app/core/tts_backend.py`。
+具体接口在 `docs/runbooks/tts-phase-b-deployment.md` 和 `server/core/tts_backend.py`。
 
 ---
 
