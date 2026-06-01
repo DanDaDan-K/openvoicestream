@@ -49,9 +49,19 @@ RUN pip3 install --no-cache-dir --break-system-packages --index-url ${PIP_INDEX}
         websockets \
         requests \
         "pysbd>=0.3.4" \
-        "webrtcvad-wheels>=2.0.14"
+        "webrtcvad-wheels>=2.0.14" \
+        prometheus_client
 
-# Application code (post-refactor layout: app/core, app/backends/cpu, app/utils)
+# ── voxedge (edge-native voice library) ───────────────────────────────
+# Post-migration the CPU sherpa ASR/TTS backends live in voxedge
+# (app/core/asr_backend.py maps cpu.sherpa_asr → voxedge.backends.sherpa.asr).
+# Install the pure-Python wheel; sherpa-onnx (its only heavy dep) is already
+# installed above and imported lazily, so no [sherpa] extra is needed.
+COPY deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl /tmp/wheels/voxedge-0.0.1a0-py3-none-any.whl
+RUN pip3 install --no-cache-dir --break-system-packages --index-url ${PIP_INDEX} /tmp/wheels/voxedge-0.0.1a0-py3-none-any.whl \
+    && rm -rf /tmp/wheels
+
+# Application code (post-refactor layout: app/core, app/utils — backends in voxedge)
 COPY app/      /opt/speech/app/
 COPY configs/  /opt/speech/configs/
 
