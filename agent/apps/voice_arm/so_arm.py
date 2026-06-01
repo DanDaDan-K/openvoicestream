@@ -24,7 +24,8 @@ import threading
 import time
 from typing import Any, Dict, Iterable, List, Optional
 
-from .base import Actuator
+from openvoicestream_agent.actuators.base import Actuator
+from openvoicestream_agent.actuators.factory import register_actuator
 
 # Imports deferred so unit tests / static checks don't require the
 # lerobot package to be installed.
@@ -316,4 +317,27 @@ class SOArmActuator(Actuator):
         return schema
 
 
-__all__ = ["SOArmActuator"]
+def _make_so_arm(config: dict) -> Actuator:
+    """Build a :class:`SOArmActuator` from the actuator config dict.
+
+    Accepts the historical ``arm_port`` alias for ``port`` through the
+    ``metadata.arm`` compat window.
+    """
+    port = config.get("port", config.get("arm_port"))
+    if port is None:
+        raise ValueError("so_arm actuator requires a 'port' in config")
+    return SOArmActuator(
+        port=port,
+        arm_id=config.get("arm_id", "voice_arm"),
+        move_delay=float(config.get("move_delay", 1.5)),
+        gesture_delay=float(config.get("gesture_delay", 0.4)),
+    )
+
+
+# Self-register with the framework on import so the factory can build us by
+# name. The owning app (apps/voice_arm) imports this module, which keeps the
+# framework driver-agnostic.
+register_actuator("so_arm", _make_so_arm)
+
+
+__all__ = ["SOArmActuator", "_make_so_arm"]

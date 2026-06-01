@@ -1,24 +1,24 @@
-"""factory.py — build a concrete :class:`Actuator` from config.
+"""factory.py — build a concrete :class:`Actuator` from config by name.
 
-The plugin layer never imports a concrete driver directly; it asks the
-factory for one by name. Registering a new motor is a one-line addition
-to ``_REGISTRY`` plus the driver module.
+The framework owns only the *abstraction*: the :class:`Actuator` ABC and
+this registry. Concrete drivers live in the app that uses them — e.g. the
+SO-ARM driver ships in ``apps/voice_arm/`` and registers itself via
+``register_actuator("so_arm", ...)`` when that app is imported. The
+framework never imports a concrete motor driver, so a new motor is a new
+app, not a change here.
 
-Config shape (lives under ``metadata.actuator`` in the agent YAML):
+Config shape (lives under ``metadata.actuator`` in the agent YAML)::
 
     metadata:
       actuator:
-        backend: so_arm
+        backend: so_arm          # registry name the app registered
         config:
           port: /dev/ttyACM0
-          arm_id: voice_arm
-          move_delay: 1.5
-          gesture_delay: 0.4
+          ...
 
-``create_actuator("so_arm", {...})`` returns a connected-on-demand
-``SOArmActuator`` — the actual serial ``connect()`` is the caller's
-responsibility (ArmPlugin runs it in ``asyncio.to_thread`` during
-``start()`` so the sync setup path doesn't block).
+``create_actuator("so_arm", {...})`` returns whatever the app's registered
+builder produces; the caller (ArmPlugin) runs ``connect()`` in
+``asyncio.to_thread`` so the sync serial setup doesn't block.
 """
 from __future__ import annotations
 
@@ -26,41 +26,36 @@ from typing import Any, Callable, Dict
 
 from .base import Actuator
 
-
-def _make_so_arm(config: Dict[str, Any]) -> Actuator:
-    from .so_arm import SOArmActuator
-
-    # Accept both the new key (``port``) and the historical ``arm_port``
-    # alias so existing config keeps working through the metadata.arm
-    # compat window.
-    port = config.get("port", config.get("arm_port"))
-    if port is None:
-        raise ValueError("so_arm actuator requires a 'port' in config")
-    return SOArmActuator(
-        port=port,
-        arm_id=config.get("arm_id", "voice_arm"),
-        move_delay=float(config.get("move_delay", 1.5)),
-        gesture_delay=float(config.get("gesture_delay", 0.4)),
-    )
+# Populated by apps at import time via ``register_actuator``. The framework
+# ships it EMPTY — it knows no concrete drivers.
+_REGISTRY: Dict[str, Callable[[Dict[str, Any]], Actuator]] = {}
 
 
-_REGISTRY: Dict[str, Callable[[Dict[str, Any]], Actuator]] = {
-    "so_arm": _make_so_arm,
-}
+def register_actuator(
+    name: str, builder: Callable[[Dict[str, Any]], Actuator]
+) -> None:
+    """Register a concrete actuator builder under ``name``.
+
+    Apps call this at import time (e.g. ``apps/voice_arm/so_arm.py``) so the
+    framework stays driver-agnostic. Re-registering the same name overrides.
+    """
+    _REGISTRY[name] = builder
 
 
 def create_actuator(name: str, config: Dict[str, Any]) -> Actuator:
     """Build an :class:`Actuator` by registry name.
 
-    Raises ``ValueError`` for an unknown backend name.
+    Raises ``ValueError`` for a backend name no app has registered (most
+    likely the owning app wasn't imported before this call).
     """
     builder = _REGISTRY.get(name)
     if builder is None:
         raise ValueError(
             f"unknown actuator backend {name!r}; "
-            f"known: {sorted(_REGISTRY)}"
+            f"registered: {sorted(_REGISTRY)} "
+            f"(is the owning app imported so it can register its driver?)"
         )
     return builder(dict(config or {}))
 
 
-__all__ = ["create_actuator"]
+__all__ = ["create_actuator", "register_actuator"]
