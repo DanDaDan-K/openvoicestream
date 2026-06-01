@@ -267,6 +267,60 @@
           "source_path": "rk3588/kokoro-hybrid-v1/style.npy",
           "size_bytes": 1152,
           "sha256": "e844b0d3200a28b47a2472d4052c2696ac639197aa0ab06bb3fb708781b5a09d"
+        },
+        {
+          "path": "opt/kokoro-rknn/tokens.txt",
+          "source_path": "rk3588/kokoro-hybrid-v1/tokens.txt",
+          "size_bytes": 1111,
+          "sha256": "931ab2df2400cd65d580a22402024c2347ced8ae9ea300e545144b1aacc48e14"
+        },
+        {
+          "path": "opt/asr/models/tokenizer/tokenizer.json",
+          "source_path": "rk3588/opt/asr/models/tokenizer/tokenizer.json",
+          "size_bytes": 11429377,
+          "sha256": "bd2a97b55c8f7f9c328c73ee9b9178771037e9f566dfca8e238a063d41cbac92"
+        },
+        {
+          "path": "opt/asr/models/mel_filters.npy",
+          "source_path": "rk3588/opt/asr/models/mel_filters.npy",
+          "size_bytes": 205952,
+          "sha256": "85ca4058090e9318bab39b79683ba214744304dc9d6f3868ee55fbae6e16c80a"
+        },
+        {
+          "path": "opt/asr/models/embd/decoder_hf.embed_tokens.npy",
+          "source_path": "shared/opt/asr/models/embd/decoder_hf.embed_tokens.npy",
+          "size_bytes": 622329984,
+          "sha256": "dc7fa8078c75467dbb400b214289a69cc7d3624fc944980282a098b5de15ca97"
+        },
+        {
+          "path": "opt/asr/models/vad/silero_vad.onnx",
+          "source_path": "rk3588/opt/asr/models/vad/silero_vad.onnx",
+          "size_bytes": 2313101,
+          "sha256": "6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396"
+        },
+        {
+          "path": "opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.15s.rk3588.rknn",
+          "source_path": "rk3588/opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.15s.rk3588.rknn",
+          "size_bytes": 382138290,
+          "sha256": "509af53e61dc7e98a2799381af8a366f84ddedbc14da64a50969f82b9e784d32"
+        },
+        {
+          "path": "opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.4s.rk3588.rknn",
+          "source_path": "rk3588/opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.4s.rk3588.rknn",
+          "size_bytes": 379147310,
+          "sha256": "a39b7f803513cffe944c3006c4018c5aae775ac2c67a7941627e07972147cae8"
+        },
+        {
+          "path": "opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.2s.rk3588.rknn",
+          "source_path": "rk3588/opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.2s.rk3588.rknn",
+          "size_bytes": 378632174,
+          "sha256": "25e0d95ebe8642b06f8657516bc114f9b01aca7d05a440389c2e7d22a1de258e"
+        },
+        {
+          "path": "opt/asr/models/decoder/decoder_qwen3.fp16.rk3588.rkllm",
+          "source_path": "rk3588/opt/asr/models/decoder/decoder_qwen3.fp16.rk3588.rkllm",
+          "size_bytes": 1529742060,
+          "sha256": "8dfcb19073de04d5838f78b3135049af06b863e7a46dbb28c0130db5d2a3bb49"
         }
       ]
     },
@@ -335,6 +389,60 @@
           "source_path": "rk3588/kokoro-hybrid-v1/style.npy",
           "size_bytes": 1152,
           "sha256": "e844b0d3200a28b47a2472d4052c2696ac639197aa0ab06bb3fb708781b5a09d"
+        },
+        {
+          "path": "opt/kokoro-rknn/tokens.txt",
+          "source_path": "rk3588/kokoro-hybrid-v1/tokens.txt",
+          "size_bytes": 1111,
+          "sha256": "931ab2df2400cd65d580a22402024c2347ced8ae9ea300e545144b1aacc48e14"
+        },
+        {
+          "path": "opt/asr/models/tokenizer/tokenizer.json",
+          "source_path": "rk3588/opt/asr/models/tokenizer/tokenizer.json",
+          "size_bytes": 11429377,
+          "sha256": "bd2a97b55c8f7f9c328c73ee9b9178771037e9f566dfca8e238a063d41cbac92"
+        },
+        {
+          "path": "opt/asr/models/mel_filters.npy",
+          "source_path": "rk3588/opt/asr/models/mel_filters.npy",
+          "size_bytes": 205952,
+          "sha256": "85ca4058090e9318bab39b79683ba214744304dc9d6f3868ee55fbae6e16c80a"
+        },
+        {
+          "path": "opt/asr/models/embd/decoder_hf.embed_tokens.npy",
+          "source_path": "shared/opt/asr/models/embd/decoder_hf.embed_tokens.npy",
+          "size_bytes": 622329984,
+          "sha256": "dc7fa8078c75467dbb400b214289a69cc7d3624fc944980282a098b5de15ca97"
+        },
+        {
+          "path": "opt/asr/models/vad/silero_vad.onnx",
+          "source_path": "rk3588/opt/asr/models/vad/silero_vad.onnx",
+          "size_bytes": 2313101,
+          "sha256": "6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396"
+        },
+        {
+          "path": "opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.15s.rk3588.rknn",
+          "source_path": "rk3588/opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.15s.rk3588.rknn",
+          "size_bytes": 382138290,
+          "sha256": "509af53e61dc7e98a2799381af8a366f84ddedbc14da64a50969f82b9e784d32"
+        },
+        {
+          "path": "opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.4s.rk3588.rknn",
+          "source_path": "rk3588/opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.4s.rk3588.rknn",
+          "size_bytes": 379147310,
+          "sha256": "a39b7f803513cffe944c3006c4018c5aae775ac2c67a7941627e07972147cae8"
+        },
+        {
+          "path": "opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.2s.rk3588.rknn",
+          "source_path": "rk3588/opt/asr/models/encoder/rk3588/qwen3_asr_encoder_merged.fp16.2s.rk3588.rknn",
+          "size_bytes": 378632174,
+          "sha256": "25e0d95ebe8642b06f8657516bc114f9b01aca7d05a440389c2e7d22a1de258e"
+        },
+        {
+          "path": "opt/asr/models/decoder/decoder_qwen3.fp16.rk3588.rkllm",
+          "source_path": "rk3588/opt/asr/models/decoder/decoder_qwen3.fp16.rk3588.rkllm",
+          "size_bytes": 1529742060,
+          "sha256": "8dfcb19073de04d5838f78b3135049af06b863e7a46dbb28c0130db5d2a3bb49"
         }
       ]
     }
