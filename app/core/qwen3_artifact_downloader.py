@@ -157,14 +157,13 @@ def ensure_artifacts(missing_paths: Iterable[str]) -> bool:
         # Late import: huggingface_hub may be absent in non-Jetson images.
         from huggingface_hub import snapshot_download
 
-        # Derive allow_patterns from required_files top-level directories
-        # so we don't pull unrelated artifact sets stored in the same repo.
-        # Always include "tts/**" because some required_files live under tts/.
+        # Allow exactly the set's required_files (each is a repo-relative path),
+        # NOT their top-level dir. A `engines/**` prefix would pull every other
+        # device's engine set stored under engines/ in the same repo — on a
+        # fresh slim start that is multi-GB of unrelated llm.engine files. The
+        # exact-path patterns fetch only what this set declares.
         required = set_spec.get("required_files") or []
-        prefixes = sorted(
-            {f"{Path(rf).parts[0]}/**" for rf in required if "/" in rf}
-        )
-        allow = prefixes or None
+        allow = sorted(required) or None
 
         snapshot_download(
             repo_id=repo_id,
