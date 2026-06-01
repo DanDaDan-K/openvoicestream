@@ -66,7 +66,9 @@
       "source_path": "engines/browser_poc_manifest.json",
       "dest": "model_root",
       "size": 503354,
-      "md5": "c71399442790593dce2c38724d46621c"
+      "md5": "c71399442790593dce2c38724d46621c",
+      "optional": true,
+      "note": "WebGPU browser-POC manifest only; NOT consumed by the Jetson C++ moss_tts_nano worker. Absent from HF (#44) — marked optional so slim-image provisioning does not 404-abort."
     },
     {
       "path": "engines/moss_tts_decode_step.plan",
@@ -129,7 +131,9 @@
       "source_path": "engines/tts_browser_onnx_meta.json",
       "dest": "model_root",
       "size": 4627,
-      "md5": "c5315660d3b09c84f103ab284bd6fe1e"
+      "md5": "c5315660d3b09c84f103ab284bd6fe1e",
+      "optional": true,
+      "note": "WebGPU browser-POC ONNX meta only; NOT consumed by the Jetson C++ moss_tts_nano worker. Absent from HF (#44) — marked optional so slim-image provisioning does not 404-abort."
     },
     {
       "path": "moss_tts_nano_worker",
