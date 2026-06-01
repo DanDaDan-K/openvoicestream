@@ -56,6 +56,10 @@ deploy/install.sh --target rk3576 --pull --verify
 deploy/install.sh --target rpi --pull --verify
 ```
 
+> **New to this repo?** [`docs/REPRODUCE.md`](docs/REPRODUCE.md) is the
+> end-to-end, from-zero reproduction guide: run a prebuilt image (Path A),
+> rebuild the engines from scratch (Path B), or build the images (Path C).
+
 After startup, the service listens on `http://device:8621`:
 
 | Target | URL | Compose file | Image |
