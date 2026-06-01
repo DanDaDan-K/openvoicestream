@@ -613,7 +613,7 @@ async def test_exception_mid_tool_loop_rolls_back_history():
 @pytest.mark.asyncio
 async def test_multi_mode_app_class_is_back_compat_dialogue_shim():
     """The legacy `DialogueApp` import path now resolves to MultiModeApp."""
-    from apps.multi_mode.app import MultiModeApp
+    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
 
     assert DialogueApp is MultiModeApp
 

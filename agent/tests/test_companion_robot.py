@@ -17,7 +17,7 @@ def test_config():
 
 
 def test_companion_robot_app_instantiates(test_config):
-    from apps.companion_robot.app import CompanionRobotApp
+    from openvoicestream_agent.apps.companion_robot.app import CompanionRobotApp
 
     app = CompanionRobotApp(test_config)
     assert app.reachy is None
@@ -30,7 +30,7 @@ def test_companion_robot_app_instantiates(test_config):
 
 
 def test_companion_robot_registers_default_modes(test_config):
-    from apps.companion_robot.app import CompanionRobotApp
+    from openvoicestream_agent.apps.companion_robot.app import CompanionRobotApp
 
     app = CompanionRobotApp(test_config)
     names = {m["name"] for m in app.modes.list_all()}
@@ -39,7 +39,7 @@ def test_companion_robot_registers_default_modes(test_config):
 
 
 def test_companion_robot_subclassable(test_config):
-    from apps.companion_robot.app import CompanionRobotApp
+    from openvoicestream_agent.apps.companion_robot.app import CompanionRobotApp
 
     class MyCompanion(CompanionRobotApp):
         def __init__(self, config):
@@ -55,7 +55,7 @@ def test_companion_robot_subclassable(test_config):
 
 def test_app_alias_resolves(test_config):
     """The CLI loader looks for `App` symbol; ensure alias works."""
-    from apps.companion_robot import App
+    from openvoicestream_agent.apps.companion_robot import App
 
     app = App(test_config)
     assert hasattr(app, "head_target_bus")

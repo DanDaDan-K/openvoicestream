@@ -19,17 +19,14 @@ def _setup_logging(level: str) -> None:
 
 
 def _default_config_path(app_name: str) -> Path:
-    # agent/openvoicestream_agent/cli.py -> agent/
-    agent_root = Path(__file__).resolve().parents[1]
-    return agent_root / "apps" / app_name / "config.yaml"
+    # agent/openvoicestream_agent/cli.py -> agent/openvoicestream_agent/
+    pkg_root = Path(__file__).resolve().parents[0]
+    return pkg_root / "apps" / app_name / "config.yaml"
 
 
 def _load_app_class(app_name: str):  # noqa: ANN001
-    """Dynamic import. Looks for `agent.apps.<name>.app:App`.
-
-    Falls back to `apps.<name>.app:App` (when running from agent/ root).
-    """
-    candidates = [f"agent.apps.{app_name}.app", f"apps.{app_name}.app"]
+    """Dynamic import. Looks for `openvoicestream_agent.apps.<name>.app:App`."""
+    candidates = [f"openvoicestream_agent.apps.{app_name}.app"]
     last_err: Exception | None = None
     for mod_name in candidates:
         try:

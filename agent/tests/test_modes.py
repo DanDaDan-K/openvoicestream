@@ -273,7 +273,7 @@ async def test_multi_mode_app_restores_idle_for_silent_mode():
     detect this and restore IDLE itself, otherwise the FSM stays in
     THINKING after the first utterance and the agent appears dead."""
     from openvoicestream_agent.state import ConvState
-    from apps.multi_mode.app import MultiModeApp
+    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
 
     cfg = Config(pipeline_mode="always_on")
     app = MultiModeApp.__new__(MultiModeApp)
@@ -319,7 +319,7 @@ async def test_multi_mode_app_restores_idle_when_preprocess_drops():
     """Monologue.preprocess returns None; dispatcher must restore IDLE
     instead of leaving the FSM in THINKING."""
     from openvoicestream_agent.state import ConvState
-    from apps.multi_mode.app import MultiModeApp
+    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
 
     cfg = Config(pipeline_mode="always_on")
     app = MultiModeApp.__new__(MultiModeApp)

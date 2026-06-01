@@ -137,7 +137,7 @@ async def run_agent(config, audio: ScriptedAudioIO):
 
     Yields (app, probe). Tears everything down on exit.
     """
-    from apps.multi_mode.app import MultiModeApp
+    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
 
     app = MultiModeApp(config)
     app.audio = audio

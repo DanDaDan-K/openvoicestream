@@ -615,7 +615,7 @@ def test_robot_execute_action_refuses_when_torque_off() -> None:
     actuator.execute_action() directly (not through HTTP), so the HTTP-side
     torque check would otherwise be bypassed.
     """
-    from apps.voice_arm.so_arm import SOArmActuator
+    from openvoicestream_agent.apps.voice_arm.so_arm import SOArmActuator
 
     arm = SOArmActuator(port="/dev/null")
 

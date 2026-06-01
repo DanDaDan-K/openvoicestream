@@ -16,7 +16,7 @@ See ``README.md`` next to this file for the migration plan.
 """
 from __future__ import annotations
 
-from apps.multi_mode.app import MultiModeApp
+from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
 
 
 class _NullHeadTargetBus:

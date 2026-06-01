@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 
-from apps.multi_mode.app import MultiModeApp
+from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
 
 from openvoicestream_agent.audio.tapped_audio_io import TappedAudioIO
 from openvoicestream_agent.plugins.actuator_actions import ArmPlugin

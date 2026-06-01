@@ -19,7 +19,7 @@ _AGENT_ROOT = Path(__file__).resolve().parent.parent
 if str(_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(_AGENT_ROOT))
 
-from apps.multi_mode.app import MultiModeApp  # noqa: E402
+from openvoicestream_agent.apps.multi_mode.app import MultiModeApp  # noqa: E402
 
 import openvoicestream_agent as _ovs  # noqa: E402
 

@@ -135,7 +135,7 @@ async def run_mock_agent(llm_base_url: str, *, availability_enabled: bool = True
     """Spin up MultiModeApp + DebugDashboardPlugin + LLMAvailabilityPlugin
     without ever touching SLV / audio / signal handlers.
     """
-    from apps.multi_mode.app import MultiModeApp
+    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
 
     port = _free_port()
     cfg = _make_config(
@@ -368,7 +368,7 @@ async def test_late_dashboard_client_sees_current_down_state() -> None:
     base = await server.start()
     await server.stop()
 
-    from apps.multi_mode.app import MultiModeApp
+    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
 
     port = _free_port()
     cfg = _make_config(base, port)
