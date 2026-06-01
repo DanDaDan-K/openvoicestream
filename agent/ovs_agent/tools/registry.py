@@ -219,6 +219,43 @@ class ToolRegistry:
             })
         return out
 
+    def list_advertise_tools(
+        self, allow: set[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Like :meth:`list_openai_tools` but ALSO carries the per-tool
+        ``preamble_text`` / ``completion_text`` / ``response_mode`` as
+        top-level sibling keys on each entry.
+
+        Used for the server-loop ``CLIENT_TOOL_ADVERTISE`` payload: voxedge's
+        ConversationEngine reads these off the advertised entry
+        (``entry.get("preamble_text")`` etc.) to fire the spoken preamble
+        ("好的。") the moment the tool name streams in, and to skip LLM round 2
+        for ``template`` tools (emit ``completion_text`` instead). Plain
+        ``list_openai_tools`` strips them (the LLM schema must not carry them),
+        which is exactly why server-loop lost the preamble + tight completion
+        that the client-loop tool runner used locally.
+        """
+        out: list[dict[str, Any]] = []
+        for tname, t in self._tools.items():
+            if allow is not None and tname not in allow:
+                continue
+            entry: dict[str, Any] = {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            }
+            if t.preamble_text:
+                entry["preamble_text"] = t.preamble_text
+            if t.completion_text:
+                entry["completion_text"] = t.completion_text
+            if t.response_mode and t.response_mode != "await":
+                entry["response_mode"] = t.response_mode
+            out.append(entry)
+        return out
+
     def has(self, name: str) -> bool:
         return name in self._tools
 

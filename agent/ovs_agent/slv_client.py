@@ -162,6 +162,26 @@ class SLVClient:
         # logs flood, and post-reconnect first utterance still carries
         # pre-reconnect preroll).
         self._reconnecting: bool = False
+        # Real reconnect dedup. The _reconnecting flag above is observational
+        # only — it does NOT serialize concurrent reconnect() callers. Both the
+        # dispatch reader-exit path (app_base._slv_dispatch) and wake() call
+        # reconnect(); without this lock they each open a WS, and the server's
+        # admission eviction (limit=1) makes each new WS evict the prior one,
+        # whose reader-exit triggers yet another reconnect → a self-eviction
+        # storm that repeatedly tears the WS down mid-utterance and wedges the
+        # ASR worker (cancel-on-ws_close timeout → forced worker restart).
+        self._reconnect_lock: asyncio.Lock = asyncio.Lock()
+        # Last observed WS close code/reason (set in _reader_loop, cleared on a
+        # fresh successful open) — lets the dispatch loop tell an admission
+        # eviction (1012 "superseded by new session") apart from a real death.
+        self._last_close_code: "int | None" = None
+        self._last_close_reason: str = ""
+
+    def last_close_code(self) -> "int | None":
+        return self._last_close_code
+
+    def last_close_reason(self) -> str:
+        return self._last_close_reason
 
     def _touch_activity(self) -> None:
         try:
@@ -242,39 +262,52 @@ class SLVClient:
         """
         if self._closed:
             return
-        self._reconnecting = True
-        try:
-            async with self._send_lock:
-                old_reader = self._reader_task
-                old_ws = self._ws
-                self._ws = None
-                self._reader_task = None
-                if old_reader is not None and not old_reader.done():
-                    old_reader.cancel()
-                    try:
-                        await old_reader
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                if old_ws is not None:
-                    try:
-                        await old_ws.close()
-                    except Exception:
-                        pass
-                # Grace: let server SessionLimiter (limit=1, Qwen3-ASR
-                # worker is single-concurrent) observe the close + release
-                # the slot before we open a fresh WS. With proactive
-                # reconnects on tts_done / wake reverted (SLV server
-                # v1.15+ ASR turn timeout handles stuck workers),
-                # reconnect now only fires on genuine WS death — close-
-                # before-open races are no longer densely triggered, so
-                # 50ms of defensive grace is sufficient (was 150ms when
-                # proactive reconnect was active).
-                await asyncio.sleep(0.05)
-                self._reader_done.clear()
-                self._tts_sample_rate = None
-                await self._open_with_retry()
-        finally:
-            self._reconnecting = False
+        # Serialize reconnects: the dispatch reader-exit path and wake() both
+        # call reconnect(); the lock makes each reconnect close-then-open
+        # without overlapping another's open, so the server's admission
+        # eviction (limit=1) never fires (no two live WS at once) → no
+        # self-eviction storm. We deliberately do NOT short-circuit on
+        # is_healthy() here: wake()'s idle>30s call must force a fresh ASR
+        # session even when the WS is TCP-healthy (else the long-idle "silent
+        # mute" bug returns). Redundant-reconnect suppression lives in the
+        # dispatch guard (is_healthy()/is_reconnecting() → resume, don't
+        # reconnect), not here.
+        async with self._reconnect_lock:
+            if self._closed:
+                return
+            self._reconnecting = True
+            try:
+                async with self._send_lock:
+                    old_reader = self._reader_task
+                    old_ws = self._ws
+                    self._ws = None
+                    self._reader_task = None
+                    if old_reader is not None and not old_reader.done():
+                        old_reader.cancel()
+                        try:
+                            await old_reader
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    if old_ws is not None:
+                        try:
+                            await old_ws.close()
+                        except Exception:
+                            pass
+                    # Grace: let server SessionLimiter (limit=1, Qwen3-ASR
+                    # worker is single-concurrent) observe the close + release
+                    # the slot before we open a fresh WS. With proactive
+                    # reconnects on tts_done / wake reverted (SLV server
+                    # v1.15+ ASR turn timeout handles stuck workers),
+                    # reconnect now only fires on genuine WS death — close-
+                    # before-open races are no longer densely triggered, so
+                    # 50ms of defensive grace is sufficient (was 150ms when
+                    # proactive reconnect was active).
+                    await asyncio.sleep(0.05)
+                    self._reader_done.clear()
+                    self._tts_sample_rate = None
+                    await self._open_with_retry()
+            finally:
+                self._reconnecting = False
 
     def is_reconnecting(self) -> bool:
         """True while reconnect() is mid-flight (race #3 gate)."""
@@ -331,6 +364,10 @@ class SLVClient:
                 # see "infinite idle" and immediately re-reconnect on top
                 # of our brand new session (and trip the limiter).
                 self._touch_activity()
+                # Fresh healthy WS — clear any stale close code/reason so the
+                # dispatch loop doesn't misread a past eviction.
+                self._last_close_code = None
+                self._last_close_reason = ""
                 return
             # Reader fired → connection died inside grace window.
             # Tear down what we just built and back off.
@@ -556,7 +593,27 @@ class SLVClient:
         except asyncio.CancelledError:
             raise
         except websockets.ConnectionClosed as e:
-            logger.info("SLV WS closed: %s", e)
+            # Capture close code/reason so the dispatch loop can tell an
+            # admission eviction (1012 "superseded by new session") apart from
+            # a genuine connection loss and avoid the self-eviction reconnect
+            # storm. Defensive across websockets versions (rcvd Close frame vs
+            # direct .code/.reason).
+            try:
+                _rcvd = getattr(e, "rcvd", None)
+                self._last_close_code = (
+                    getattr(_rcvd, "code", None) if _rcvd is not None
+                    else getattr(e, "code", None)
+                )
+                self._last_close_reason = (
+                    (getattr(_rcvd, "reason", None) if _rcvd is not None
+                     else getattr(e, "reason", None)) or ""
+                )
+            except Exception:  # pragma: no cover - defensive
+                self._last_close_code, self._last_close_reason = None, ""
+            logger.info(
+                "SLV WS closed: code=%s reason=%r (%s)",
+                self._last_close_code, self._last_close_reason, e,
+            )
             await self._queue.put(SLVError(f"connection closed: {e}"))
         except Exception as e:  # pragma: no cover - defensive
             logger.exception("SLV reader crashed")

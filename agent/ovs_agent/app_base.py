@@ -1293,7 +1293,18 @@ class BaseApp:
             return
         registry = getattr(self, "tool_registry", None)
         tools_payload: list[dict] = []
-        if registry is not None and hasattr(registry, "list_openai_tools"):
+        # Prefer list_advertise_tools: it carries per-tool preamble_text /
+        # completion_text / response_mode so voxedge's server-loop engine can
+        # fire the spoken "好的。" preamble + skip LLM round 2 for template
+        # tools. Plain list_openai_tools strips those (server-loop then loses
+        # the preamble + tight reply). Fall back for older registries.
+        if registry is not None and hasattr(registry, "list_advertise_tools"):
+            try:
+                tools_payload = registry.list_advertise_tools(allow=None) or []
+            except Exception:
+                logger.warning("server-loop advertise: tool list failed", exc_info=True)
+                tools_payload = []
+        elif registry is not None and hasattr(registry, "list_openai_tools"):
             try:
                 tools_payload = registry.list_openai_tools(allow=None) or []
             except Exception:
@@ -1643,8 +1654,30 @@ class BaseApp:
             # blip). Reconnect and resume — unless we're shutting down.
             if getattr(self.slv, "_closed", False):
                 return
+            # Break the eviction↔reconnect self-excitation storm. If a
+            # concurrent reconnect (e.g. wake()'s) already installed a fresh
+            # healthy WS, OR this close was a 1012 admission eviction (our own
+            # newer session superseded us / a reconnect is mid-flight), do NOT
+            # open yet another WS — that evicts the live holder and re-triggers
+            # the loop (each cycle tears the WS down mid-utterance → ASR worker
+            # cancel-timeout → forced restart → "卡住"). Just resume consuming
+            # events on the live connection. Only a genuine death (no healthy
+            # replacement, non-eviction close) falls through to reconnect.
+            # Always `continue`, never return (except client shutdown above) —
+            # else the dispatch task goes deaf.
+            if self.slv.is_healthy():
+                continue
+            _code = self.slv.last_close_code()
+            _reason = (self.slv.last_close_reason() or "").lower()
+            _evicted = _code == 1012 and ("superseded" in _reason or "evicted" in _reason)
+            if self.slv.is_reconnecting() or _evicted:
+                # A reconnect is finishing (or we were superseded by it). Give
+                # it a beat to install the new reader, then loop back to
+                # events() on the live WS.
+                await asyncio.sleep(0.3)
+                continue
             try:
-                logger.info("slv dispatch: reader exited, reconnecting...")
+                logger.info("slv dispatch: reader exited (code=%s), reconnecting...", _code)
                 await asyncio.wait_for(self.slv.reconnect(), timeout=5.0)
                 self._slv_reconnect_count = getattr(self, "_slv_reconnect_count", 0) + 1
                 self._first_tts_seen = False
