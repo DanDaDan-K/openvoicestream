@@ -41,10 +41,7 @@ def test_hf_bundle_metadata_covers_all_extracted_engines(tmp_path, monkeypatch):
         engine_file="encoder.plan",
         engine_path=encoder,
         env_var="ENC_ENGINE",
-        onnx_input=None,
-        build_script=None,
-        build_env={},
-        hf_only=True,
+        onnx_input=None,        hf_only=True,
         required=True,
     )
     host = engine_resolver.HostSignature("87", "10.3", "6.2", "12.6")
@@ -92,10 +89,7 @@ def test_hf_bundle_resolve_requires_extra_files(tmp_path, monkeypatch):
         engine_file="encoder.plan",
         engine_path=encoder,
         env_var="ENC_ENGINE",
-        onnx_input=None,
-        build_script=None,
-        build_env={},
-        hf_only=True,
+        onnx_input=None,        hf_only=True,
         required=True,
         extra_files=["engines/missing-runtime.onnx"],
     )
@@ -116,7 +110,7 @@ def test_hf_resolve_tolerates_files_as_list(tmp_path, monkeypatch):
     )
     spec = engine_resolver.EngineSpec(
         model_id="moss", engine_file="e.plan", engine_path=tmp_path / "e.plan",
-        env_var="E", onnx_input=None, build_script=None, build_env={},
+        env_var="E", onnx_input=None,
         hf_only=True, required=True,
     )
     host = engine_resolver.HostSignature("87", "10.3", "6.2", "12.6")
@@ -142,7 +136,7 @@ def test_resolve_one_keeps_unverified_engine_when_resolve_fails(tmp_path, monkey
 
     spec = engine_resolver.EngineSpec(
         model_id="demo", engine_file="encoder.plan", engine_path=engine,
-        env_var="ENC", onnx_input=None, build_script=None, build_env={},
+        env_var="ENC", onnx_input=None,
         hf_only=True, required=True,
     )
     host = engine_resolver.HostSignature("87", "10.3", "6.2", "12.6")
