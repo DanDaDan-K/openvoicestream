@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from openvoicestream_agent.actuators.minimal_so_follower import (  # noqa: E402
+from apps.voice_arm.minimal_so_follower import (  # noqa: E402
     REGISTERS,
     RESOLUTION,
     SO_FOLLOWER_MOTORS,
