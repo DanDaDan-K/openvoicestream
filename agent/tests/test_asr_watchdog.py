@@ -12,10 +12,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.slv_client import ASRFinal, SLVError
-from openvoicestream_agent.state import ConvState
-from openvoicestream_agent.event_bus import EventBus
+from ovs_agent.app_base import BaseApp
+from ovs_agent.slv_client import ASRFinal, SLVError
+from ovs_agent.state import ConvState
+from ovs_agent.event_bus import EventBus
 
 
 def _fresh_app(timeout: float = 0.1) -> BaseApp:

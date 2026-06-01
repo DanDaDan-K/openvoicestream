@@ -27,11 +27,11 @@ from __future__ import annotations
 
 import logging
 
-from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
+from ovs_agent.apps.multi_mode.app import MultiModeApp
 
-from openvoicestream_agent.audio.tapped_audio_io import TappedAudioIO
-from openvoicestream_agent.plugins.actuator_actions import ArmPlugin
-from openvoicestream_agent.wake_sources.openwakeword import OpenWakeWordSource
+from ovs_agent.audio.tapped_audio_io import TappedAudioIO
+from ovs_agent.plugins.actuator_actions import ArmPlugin
+from ovs_agent.wake_sources.openwakeword import OpenWakeWordSource
 
 logger = logging.getLogger(__name__)
 

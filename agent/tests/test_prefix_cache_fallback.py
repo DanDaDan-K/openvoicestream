@@ -19,8 +19,8 @@ import httpx
 import pytest
 from openai import APIError
 
-from openvoicestream_agent import Session
-from openvoicestream_agent.llm.edge_llm import EdgeLLMBackend
+from ovs_agent import Session
+from ovs_agent.llm.edge_llm import EdgeLLMBackend
 
 
 # ── upstream fakes (mirrors tests/test_llm_retry.py style) ──────────────

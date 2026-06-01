@@ -46,7 +46,7 @@ orchestrates LLM streaming and barge-in.
 ```
 agent/
 ├── pyproject.toml
-├── openvoicestream_agent/
+├── ovs_agent/
 │   ├── __init__.py        # sys.path shim so `from app.core.v2v ...` resolves
 │   ├── app_base.py        # BaseApp orchestrator
 │   ├── app_mode.py        # AppMode / ModeManager strategy framework
@@ -131,7 +131,7 @@ project-specific wiring out of the generic `multi_mode` app.
 ## Why the `sys.path` shim?
 
 SLV has no `pyproject.toml`, so we can't `pip install` it.
-`openvoicestream_agent/__init__.py` prepends the SLV repo root to
+`ovs_agent/__init__.py` prepends the SLV repo root to
 `sys.path` at import time so `from app.core.v2v import CLIENT_TEXT, ...`
 works without restructuring SLV. The Docker image accomplishes the same
 thing by copying SLV's `app/` directory next to the agent and setting
@@ -140,7 +140,7 @@ thing by copying SLV's `app/` directory next to the agent and setting
 ## Writing a plugin
 
 ```python
-from openvoicestream_agent import Plugin
+from ovs_agent import Plugin
 
 class LoggerPlugin(Plugin):
     name = "logger"
@@ -166,7 +166,7 @@ For most behavior changes, create an `AppMode` and register it with
 `MultiModeApp`:
 
 ```python
-from openvoicestream_agent.app_mode import AppMode, ModeContext
+from ovs_agent.app_mode import AppMode, ModeContext
 
 class MyMode(AppMode):
     name = "my_mode"

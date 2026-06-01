@@ -17,8 +17,8 @@ from __future__ import annotations
 import asyncio
 import pytest
 
-from openvoicestream_agent.audio_io import AudioIO
-from openvoicestream_agent.app_base import BaseApp
+from ovs_agent.audio_io import AudioIO
+from ovs_agent.app_base import BaseApp
 
 
 class _SlowSLV:

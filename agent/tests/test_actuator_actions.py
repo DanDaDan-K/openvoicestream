@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 import pytest
 import yaml
 
-from openvoicestream_agent.actuators.actions import (  # noqa: E402
+from ovs_agent.actuators.actions import (  # noqa: E402
     MAX_FRAMES,
     ActionsError,
     ActionsManager,
@@ -202,7 +202,7 @@ def test_save_atomic_failure_preserves_state(mgr: ActionsManager, monkeypatch) -
         raise OSError("simulated disk full")
 
     monkeypatch.setattr(
-        "openvoicestream_agent.actuators.actions.os.replace", boom
+        "ovs_agent.actuators.actions.os.replace", boom
     )
     with pytest.raises(OSError):
         mgr.save("should_not_persist", [_frame()])
@@ -368,7 +368,7 @@ class _FakeRobot:
 def http(tmp_path):
     from fastapi.testclient import TestClient
 
-    from openvoicestream_agent.plugins.actuator_observation_server import _build_app
+    from ovs_agent.plugins.actuator_observation_server import _build_app
 
     yaml_path = tmp_path / "actions.yaml"
     yaml_path.write_text(
@@ -615,7 +615,7 @@ def test_robot_execute_action_refuses_when_torque_off() -> None:
     actuator.execute_action() directly (not through HTTP), so the HTTP-side
     torque check would otherwise be bypassed.
     """
-    from openvoicestream_agent.apps.voice_arm.so_arm import SOArmActuator
+    from ovs_agent.apps.voice_arm.so_arm import SOArmActuator
 
     arm = SOArmActuator(port="/dev/null")
 

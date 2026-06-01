@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from openvoicestream_agent.vad import EnergyVAD, create_vad
+from ovs_agent.vad import EnergyVAD, create_vad
 
 
 # ── EnergyVAD unit tests ────────────────────────────────────────────────
@@ -99,7 +99,7 @@ class _AlwaysSpeechThenSilenceVAD:
 async def test_mic_pump_fires_asr_eos_on_speech_end() -> None:
     """speech (>=200ms) followed by 600ms silence → exactly one asr_eos."""
     # Construct app without invoking __init__ (avoids LLM/audio setup).
-    from openvoicestream_agent.app_base import BaseApp
+    from ovs_agent.app_base import BaseApp
 
     app = BaseApp.__new__(BaseApp)
 
@@ -127,8 +127,8 @@ async def test_mic_pump_fires_asr_eos_on_speech_end() -> None:
     app._asr_watchdog_task = None
     app._thinking_watchdog_task = None
     app._mic_rms_broadcast_task = None
-    app._state = __import__("openvoicestream_agent.state", fromlist=["ConvState"]).ConvState.IDLE
-    app.events = __import__("openvoicestream_agent.event_bus", fromlist=["EventBus"]).EventBus()
+    app._state = __import__("ovs_agent.state", fromlist=["ConvState"]).ConvState.IDLE
+    app.events = __import__("ovs_agent.event_bus", fromlist=["EventBus"]).EventBus()
     app.plugins = []
     app._last_mic_chunk_ts = 0.0
 

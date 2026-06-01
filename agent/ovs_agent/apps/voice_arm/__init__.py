@@ -3,7 +3,7 @@
 Loaded by the ovs-agent CLI as ``apps.voice_arm.app:App``. The actuator
 itself is pluggable: ``metadata.actuator.backend`` selects the concrete
 driver (currently ``so_arm``); future motors implement the same
-``openvoicestream_agent.actuators.base.Actuator`` ABC.
+``ovs_agent.actuators.base.Actuator`` ABC.
 """
 # Importing the concrete driver registers it with the framework's actuator
 # factory (register_actuator("so_arm", ...)), so create_actuator("so_arm") works.

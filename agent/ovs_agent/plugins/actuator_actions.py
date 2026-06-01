@@ -22,11 +22,11 @@ import logging
 import threading
 from pathlib import Path
 
-from openvoicestream_agent.actuators.actions import ActionsManager
-from openvoicestream_agent.actuators.base import Actuator
-from openvoicestream_agent.actuators.factory import create_actuator
-from openvoicestream_agent.plugin import Plugin
-from openvoicestream_agent.tools.action_tools import register_arm_tools
+from ovs_agent.actuators.actions import ActionsManager
+from ovs_agent.actuators.base import Actuator
+from ovs_agent.actuators.factory import create_actuator
+from ovs_agent.plugin import Plugin
+from ovs_agent.tools.action_tools import register_arm_tools
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ class ArmPlugin(Plugin):
         self._obs_task = asyncio.create_task(self._obs_loop(), name="arm-obs-cache")
         # Observation HTTP server (daemon thread; OK to leak on shutdown).
         try:
-            from openvoicestream_agent.plugins.actuator_observation_server import (
+            from ovs_agent.plugins.actuator_observation_server import (
                 start_observation_server,
             )
             port = int(self.cfg.get("observation_port", 8765))

@@ -1,4 +1,4 @@
-"""openvoicestream_agent — agent-layer client on top of SLV /v2v/stream.
+"""ovs_agent — agent-layer client on top of SLV /v2v/stream.
 
 Architecture (Phase 1):
 
@@ -22,7 +22,7 @@ HARD invariants (see agent/README.md):
 
 SLV is sibling-packaged (no pyproject), so we splice the SLV repo root
 onto `sys.path` here so `from app.core.v2v import ...` resolves.  The
-agent package lives at `<slv_repo>/agent/openvoicestream_agent/`, so the
+agent package lives at `<slv_repo>/agent/ovs_agent/`, so the
 SLV repo root is two levels up.
 """
 from __future__ import annotations

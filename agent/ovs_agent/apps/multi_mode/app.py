@@ -9,18 +9,18 @@ from __future__ import annotations
 
 import logging
 
-from openvoicestream_agent import BaseApp
-from openvoicestream_agent.app_mode import ModeContext, ModeManager
-from openvoicestream_agent.state import ConvState
-from openvoicestream_agent.modes import (
+from ovs_agent import BaseApp
+from ovs_agent.app_mode import ModeContext, ModeManager
+from ovs_agent.state import ConvState
+from ovs_agent.modes import (
     ChatMode,
     InterpreterMode,
     MonologueMode,
     TranscribeMode,
 )
-from openvoicestream_agent.plugins.debug_dashboard import DebugDashboardPlugin
-from openvoicestream_agent.plugins.llm_availability import LLMAvailabilityPlugin
-from openvoicestream_agent.wake_sources import (
+from ovs_agent.plugins.debug_dashboard import DebugDashboardPlugin
+from ovs_agent.plugins.llm_availability import LLMAvailabilityPlugin
+from ovs_agent.wake_sources import (
     HTTPWakeSource,
     LocalKeywordWakeSource,
     MQTTWakeSource,

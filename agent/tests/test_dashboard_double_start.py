@@ -15,9 +15,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.plugins.debug_dashboard import DebugDashboardPlugin
-from openvoicestream_agent.plugins.llm_availability import LLMAvailabilityPlugin
+from ovs_agent.event_bus import EventBus
+from ovs_agent.plugins.debug_dashboard import DebugDashboardPlugin
+from ovs_agent.plugins.llm_availability import LLMAvailabilityPlugin
 
 
 # ── DebugDashboardPlugin ───────────────────────────────────────────────

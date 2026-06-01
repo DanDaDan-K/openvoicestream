@@ -2,7 +2,7 @@
 import asyncio
 import pytest
 
-from openvoicestream_agent.slv_client import SLVError
+from ovs_agent.slv_client import SLVError
 
 from .conftest import run_agent, WAV_DIR
 from .fake_audio import ScriptedAudioIO

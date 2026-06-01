@@ -98,7 +98,7 @@ def _make_config(
     *,
     availability_enabled: bool = True,
 ):
-    from openvoicestream_agent.config import Config, _default_slv_config
+    from ovs_agent.config import Config, _default_slv_config
     slv_cfg = _default_slv_config()
     slv_cfg.update({"vad": "none", "asr_language": "auto"})
     llm_base_url = llm_base_url.rstrip("/")
@@ -135,7 +135,7 @@ async def run_mock_agent(llm_base_url: str, *, availability_enabled: bool = True
     """Spin up MultiModeApp + DebugDashboardPlugin + LLMAvailabilityPlugin
     without ever touching SLV / audio / signal handlers.
     """
-    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
+    from ovs_agent.apps.multi_mode.app import MultiModeApp
 
     port = _free_port()
     cfg = _make_config(
@@ -239,7 +239,7 @@ async def test_llm_down_before_request_fails_fast() -> None:
         )
 
         # state must come to rest at IDLE
-        from openvoicestream_agent.state import ConvState
+        from ovs_agent.state import ConvState
         assert app._state == ConvState.IDLE
 
         # Print debug timeline for EVIDENCE.
@@ -307,7 +307,7 @@ async def test_sse_error_frame_propagates_without_retry() -> None:
                 f"unexpected on_error payload: {err_evt!r}"
             )
 
-            from openvoicestream_agent.state import ConvState
+            from ovs_agent.state import ConvState
             assert app._state == ConvState.IDLE
     finally:
         await server.stop()
@@ -368,7 +368,7 @@ async def test_late_dashboard_client_sees_current_down_state() -> None:
     base = await server.start()
     await server.stop()
 
-    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
+    from ovs_agent.apps.multi_mode.app import MultiModeApp
 
     port = _free_port()
     cfg = _make_config(base, port)

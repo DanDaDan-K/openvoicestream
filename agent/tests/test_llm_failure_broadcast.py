@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from openvoicestream_agent import Config
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.state import ConvState
+from ovs_agent import Config
+from ovs_agent.app_base import BaseApp
+from ovs_agent.event_bus import EventBus
+from ovs_agent.state import ConvState
 
 
 def _fresh_app() -> BaseApp:
@@ -58,7 +58,7 @@ async def test_generic_llm_failure_broadcasts_on_error():
 async def test_llm_stream_error_broadcasts_on_error():
     """A LLMStreamError (SSE mid-stream upstream failure) must also be
     surfaced, not silently swallowed."""
-    from openvoicestream_agent.llm import LLMStreamError
+    from ovs_agent.llm import LLMStreamError
 
     app = _fresh_app()
     errors: list[BaseException] = []

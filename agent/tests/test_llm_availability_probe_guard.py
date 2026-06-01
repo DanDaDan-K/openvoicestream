@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from openvoicestream_agent.plugins.llm_availability import (
+from ovs_agent.plugins.llm_availability import (
     AvailabilityState,
     LLMAvailabilityPlugin,
 )
@@ -96,7 +96,7 @@ def _patch_httpx(monkeypatch, *, response):
     def factory(*args, **kwargs):
         return _FakeClient(response=response, **kwargs)
     monkeypatch.setattr(
-        "openvoicestream_agent.plugins.llm_availability.httpx.AsyncClient",
+        "ovs_agent.plugins.llm_availability.httpx.AsyncClient",
         factory,
     )
 

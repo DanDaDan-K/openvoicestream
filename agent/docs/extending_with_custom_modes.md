@@ -14,7 +14,7 @@ or `POST /api/control/mode {"name": "..."}`.
 
 ```python
 # my_pkg/recipe_helper.py
-from openvoicestream_agent.app_mode import AppMode, ModeContext
+from ovs_agent.app_mode import AppMode, ModeContext
 
 
 class RecipeHelperMode(AppMode):

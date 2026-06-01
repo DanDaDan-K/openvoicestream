@@ -16,10 +16,10 @@ import pytest
 
 from types import SimpleNamespace
 
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.audio_io import AudioIO
-from openvoicestream_agent.slv_client import ASRFinal, ASRPartial, TTSAudio
-from openvoicestream_agent.state import ConvState
+from ovs_agent.app_base import BaseApp
+from ovs_agent.audio_io import AudioIO
+from ovs_agent.slv_client import ASRFinal, ASRPartial, TTSAudio
+from ovs_agent.state import ConvState
 
 
 @pytest.mark.asyncio
@@ -173,7 +173,7 @@ async def test_tts_done_does_not_demote_barged_in():
     state must stay BARGED_IN — VAD silence-end / ASRFinal owns the
     next transition. Demoting to IDLE here would also start the auto-
     sleep timer mid-utterance under push_to_talk mode."""
-    from openvoicestream_agent.slv_client import TTSDone
+    from ovs_agent.slv_client import TTSDone
 
     app = _make_app()
     await app._dispatch_one(TTSAudio(pcm=b"\x01\x00" * 8, sample_rate=24000))

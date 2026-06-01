@@ -10,8 +10,8 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.plugins.debug_dashboard import DebugDashboardPlugin
+from ovs_agent.event_bus import EventBus
+from ovs_agent.plugins.debug_dashboard import DebugDashboardPlugin
 
 
 @pytest.mark.asyncio

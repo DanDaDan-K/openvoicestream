@@ -1,7 +1,7 @@
 """Stub WakeSource implementations.
 
 These are not wired by default — they exist as scaffolding so users
-can `from openvoicestream_agent.wake_sources import MQTTWakeSource`
+can `from ovs_agent.wake_sources import MQTTWakeSource`
 and subclass / replace start()/stop() with their concrete transport.
 
 Each stub raises NotImplementedError from start() with a clear

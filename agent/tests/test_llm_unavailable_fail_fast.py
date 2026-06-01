@@ -9,16 +9,16 @@ import time
 
 import pytest
 
-from openvoicestream_agent import Config, Session
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.app_mode import ModeContext
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.plugins.llm_availability import (
+from ovs_agent import Config, Session
+from ovs_agent.app_base import BaseApp
+from ovs_agent.app_mode import ModeContext
+from ovs_agent.event_bus import EventBus
+from ovs_agent.plugins.llm_availability import (
     AvailabilityState,
     LLMAvailabilityPlugin,
     LLMUnavailable,
 )
-from openvoicestream_agent.state import ConvState
+from ovs_agent.state import ConvState
 
 
 class _SlowLLM:

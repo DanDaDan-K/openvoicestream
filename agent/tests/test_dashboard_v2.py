@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import pytest
 
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.plugins.debug_dashboard import DebugDashboardPlugin
+from ovs_agent.event_bus import EventBus
+from ovs_agent.plugins.debug_dashboard import DebugDashboardPlugin
 
 
 def _mk_app(port):

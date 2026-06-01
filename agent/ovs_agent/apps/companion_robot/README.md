@@ -67,7 +67,7 @@ and it behaves identically to `multi_mode`.
 4. **Keep + adapt** these (they are robot-unique):
    `MotionPlugin`, `FaceTrackerPlugin`, `RestPlugin`,
    `VisionClientPlugin`, `DiaryPlugin`, `HealthcheckPlugin` — convert
-   to subclasses of `openvoicestream_agent.plugin.Plugin`. The
+   to subclasses of `ovs_agent.plugin.Plugin`. The
    signature change is minor (no return value from `setup`, async
    `start/stop`, lifecycle hooks are async).
 5. **Dashboard**: replace the 1775-line `DashboardPlugin` with
@@ -115,7 +115,7 @@ exactly like `ChatMode` but uses the `on_assistant_token` /
 `on_assistant_sentence` hooks to drive motion + emotion overlays:
 
 ```python
-from openvoicestream_agent.app_mode import AppMode, ModeContext
+from ovs_agent.app_mode import AppMode, ModeContext
 
 
 class CompanionMode(AppMode):

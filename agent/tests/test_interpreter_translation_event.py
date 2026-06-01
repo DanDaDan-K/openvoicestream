@@ -12,9 +12,9 @@ from typing import Any
 
 import pytest
 
-from openvoicestream_agent import Config, Session
-from openvoicestream_agent.app_mode import ModeContext, ModeManager
-from openvoicestream_agent.modes import InterpreterMode
+from ovs_agent import Config, Session
+from ovs_agent.app_mode import ModeContext, ModeManager
+from ovs_agent.modes import InterpreterMode
 
 
 class _FakeSLV:

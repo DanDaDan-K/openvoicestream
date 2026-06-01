@@ -15,14 +15,14 @@ from typing import Any
 
 import pytest
 
-from openvoicestream_agent import Config
-from openvoicestream_agent.app_base import BaseApp, TypedLLMError
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.llm import LLMStreamError
-from openvoicestream_agent.plugins.debug_dashboard import DebugDashboardPlugin
-from openvoicestream_agent.plugins.llm_availability import LLMUnavailable
-from openvoicestream_agent.state import ConvState
-from openvoicestream_agent.app_mode import LLMTimeoutError
+from ovs_agent import Config
+from ovs_agent.app_base import BaseApp, TypedLLMError
+from ovs_agent.event_bus import EventBus
+from ovs_agent.llm import LLMStreamError
+from ovs_agent.plugins.debug_dashboard import DebugDashboardPlugin
+from ovs_agent.plugins.llm_availability import LLMUnavailable
+from ovs_agent.state import ConvState
+from ovs_agent.app_mode import LLMTimeoutError
 
 
 def _fresh_app() -> BaseApp:

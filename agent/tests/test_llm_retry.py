@@ -18,7 +18,7 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIError, APITimeoutError
 
-from openvoicestream_agent.llm.openai_compat import (
+from ovs_agent.llm.openai_compat import (
     LLMStreamError,
     OpenAICompatBackend,
 )
@@ -284,7 +284,7 @@ async def test_backoff_respected(monkeypatch):
         sleeps.append(float(delay))
 
     monkeypatch.setattr(
-        "openvoicestream_agent.llm.openai_compat.asyncio.sleep",
+        "ovs_agent.llm.openai_compat.asyncio.sleep",
         _fake_sleep,
     )
 

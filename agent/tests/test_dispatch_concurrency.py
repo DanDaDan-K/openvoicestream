@@ -17,9 +17,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.slv_client import ASRFinal, ASRPartial, TTSAudio
-from openvoicestream_agent.state import ConvState
+from ovs_agent.app_base import BaseApp
+from ovs_agent.slv_client import ASRFinal, ASRPartial, TTSAudio
+from ovs_agent.state import ConvState
 
 
 class _FakeAudio:

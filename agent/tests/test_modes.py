@@ -6,9 +6,9 @@ from typing import Any
 
 import pytest
 
-from openvoicestream_agent import Config, Session
-from openvoicestream_agent.app_mode import AppMode, ModeContext, ModeManager
-from openvoicestream_agent.modes import (
+from ovs_agent import Config, Session
+from ovs_agent.app_mode import AppMode, ModeContext, ModeManager
+from ovs_agent.modes import (
     ChatMode,
     InterpreterMode,
     MonologueMode,
@@ -272,8 +272,8 @@ async def test_multi_mode_app_restores_idle_for_silent_mode():
     TTS, so the SPEAKING→IDLE path never fires. MultiModeApp must
     detect this and restore IDLE itself, otherwise the FSM stays in
     THINKING after the first utterance and the agent appears dead."""
-    from openvoicestream_agent.state import ConvState
-    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
+    from ovs_agent.state import ConvState
+    from ovs_agent.apps.multi_mode.app import MultiModeApp
 
     cfg = Config(pipeline_mode="always_on")
     app = MultiModeApp.__new__(MultiModeApp)
@@ -318,8 +318,8 @@ async def test_multi_mode_app_restores_idle_for_silent_mode():
 async def test_multi_mode_app_restores_idle_when_preprocess_drops():
     """Monologue.preprocess returns None; dispatcher must restore IDLE
     instead of leaving the FSM in THINKING."""
-    from openvoicestream_agent.state import ConvState
-    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
+    from ovs_agent.state import ConvState
+    from ovs_agent.apps.multi_mode.app import MultiModeApp
 
     cfg = Config(pipeline_mode="always_on")
     app = MultiModeApp.__new__(MultiModeApp)

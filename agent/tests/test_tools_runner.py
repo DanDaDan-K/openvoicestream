@@ -6,9 +6,9 @@ from typing import Any
 
 import pytest
 
-from openvoicestream_agent.llm import LLMEvent
-from openvoicestream_agent.session import Session
-from openvoicestream_agent.tools import ToolCallCtx, ToolRegistry, stream_with_tools
+from ovs_agent.llm import LLMEvent
+from ovs_agent.session import Session
+from ovs_agent.tools import ToolCallCtx, ToolRegistry, stream_with_tools
 
 
 class _FakeLLM:
@@ -412,7 +412,7 @@ async def test_first_token_timeout_invokes_on_timeout_hook():
 async def test_idle_timeout_after_first_token():
     """After a payload event, a long gap should raise an idle (not
     first-token) timeout."""
-    from openvoicestream_agent.llm import LLMEvent
+    from ovs_agent.llm import LLMEvent
     session = Session()
     registry = ToolRegistry()
 
@@ -771,7 +771,7 @@ async def test_response_mode_template_empty_completion_text_falls_back_to_await(
         completion_texts.append(t)
 
     msgs: list[dict[str, Any]] = [{"role": "system", "content": "sys"}]
-    with caplog.at_level(logging.WARNING, logger="openvoicestream_agent.tools.runner"):
+    with caplog.at_level(logging.WARNING, logger="ovs_agent.tools.runner"):
         final = await stream_with_tools(
             llm, msgs,
             session=session, registry=registry, allowed_tools={"wave"},

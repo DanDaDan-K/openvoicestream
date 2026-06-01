@@ -31,14 +31,14 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
-from openvoicestream_agent.actuators.actions import (
+from ovs_agent.actuators.actions import (
     NAME_RE,
     ActionsError,
     ActionsManager,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
-    from openvoicestream_agent.actuators.base import Actuator
+    from ovs_agent.actuators.base import Actuator
 
 
 # Cache fallback config: how stale can a cached observation be before we

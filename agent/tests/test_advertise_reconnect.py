@@ -22,11 +22,11 @@ import asyncio
 
 import pytest
 
-from openvoicestream_agent import Config, Session
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.slv_client import ASRFinal, SLVReconnectError
-from openvoicestream_agent.state import ConvState
-from openvoicestream_agent.tools import ToolRegistry
+from ovs_agent import Config, Session
+from ovs_agent.app_base import BaseApp
+from ovs_agent.slv_client import ASRFinal, SLVReconnectError
+from ovs_agent.state import ConvState
+from ovs_agent.tools import ToolRegistry
 
 
 # ── fakes ────────────────────────────────────────────────────────────
@@ -124,7 +124,7 @@ async def test_boot_connect_retries_past_runtime_budget(monkeypatch):
 
     # Sanity: this many failures exceeds the runtime reconnect budget,
     # which would have aborted boot under the old code.
-    from openvoicestream_agent.slv_client import SLVClient
+    from ovs_agent.slv_client import SLVClient
     assert len(SLVClient._RECONNECT_BACKOFFS) < 5
 
     await app._connect_with_boot_retry()
@@ -153,7 +153,7 @@ async def test_boot_connect_gives_up_after_deadline(monkeypatch):
     # deadline is reached deterministically without real waiting.
     clock = {"t": 0.0}
     monkeypatch.setattr(
-        "openvoicestream_agent.app_base.time.monotonic", lambda: clock["t"]
+        "ovs_agent.app_base.time.monotonic", lambda: clock["t"]
     )
 
     async def _advance_sleep(d):

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from openvoicestream_agent.session import Session
+from ovs_agent.session import Session
 
 
 def _fake_counter(text: str) -> int:

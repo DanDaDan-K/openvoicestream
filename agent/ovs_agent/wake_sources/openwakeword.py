@@ -27,7 +27,7 @@ except Exception as _exc:  # pragma: no cover - import-time check
 else:
     _OWW_IMPORT_ERR = None
 
-from openvoicestream_agent.wake_source import WakeSource
+from ovs_agent.wake_source import WakeSource
 
 logger = logging.getLogger(__name__)
 

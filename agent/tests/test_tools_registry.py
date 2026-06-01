@@ -6,7 +6,7 @@ from typing import Literal, Optional
 
 import pytest
 
-from openvoicestream_agent.tools import ToolRegistry
+from ovs_agent.tools import ToolRegistry
 
 
 # ── schema generation per supported type ──────────────────────────────
@@ -248,7 +248,7 @@ def test_tool_response_mode_and_completion_text_kwargs_threaded():
 
 
 def test_unregister_returns_true_when_present_false_when_absent():
-    from openvoicestream_agent.tools import ToolRegistry
+    from ovs_agent.tools import ToolRegistry
     reg = ToolRegistry()
 
     @reg.tool()

@@ -1,7 +1,7 @@
 """TranslatorApp: Pure translation without LLM (sentence-level interpreter mode)."""
 from __future__ import annotations
 
-from openvoicestream_agent import BaseApp
+from ovs_agent import BaseApp
 
 
 class TranslatorApp(BaseApp):

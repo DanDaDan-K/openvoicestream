@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from openvoicestream_agent.session import Session
+from ovs_agent.session import Session
 
 
 def test_three_identical_short_replies_auto_clear():

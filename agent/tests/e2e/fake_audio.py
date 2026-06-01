@@ -3,7 +3,7 @@
 Plays back scripted WAV files into the agent's mic pump, and captures
 TTS PCM bytes that the agent would have written to the speaker.
 
-Surface compatibility with `openvoicestream_agent.audio_io.AudioIO`:
+Surface compatibility with `ovs_agent.audio_io.AudioIO`:
   properties: chunk_ms, input_sr, output_sr, is_playing
   async:      start_capture, play, stop_playback, close
   sync:       set_output_sample_rate, mark_playback_done

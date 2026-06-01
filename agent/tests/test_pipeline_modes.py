@@ -11,11 +11,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.config import Config
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.state import ConvState
-from openvoicestream_agent.wake_sources import HTTPWakeSource
+from ovs_agent.app_base import BaseApp
+from ovs_agent.config import Config
+from ovs_agent.event_bus import EventBus
+from ovs_agent.state import ConvState
+from ovs_agent.wake_sources import HTTPWakeSource
 
 
 # ── Config-level checks ────────────────────────────────────────────
@@ -309,7 +309,7 @@ async def test_wake_calls_reconnect_when_slv_unhealthy():
 @pytest.mark.asyncio
 async def test_wake_stays_sleeping_when_reconnect_fails():
     """Wake refuses to transition if SLV reconnect raises — no silent mute."""
-    from openvoicestream_agent.slv_client import SLVReconnectError
+    from ovs_agent.slv_client import SLVReconnectError
 
     app = _fresh_app("wake_word", sleep_timeout_s=999)
     app.slv.is_healthy = MagicMock(return_value=False)

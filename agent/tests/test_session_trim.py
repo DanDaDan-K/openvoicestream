@@ -5,8 +5,8 @@ import logging
 
 import pytest
 
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.session import Session
+from ovs_agent.event_bus import EventBus
+from ovs_agent.session import Session
 
 
 # A trivial "tokenizer" that estimates ~1 token per 4 chars. This avoids
@@ -174,7 +174,7 @@ def test_trim_logs_warning(caplog: pytest.LogCaptureFixture) -> None:
     session = Session(max_input_tokens=80, token_counter=_fake_counter)
     for i in range(20):
         _add_turn(session, f"user-{i}" * 10, f"asst-{i}" * 10)
-    with caplog.at_level(logging.WARNING, logger="openvoicestream_agent.session"):
+    with caplog.at_level(logging.WARNING, logger="ovs_agent.session"):
         _ = session.messages(SYSTEM)
     msgs = [r.message for r in caplog.records if "session trimmed" in r.message]
     assert msgs, f"expected 'session trimmed' warning, got: {caplog.text}"
@@ -190,7 +190,7 @@ def test_fallback_uses_conservative_estimate(monkeypatch) -> None:
     """
     import math
 
-    from openvoicestream_agent import session as session_mod
+    from ovs_agent import session as session_mod
 
     # Force tokenizer load to fail (cache the _FALLBACK sentinel).
     session_mod._TOKENIZER_CACHE.clear()
@@ -215,7 +215,7 @@ def test_fallback_trim_uses_conservative_budget(monkeypatch) -> None:
     """
     import math
 
-    from openvoicestream_agent import session as session_mod
+    from ovs_agent import session as session_mod
 
     session_mod._TOKENIZER_CACHE.clear()
     session_mod._TOKENIZER_CACHE["dummy-model"] = session_mod._FALLBACK

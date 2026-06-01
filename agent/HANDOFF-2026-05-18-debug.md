@@ -172,7 +172,7 @@ fix F 应该缓解了，但 3.1 的故事场景说明还有别的阻塞点。
 
 ### 4.1 后端
 
-- **`agent/openvoicestream_agent/plugins/debug_dashboard.py`** — 整个 dashboard plugin
+- **`agent/ovs_agent/plugins/debug_dashboard.py`** — 整个 dashboard plugin
   - 路由注册：line 95~120
   - WS 连接处理（`_handle_ws`）+ 浏览器客户端管理（`_browser_clients` set）
   - Plugin hook 实现：`on_*` 方法（被 `event_bus.emit(...)` 触发）
@@ -182,13 +182,13 @@ fix F 应该缓解了，但 3.1 的故事场景说明还有别的阻塞点。
 
 ### 4.2 前端
 
-- **`agent/openvoicestream_agent/plugins/static/dashboard.html`** — 布局骨架
+- **`agent/ovs_agent/plugins/static/dashboard.html`** — 布局骨架
   - line 97: `<canvas id="rmsChart" width="240" height="60">` （§3.2 渲染 bug 的 canvas）
   - line 98: `<span id="rmsThr">` threshold 显示
-- **`agent/openvoicestream_agent/plugins/static/dashboard.css`** — 样式
+- **`agent/ovs_agent/plugins/static/dashboard.css`** — 样式
   - line 269: `#rmsChart { width: 100%; height: 60px; ... }`
   - state 颜色：line 19~63（`--state-barged` 等）
-- **`agent/openvoicestream_agent/plugins/static/dashboard.js`** — 主逻辑
+- **`agent/ovs_agent/plugins/static/dashboard.js`** — 主逻辑
   - WS 连接 + 重连：`connectWS()`（line ~600）
   - 事件分发：单个大 `if (ev === "...")` 分支链，line ~700+
   - `drawRms()` MIC RMS canvas 绘制：line 553~569（§3.2 bug 在这）

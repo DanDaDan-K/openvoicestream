@@ -7,11 +7,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.config import Config
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.state import ConvState
-from openvoicestream_agent.slv_client import ASRFinal
+from ovs_agent.app_base import BaseApp
+from ovs_agent.config import Config
+from ovs_agent.event_bus import EventBus
+from ovs_agent.state import ConvState
+from ovs_agent.slv_client import ASRFinal
 
 
 def _stub_app() -> BaseApp:

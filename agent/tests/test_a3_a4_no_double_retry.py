@@ -27,8 +27,8 @@ import httpx
 import pytest
 from openai import APIError
 
-from openvoicestream_agent.llm.edge_llm import EdgeLLMBackend
-from openvoicestream_agent.session import Session
+from ovs_agent.llm.edge_llm import EdgeLLMBackend
+from ovs_agent.session import Session
 
 
 def _req() -> httpx.Request:
@@ -187,7 +187,7 @@ async def test_a4_fallback_5xx_no_retry_propagates():
 async def test_retry_disabled_kwarg_bypasses_a3_loop():
     """Direct unit test on OpenAICompatBackend: passing _retry_disabled=True
     via kwargs makes a 5xx propagate immediately (no retries)."""
-    from openvoicestream_agent.llm.openai_compat import OpenAICompatBackend
+    from ovs_agent.llm.openai_compat import OpenAICompatBackend
 
     plan = [_make_api_error(503, "boom")]
     b = OpenAICompatBackend(
@@ -216,7 +216,7 @@ async def test_retry_disabled_not_leaked_to_request():
     """The _retry_disabled internal kwarg must be popped before being sent
     to OpenAI's chat.completions.create — otherwise the upstream sees an
     unknown parameter."""
-    from openvoicestream_agent.llm.openai_compat import OpenAICompatBackend
+    from ovs_agent.llm.openai_compat import OpenAICompatBackend
 
     plan = [[_Chunk("ok")]]
     b = OpenAICompatBackend(

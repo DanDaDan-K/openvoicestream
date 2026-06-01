@@ -9,7 +9,7 @@ import pytest
 import websockets
 from websockets.asyncio.server import serve
 
-from openvoicestream_agent.slv_client import (
+from ovs_agent.slv_client import (
     ASREndpoint,
     ASRFinal,
     ASRPartial,
@@ -168,7 +168,7 @@ async def _tool_call_server(received: list):
 
 @pytest.mark.asyncio
 async def test_advertise_and_tool_result_wire_frames():
-    from openvoicestream_agent.slv_client import ServerToolCall
+    from ovs_agent.slv_client import ServerToolCall
 
     received: list = []
     server = await _tool_call_server(received)
@@ -229,7 +229,7 @@ async def test_advertise_and_tool_result_wire_frames():
 
 @pytest.mark.asyncio
 async def test_is_healthy_false_before_connect():
-    from openvoicestream_agent.slv_client import SLVClient
+    from ovs_agent.slv_client import SLVClient
 
     client = SLVClient("ws://127.0.0.1:1", {"foo": "bar"})
     assert client.is_healthy() is False
@@ -256,7 +256,7 @@ async def test_is_healthy_false_after_close():
 @pytest.mark.asyncio
 async def test_is_healthy_false_when_reader_dies():
     """Server closes the WS → reader exits → is_healthy() returns False."""
-    from openvoicestream_agent.slv_client import SLVClient
+    from ovs_agent.slv_client import SLVClient
 
     closed = asyncio.Event()
 
@@ -292,7 +292,7 @@ async def test_is_healthy_false_when_reader_dies():
 @pytest.mark.asyncio
 async def test_reconnect_error_when_server_keeps_closing():
     """All attempts rejected inside grace window → raises SLVReconnectError."""
-    from openvoicestream_agent.slv_client import SLVClient, SLVReconnectError
+    from ovs_agent.slv_client import SLVClient, SLVReconnectError
 
     async def reject_handler(ws):
         # Accept, immediately close — triggers reader-done inside grace.

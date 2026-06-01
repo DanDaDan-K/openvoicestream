@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import pytest
 
-from openvoicestream_agent.app_mode import AppMode, ModeManager
-from openvoicestream_agent.config import Config, load_config
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.plugins.debug_dashboard import DebugDashboardPlugin
+from ovs_agent.app_mode import AppMode, ModeManager
+from ovs_agent.config import Config, load_config
+from ovs_agent.event_bus import EventBus
+from ovs_agent.plugins.debug_dashboard import DebugDashboardPlugin
 
 
 class _Chat(AppMode):

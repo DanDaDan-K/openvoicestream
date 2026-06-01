@@ -10,12 +10,12 @@ from typing import Any
 
 import pytest
 
-from openvoicestream_agent import Config, Session
-from openvoicestream_agent.app_mode import ModeContext, ModeManager
-from openvoicestream_agent.apps_dialogue_shim import DialogueApp  # back-compat alias
-from openvoicestream_agent.llm.base import LLMBackend
-from openvoicestream_agent.llm import LLMStreamError
-from openvoicestream_agent.modes import ChatMode
+from ovs_agent import Config, Session
+from ovs_agent.app_mode import ModeContext, ModeManager
+from ovs_agent.apps_dialogue_shim import DialogueApp  # back-compat alias
+from ovs_agent.llm.base import LLMBackend
+from ovs_agent.llm import LLMStreamError
+from ovs_agent.modes import ChatMode
 
 
 class FakeSLV:
@@ -171,7 +171,7 @@ class _ScriptedEventsLLM(LLMBackend):
     new path is realistic."""
 
     def __init__(self, scripts):
-        from openvoicestream_agent.llm.base import LLMEvent  # noqa
+        from ovs_agent.llm.base import LLMEvent  # noqa
         self._scripts = list(scripts)
         self.calls: list[dict[str, Any]] = []
         self._i = 0
@@ -196,8 +196,8 @@ async def test_tools_enabled_one_tool_round_trip_via_app_mode():
     """End-to-end via ModeContext.run_default_dialogue_turn with tools
     enabled: the assistant emits text → tool_call → final text. Each
     text token still streams to SLV; dashboard events fire."""
-    from openvoicestream_agent.llm.base import LLMEvent
-    from openvoicestream_agent.tools import ToolRegistry
+    from ovs_agent.llm.base import LLMEvent
+    from ovs_agent.tools import ToolRegistry
 
     cfg = Config(
         system_prompt="SYS",
@@ -305,8 +305,8 @@ async def test_barge_in_during_tool_execution_rolls_back_history():
     at the dialogue-turn level — the higher-level stop_playback +
     slv.abort live on BaseApp and are out of scope here.
     """
-    from openvoicestream_agent.llm.base import LLMEvent
-    from openvoicestream_agent.tools import ToolRegistry
+    from ovs_agent.llm.base import LLMEvent
+    from ovs_agent.tools import ToolRegistry
 
     cfg = Config(
         system_prompt="SYS",
@@ -417,7 +417,7 @@ async def test_tools_disabled_default_path_unchanged():
     """Regression: tools_enabled=False (default) must produce the exact
     same observable behaviour as before batch 1 — every text token
     streams to SLV, history grows by user+assistant, no tool events."""
-    from openvoicestream_agent.llm.base import LLMEvent
+    from ovs_agent.llm.base import LLMEvent
 
     cfg = Config(system_prompt="SYS")  # tools_enabled defaults to False
     slv = FakeSLV()
@@ -461,7 +461,7 @@ async def test_tools_disabled_default_path_unchanged():
 async def test_app_mode_first_token_timeout_raises_llm_timeout_error():
     """Mocked LLM hangs without ever emitting an event → app_mode
     surfaces LLMTimeoutError(kind='first_token')."""
-    from openvoicestream_agent.app_mode import LLMTimeoutError
+    from ovs_agent.app_mode import LLMTimeoutError
 
     cfg = Config(system_prompt="SYS")
     # Use a tiny first-token timeout so the test runs fast.
@@ -491,8 +491,8 @@ async def test_per_mode_tools_enabled_false_overrides_global_true():
     ``tools_enabled=False`` must override a global ``tools_enabled=True``.
     The earlier truthy-fallback logic treated False as "not set" and
     inherited the global, leaking tools into modes that opted out."""
-    from openvoicestream_agent.llm.base import LLMEvent
-    from openvoicestream_agent.tools import ToolRegistry
+    from ovs_agent.llm.base import LLMEvent
+    from ovs_agent.tools import ToolRegistry
 
     cfg = Config(
         system_prompt="SYS",
@@ -540,8 +540,8 @@ async def test_exception_mid_tool_loop_rolls_back_history():
     must roll the session.history back to the pre-turn anchor, otherwise
     the orphan assistant_tool_calls pins forever and breaks subsequent
     trim and prefix-cache invariants."""
-    from openvoicestream_agent.llm.base import LLMEvent
-    from openvoicestream_agent.tools import ToolRegistry
+    from ovs_agent.llm.base import LLMEvent
+    from ovs_agent.tools import ToolRegistry
 
     cfg = Config(
         system_prompt="SYS",
@@ -613,7 +613,7 @@ async def test_exception_mid_tool_loop_rolls_back_history():
 @pytest.mark.asyncio
 async def test_multi_mode_app_class_is_back_compat_dialogue_shim():
     """The legacy `DialogueApp` import path now resolves to MultiModeApp."""
-    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
+    from ovs_agent.apps.multi_mode.app import MultiModeApp
 
     assert DialogueApp is MultiModeApp
 
@@ -628,8 +628,8 @@ async def test_empty_allowlist_with_tools_enabled_exposes_all_registered():
     whose plugins register all the tools they want exposed (no need to
     re-list every name in YAML).
     """
-    from openvoicestream_agent.llm.base import LLMEvent
-    from openvoicestream_agent.tools import ToolRegistry
+    from ovs_agent.llm.base import LLMEvent
+    from ovs_agent.tools import ToolRegistry
 
     cfg = Config(
         system_prompt="SYS",

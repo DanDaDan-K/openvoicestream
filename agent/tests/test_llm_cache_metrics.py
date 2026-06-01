@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from openvoicestream_agent import Config, Session
-from openvoicestream_agent.app_mode import ModeContext
-from openvoicestream_agent.llm.edge_llm import EdgeLLMBackend
-from openvoicestream_agent.llm.openai_compat import OpenAICompatBackend
+from ovs_agent import Config, Session
+from ovs_agent.app_mode import ModeContext
+from ovs_agent.llm.edge_llm import EdgeLLMBackend
+from ovs_agent.llm.openai_compat import OpenAICompatBackend
 
 
 class _Delta:

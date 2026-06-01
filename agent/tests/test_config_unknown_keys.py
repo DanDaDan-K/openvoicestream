@@ -15,7 +15,7 @@ exercised here with keys that are genuinely not on Config
 
 import logging
 
-from openvoicestream_agent.config import load_config
+from ovs_agent.config import load_config
 
 
 def _write(tmp_path, text):

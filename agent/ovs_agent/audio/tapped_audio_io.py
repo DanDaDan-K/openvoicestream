@@ -29,7 +29,7 @@ with occasional gaps; user-utterance ASR is not.
 NOTE: we override the private ``_safe_put`` method of AudioIO. The
 upstream framework may change its signature; if that happens, switch
 to a composition-based wrapper that owns the sounddevice callback
-itself. Pinned to the API observed in openvoicestream_agent 0.1.0.
+itself. Pinned to the API observed in ovs_agent 0.1.0.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ import time
 
 import numpy as np
 import sounddevice as sd
-from openvoicestream_agent.audio_io import AudioIO
+from ovs_agent.audio_io import AudioIO
 
 logger = logging.getLogger(__name__)
 

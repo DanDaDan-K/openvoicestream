@@ -24,8 +24,8 @@ import threading
 import time
 from typing import Any, Dict, Iterable, List, Optional
 
-from openvoicestream_agent.actuators.base import Actuator
-from openvoicestream_agent.actuators.factory import register_actuator
+from ovs_agent.actuators.base import Actuator
+from ovs_agent.actuators.factory import register_actuator
 
 # Imports deferred so unit tests / static checks don't require the
 # lerobot package to be installed.

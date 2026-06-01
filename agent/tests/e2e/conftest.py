@@ -106,7 +106,7 @@ def free_port() -> int:
 
 @pytest.fixture
 def test_config(free_port: int):
-    from openvoicestream_agent.config import Config, _default_slv_config
+    from ovs_agent.config import Config, _default_slv_config
 
     slv_cfg = _default_slv_config()
     # Disable server VAD; let client VAD drive endpoints. asr_language=auto
@@ -137,7 +137,7 @@ async def run_agent(config, audio: ScriptedAudioIO):
 
     Yields (app, probe). Tears everything down on exit.
     """
-    from openvoicestream_agent.apps.multi_mode.app import MultiModeApp
+    from ovs_agent.apps.multi_mode.app import MultiModeApp
 
     app = MultiModeApp(config)
     app.audio = audio

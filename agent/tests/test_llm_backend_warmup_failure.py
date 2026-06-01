@@ -20,8 +20,8 @@ import logging
 
 import pytest
 
-from openvoicestream_agent.llm import EdgeLLMBackend
-from openvoicestream_agent.session import Session
+from ovs_agent.llm import EdgeLLMBackend
+from ovs_agent.session import Session
 
 
 class _ExplodingClient:
@@ -35,10 +35,10 @@ class _ExplodingClient:
 async def test_warmup_transport_failure_is_fail_open(monkeypatch, caplog):
     """Layer 1: EdgeLLMBackend.warmup must NOT raise on transport failure."""
     monkeypatch.setattr(
-        "openvoicestream_agent.llm.edge_llm.httpx.AsyncClient",
+        "ovs_agent.llm.edge_llm.httpx.AsyncClient",
         _ExplodingClient,
     )
-    caplog.set_level(logging.WARNING, logger="openvoicestream_agent.llm.edge_llm")
+    caplog.set_level(logging.WARNING, logger="ovs_agent.llm.edge_llm")
 
     backend = EdgeLLMBackend(
         base_url="http://edge-llm:8000/v1",
@@ -60,7 +60,7 @@ async def test_warmup_transport_failure_is_fail_open(monkeypatch, caplog):
     # Operator-visible warning logged.
     warnings = [
         r for r in caplog.records
-        if r.name == "openvoicestream_agent.llm.edge_llm"
+        if r.name == "ovs_agent.llm.edge_llm"
         and r.levelno == logging.WARNING
     ]
     assert warnings, "expected WARNING on cache warmup transport failure"
@@ -84,8 +84,8 @@ async def test_app_layer_try_except_swallows_unexpected_raise(caplog):
     session = Session()
     assert session.cache_warmed is False  # baseline
 
-    logger = logging.getLogger("openvoicestream_agent.app_base")
-    caplog.set_level(logging.WARNING, logger="openvoicestream_agent.app_base")
+    logger = logging.getLogger("ovs_agent.app_base")
+    caplog.set_level(logging.WARNING, logger="ovs_agent.app_base")
 
     startup_continued = False
     try:
@@ -114,7 +114,7 @@ async def test_app_layer_try_except_swallows_unexpected_raise(caplog):
     )
     warns = [
         r for r in caplog.records
-        if r.name == "openvoicestream_agent.app_base"
+        if r.name == "ovs_agent.app_base"
         and r.levelno == logging.WARNING
         and "LLM warmup failed" in r.getMessage()
     ]

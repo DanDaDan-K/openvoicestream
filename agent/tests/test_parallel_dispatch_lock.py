@@ -22,7 +22,7 @@ import logging
 
 import pytest
 
-from openvoicestream_agent.tools.registry import ToolRegistry
+from ovs_agent.tools.registry import ToolRegistry
 
 
 @pytest.mark.asyncio

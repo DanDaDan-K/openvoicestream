@@ -7,8 +7,8 @@ from typing import Any
 import httpx
 import pytest
 
-from openvoicestream_agent.llm import LLMEvent
-from openvoicestream_agent.llm.openai_compat import (
+from ovs_agent.llm import LLMEvent
+from ovs_agent.llm.openai_compat import (
     LLMStreamError,
     OpenAICompatBackend,
 )
@@ -229,8 +229,8 @@ async def test_tools_none_kwarg_not_forwarded():
 @pytest.mark.asyncio
 async def test_edge_llm_back_compat_stream_supports_session_kwarg():
     """The session= kwarg in EdgeLLMBackend.stream must keep working."""
-    from openvoicestream_agent.llm import EdgeLLMBackend
-    from openvoicestream_agent.session import Session
+    from ovs_agent.llm import EdgeLLMBackend
+    from ovs_agent.session import Session
 
     b = EdgeLLMBackend(
         base_url="http://example.invalid/v1",

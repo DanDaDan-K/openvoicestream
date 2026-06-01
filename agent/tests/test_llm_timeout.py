@@ -8,11 +8,11 @@ from typing import Any
 
 import pytest
 
-from openvoicestream_agent import Config, Session
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.app_mode import LLMTimeoutError, ModeContext
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.state import ConvState
+from ovs_agent import Config, Session
+from ovs_agent.app_base import BaseApp
+from ovs_agent.app_mode import LLMTimeoutError, ModeContext
+from ovs_agent.event_bus import EventBus
+from ovs_agent.state import ConvState
 
 
 # ── shared fakes -----------------------------------------------------
@@ -210,7 +210,7 @@ async def test_generic_exception_also_resets_idle_and_resets_sleep():
 async def test_debug_dashboard_on_error_prefers_str():
     """Dashboard.on_error should display str(exc) (clean Chinese msg) not
     repr(exc) when str is non-empty."""
-    from openvoicestream_agent.plugins.debug_dashboard import DebugDashboardPlugin
+    from ovs_agent.plugins.debug_dashboard import DebugDashboardPlugin
 
     p = DebugDashboardPlugin.__new__(DebugDashboardPlugin)
     p._errors = []

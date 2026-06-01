@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import pytest
 
-from openvoicestream_agent.llm import (
+from ovs_agent.llm import (
     EdgeLLMBackend,
     LLMBackend,
     OpenAICompatBackend,
@@ -126,7 +126,7 @@ class _FakeAsyncClient:
 async def test_edge_llm_warmup_posts_cache_then_completion(monkeypatch):
     _FakeAsyncClient.calls = []
     monkeypatch.setattr(
-        "openvoicestream_agent.llm.edge_llm.httpx.AsyncClient",
+        "ovs_agent.llm.edge_llm.httpx.AsyncClient",
         _FakeAsyncClient,
     )
 
@@ -187,7 +187,7 @@ async def test_edge_llm_warmup_empty_prompt_short_circuits(monkeypatch):
             return False
 
     monkeypatch.setattr(
-        "openvoicestream_agent.llm.edge_llm.httpx.AsyncClient", _NoClient
+        "ovs_agent.llm.edge_llm.httpx.AsyncClient", _NoClient
     )
 
     b = EdgeLLMBackend(
@@ -224,7 +224,7 @@ async def test_edge_llm_warmup_fail_open_on_cache_error(monkeypatch):
             raise AssertionError("graph warmup must not run if cache failed")
 
     monkeypatch.setattr(
-        "openvoicestream_agent.llm.edge_llm.httpx.AsyncClient", _BoomClient
+        "ovs_agent.llm.edge_llm.httpx.AsyncClient", _BoomClient
     )
 
     b = EdgeLLMBackend(

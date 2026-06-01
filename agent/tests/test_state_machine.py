@@ -6,15 +6,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.state import ConvState
-from openvoicestream_agent.event_bus import EventBus
-from openvoicestream_agent.slv_client import TTSAudio
+from ovs_agent.app_base import BaseApp
+from ovs_agent.state import ConvState
+from ovs_agent.event_bus import EventBus
+from ovs_agent.slv_client import TTSAudio
 
 
 def _fresh_app() -> BaseApp:
     """Build a BaseApp without touching audio/llm/slv (via __new__)."""
-    from openvoicestream_agent.config import Config
+    from ovs_agent.config import Config
 
     app = BaseApp.__new__(BaseApp)
     app.config = Config()
@@ -103,7 +103,7 @@ async def test_barge_in_cancels_llm_turn():
     stop playback, abort SLV TTS without reconnecting, and re-arm
     _first_tts_seen.
     """
-    from openvoicestream_agent.slv_client import ASRPartial
+    from ovs_agent.slv_client import ASRPartial
 
     app = _fresh_app()
     # Minimal stubs for the barge-in branch.
@@ -192,7 +192,7 @@ async def test_slv_error_in_sleeping_stays_sleeping():
     """Regression: a transport error while SLEEPING must NOT
     force the FSM back to IDLE — that would hot-mic the agent in
     wake_word / push_to_talk mode."""
-    from openvoicestream_agent.slv_client import SLVError
+    from ovs_agent.slv_client import SLVError
 
     app = _fresh_app()
     app._llm_turn_task = None
@@ -205,7 +205,7 @@ async def test_slv_error_in_sleeping_stays_sleeping():
 @pytest.mark.asyncio
 async def test_slv_error_in_thinking_drops_to_idle():
     """Non-sleeping SLVError still resets FSM to IDLE (status quo)."""
-    from openvoicestream_agent.slv_client import SLVError
+    from ovs_agent.slv_client import SLVError
 
     app = _fresh_app()
     app._llm_turn_task = None
@@ -220,7 +220,7 @@ async def test_sleeping_drops_asr_partial_and_endpoint():
     """Regression: late-arriving ASR events after /sleep must
     not be processed — would otherwise leak through to on_user_utterance
     and silently wake the agent."""
-    from openvoicestream_agent.slv_client import ASRPartial, ASREndpoint, ASRFinal
+    from ovs_agent.slv_client import ASRPartial, ASREndpoint, ASRFinal
 
     app = _fresh_app()
     app._state = ConvState.SLEEPING

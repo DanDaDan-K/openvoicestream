@@ -20,7 +20,7 @@ import types
 
 import pytest
 
-from openvoicestream_agent.app_base import BaseApp
+from ovs_agent.app_base import BaseApp
 
 
 def _make_app_with_config(max_input: int | None) -> BaseApp:
@@ -36,14 +36,14 @@ def test_validate_session_budget_logs_error_on_tight_prefix(caplog):
     # fixed_tokens >= max_input → headroom <= 0 → triggers ERROR.
     huge_prompt = "x" * 6000
 
-    caplog.set_level(logging.ERROR, logger="openvoicestream_agent.app_base")
+    caplog.set_level(logging.ERROR, logger="ovs_agent.app_base")
 
     # Contract: must NOT raise. Validator is warn-and-continue.
     app._validate_session_budget(huge_prompt, tools=None)
 
     errors = [
         r for r in caplog.records
-        if r.name == "openvoicestream_agent.app_base"
+        if r.name == "ovs_agent.app_base"
         and r.levelno == logging.ERROR
     ]
     assert errors, "expected ERROR log for tight prefix budget"
@@ -67,14 +67,14 @@ def test_validate_session_budget_skips_when_trim_disabled(caplog):
     """session_max_input_tokens=None → trim is disabled → no validation
     (just an INFO log noting that), regardless of how big the prompt is."""
     app = _make_app_with_config(max_input=None)
-    caplog.set_level(logging.INFO, logger="openvoicestream_agent.app_base")
+    caplog.set_level(logging.INFO, logger="ovs_agent.app_base")
 
     app._validate_session_budget("anything", tools=None)
 
     # Must not have an ERROR or WARNING — only INFO about trim disabled.
     errs = [
         r for r in caplog.records
-        if r.name == "openvoicestream_agent.app_base"
+        if r.name == "ovs_agent.app_base"
         and r.levelno >= logging.WARNING
     ]
     assert errs == []

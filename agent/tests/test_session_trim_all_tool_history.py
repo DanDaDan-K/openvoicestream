@@ -22,7 +22,7 @@ import logging
 
 import pytest
 
-from openvoicestream_agent.session import Session
+from ovs_agent.session import Session
 
 
 def _approx_token_counter(text: str) -> int:
@@ -48,7 +48,7 @@ def test_all_tool_history_oversize_drops_oldest_with_error_log(caplog):
         {"role": "tool", "tool_call_id": "4", "content": "a" * 600},
         {"role": "tool", "tool_call_id": "5", "content": "b" * 600},
     ]
-    caplog.set_level(logging.ERROR, logger="openvoicestream_agent.session")
+    caplog.set_level(logging.ERROR, logger="ovs_agent.session")
 
     trimmed = sess._trim_to_budget(sess.history, sess.max_input_tokens)
 
@@ -61,7 +61,7 @@ def test_all_tool_history_oversize_drops_oldest_with_error_log(caplog):
     # The corner-case ERROR was logged so ops sees the invariant violation.
     errs = [
         r for r in caplog.records
-        if r.name == "openvoicestream_agent.session"
+        if r.name == "ovs_agent.session"
         and r.levelno == logging.ERROR
         and "no user-anchored turns" in r.getMessage()
     ]

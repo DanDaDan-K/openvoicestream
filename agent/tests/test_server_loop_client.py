@@ -16,13 +16,13 @@ from typing import Any
 
 import pytest
 
-from openvoicestream_agent import Config, Session
-from openvoicestream_agent.app_base import BaseApp
-from openvoicestream_agent.app_mode import ModeContext, ModeManager
-from openvoicestream_agent.modes import ChatMode
-from openvoicestream_agent.llm.base import LLMBackend
-from openvoicestream_agent.slv_client import ServerToolCall
-from openvoicestream_agent.tools import ToolRegistry
+from ovs_agent import Config, Session
+from ovs_agent.app_base import BaseApp
+from ovs_agent.app_mode import ModeContext, ModeManager
+from ovs_agent.modes import ChatMode
+from ovs_agent.llm.base import LLMBackend
+from ovs_agent.slv_client import ServerToolCall
+from ovs_agent.tools import ToolRegistry
 
 
 # ── fakes ────────────────────────────────────────────────────────────

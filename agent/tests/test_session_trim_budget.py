@@ -8,7 +8,7 @@ These tests pin the contract:
 """
 from __future__ import annotations
 
-from openvoicestream_agent.session import Session
+from ovs_agent.session import Session
 
 
 def _fake_counter(text: str) -> int:
@@ -120,7 +120,7 @@ def test_trim_all_tool_messages_under_budget_is_noop() -> None:
 
 def test_trim_all_tool_messages_emits_event() -> None:
     """Fallback emits on_session_trimmed with fallback marker."""
-    from openvoicestream_agent.event_bus import EventBus
+    from ovs_agent.event_bus import EventBus
 
     bus = EventBus()
     received: list[dict] = []
