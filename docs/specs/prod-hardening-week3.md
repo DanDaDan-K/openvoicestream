@@ -1,3 +1,10 @@
+> Path note (post-restructure): the product service moved `app/`→`server/`
+> (`app/main.py`→`server/main.py`, `app/core/`→`server/core/`). Backend
+> implementations cited below as `app/backends/...` (jetson/rk/cpu) now live in the
+> `voxedge` package (`voxedge.backends.*`); those `app/backends/...` paths
+> are kept verbatim only to preserve the original line-anchored references — map
+> them to the corresponding `voxedge` module when implementing.
+
 # Week 3 Production Hardening Spec
 Status: design only.
 Date: 2026-05-24.
@@ -40,9 +47,9 @@ Files read for this spec:
 - `bench/perf/.DS_Store` is present and binary; it is not a usable source file.
 - `bench/perf/smoke_moss_tts_backend.py` exists and was read.
 - `app/backends/jetson/moss_tts_nano.py` was read in full.
-- `app/core/backend_manager.py` was read for lifecycle and request gating.
-- `app/core/tts_backend.py` was read for backend registration and capability contracts.
-- `app/main.py` was also inspected because `max_workers` env handling is there, not in `backend_manager.py`.
+- `server/core/backend_manager.py` was read for lifecycle and request gating.
+- `server/core/tts_backend.py` was read for backend registration and capability contracts.
+- `server/main.py` was also inspected because `max_workers` env handling is there, not in `backend_manager.py`.
 - `app/backends/jetson/kokoro_trt.py` was inspected for N=2 shared-state surfaces.
 - `app/backends/jetson/matcha_trt.py` was inspected for N=2 shared-state surfaces.
 - `bench/perf/corpus/manifest.json` and `bench/perf/corpus/tts_prompts.json` were inspected for corpus design.
@@ -103,30 +110,30 @@ Fallback strategy:
 - For Matcha, set `OVS_TTS_STREAM_MAX_WORKERS_MATCHA=1`.
 - If backend-specific env names are not yet wired, use global `OVS_TTS_STREAM_MAX_WORKERS=1`.
 - The spec intentionally names backend-specific env vars so production can force one backend to single-slot without muting qwen3's N=2 path.
-The implementation task must decide whether the backend-specific env vars are added in `app/main.py` or in profile application.
+The implementation task must decide whether the backend-specific env vars are added in `server/main.py` or in profile application.
 The design preference is to resolve backend-specific override in one place near executor creation.
 That keeps fallback behavior visible beside existing `OVS_TTS_STREAM_MAX_WORKERS` handling.
 ### Affected Files
-Existing file: `app/main.py`.
+Existing file: `server/main.py`.
 - `_get_tts_stream_executor()` is where stream executor workers are configured, not `BackendManager`.
-- Existing N=2 comments and fallback guidance live at `app/main.py:296` through `app/main.py:335`.
-- The current env read is `int(os.environ.get("OVS_TTS_STREAM_MAX_WORKERS", "2"))` at `app/main.py:331` through `app/main.py:333`.
-- Prefetch defaults mirror `executor._max_workers` at `app/main.py:1166` through `app/main.py:1190`.
-- The N=2 investigation comment mentions CUDA illegal memory access at `app/main.py:299` through `app/main.py:305`.
-- The qwen3 context comment says default `max_workers=2` and fallback `OVS_TTS_STREAM_MAX_WORKERS=1` at `app/main.py:318` through `app/main.py:330`.
-Existing file: `app/core/backend_manager.py`.
-- `BackendManager` lifecycle owner starts at `app/core/backend_manager.py:102`.
-- The manager builds and preloads the backend at `app/core/backend_manager.py:151` through `app/core/backend_manager.py:176`.
-- Request gating uses `acquire()` at `app/core/backend_manager.py:236` through `app/core/backend_manager.py:240`.
-- Status includes `inflight_http` and `inflight_ws` at `app/core/backend_manager.py:225` through `app/core/backend_manager.py:232`.
+- Existing N=2 comments and fallback guidance live at `server/main.py:296` through `server/main.py:335`.
+- The current env read is `int(os.environ.get("OVS_TTS_STREAM_MAX_WORKERS", "2"))` at `server/main.py:331` through `server/main.py:333`.
+- Prefetch defaults mirror `executor._max_workers` at `server/main.py:1166` through `server/main.py:1190`.
+- The N=2 investigation comment mentions CUDA illegal memory access at `server/main.py:299` through `server/main.py:305`.
+- The qwen3 context comment says default `max_workers=2` and fallback `OVS_TTS_STREAM_MAX_WORKERS=1` at `server/main.py:318` through `server/main.py:330`.
+Existing file: `server/core/backend_manager.py`.
+- `BackendManager` lifecycle owner starts at `server/core/backend_manager.py:102`.
+- The manager builds and preloads the backend at `server/core/backend_manager.py:151` through `server/core/backend_manager.py:176`.
+- Request gating uses `acquire()` at `server/core/backend_manager.py:236` through `server/core/backend_manager.py:240`.
+- Status includes `inflight_http` and `inflight_ws` at `server/core/backend_manager.py:225` through `server/core/backend_manager.py:232`.
 - No `max_workers` env var handling was found in this file.
-Existing file: `app/core/tts_backend.py`.
-- TTS capability enum is defined at `app/core/tts_backend.py:19` through `app/core/tts_backend.py:27`.
-- The base backend contract defines `synthesize()` at `app/core/tts_backend.py:85` through `app/core/tts_backend.py:96`.
-- Streaming default contract is at `app/core/tts_backend.py:116` through `app/core/tts_backend.py:120`.
-- Backend registry includes `jetson.matcha_trt` at `app/core/tts_backend.py:132`.
-- Backend registry includes `jetson.kokoro_trt` at `app/core/tts_backend.py:133`.
-- Factory lookup and lazy import happen at `app/core/tts_backend.py:146` through `app/core/tts_backend.py:161`.
+Existing file: `server/core/tts_backend.py`.
+- TTS capability enum is defined at `server/core/tts_backend.py:19` through `server/core/tts_backend.py:27`.
+- The base backend contract defines `synthesize()` at `server/core/tts_backend.py:85` through `server/core/tts_backend.py:96`.
+- Streaming default contract is at `server/core/tts_backend.py:116` through `server/core/tts_backend.py:120`.
+- Backend registry includes `jetson.matcha_trt` at `server/core/tts_backend.py:132`.
+- Backend registry includes `jetson.kokoro_trt` at `server/core/tts_backend.py:133`.
+- Factory lookup and lazy import happen at `server/core/tts_backend.py:146` through `server/core/tts_backend.py:161`.
 Existing file: `bench/perf/client.py`.
 - It is the shared perf instrumentation source of truth at `bench/perf/client.py:1` through `bench/perf/client.py:4`.
 - It imports `requests` and `websocket-client` at `bench/perf/client.py:11` through `bench/perf/client.py:13`.

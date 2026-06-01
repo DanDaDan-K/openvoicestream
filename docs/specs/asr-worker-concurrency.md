@@ -1,3 +1,10 @@
+> Path note (post-restructure): the product service moved `app/`→`server/`
+> (`app/main.py`→`server/main.py`, `app/core/`→`server/core/`). Backend
+> implementations cited below as `app/backends/...` (jetson/rk/cpu) now live in the
+> `voxedge` package (`voxedge.backends.*`); those `app/backends/...` paths
+> are kept verbatim only to preserve the original line-anchored references — map
+> them to the corresponding `voxedge` module when implementing.
+
 # Spec: Qwen3 ASR Worker — Configurable Concurrency
 
 **Status**: Approved (2026-05-21, after two codex review rounds) — open for assignment
@@ -532,7 +539,7 @@ with the current ~5.5 GB headroom; spec author must verify with
 ### 8.1 Hot-reload contract (binding — referenced from acceptance criterion 5)
 
 `BackendManager.reload()` today drains by waiting for `inflight_http == 0`
-and closing WS handles (`app/core/backend_manager.py`). With N>1
+and closing WS handles (`server/core/backend_manager.py`). With N>1
 concurrent ASR sessions, the contract is an explicit state machine on the
 Python `_ASRWorkerIO`:
 
@@ -584,7 +591,7 @@ class DrainState(Enum):
    Any in-flight `recv_event` raises `WorkerExitError`. Semaphore permits
    leak — but the entire `_ASRWorkerIO` is discarded and replaced.
 
-5. **WS layer mapping** (`app/main.py` v2v handler):
+5. **WS layer mapping** (`server/main.py` v2v handler):
    - `BackendDrainingError` → emit `{"type":"error","error":"backend_draining"}`, close WS with code 1013
    - `reload_abort` event arriving on the recv queue → emit `{"type":"error","error":"reload_abort"}`, close WS with code 1013
    - `WorkerExitError` → emit `{"type":"error","error":"backend_swapped"}`, close WS with code 1013

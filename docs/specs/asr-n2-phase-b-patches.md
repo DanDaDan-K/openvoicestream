@@ -90,7 +90,7 @@ Tight on Orin NX 16GB. Must validate with `tegrastats` before enabling.
 | `:458-483` | Replace `_worker_request()` with `_ASRWorkerIO` (session-lifetime queue demux, modeled on `trt_edge_llm_tts.py:486-617`) |
 | `:1077-1225` | Streaming class holds session queue from `begin` through `final/end` |
 
-### Server side (`app/main.py`)
+### Server side (`server/main.py`)
 
 | Change |
 |---|

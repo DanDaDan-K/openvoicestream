@@ -1,3 +1,10 @@
+> Path note (post-restructure): the product service moved `app/`→`server/`
+> (`app/main.py`→`server/main.py`, `app/core/`→`server/core/`). Backend
+> implementations cited below as `app/backends/...` (jetson/rk/cpu) now live in the
+> `voxedge` package (`voxedge.backends.*`); those `app/backends/...` paths
+> are kept verbatim only to preserve the original line-anchored references — map
+> them to the corresponding `voxedge` module when implementing.
+
 # Spec: Unlock Real N=2 TTS Throughput on Jetson Orin NX
 
 ## §1 Goal & non-goals
@@ -6,9 +13,9 @@ Goal: safely lift `/tts/stream` from effective N=1 to N=2 on Orin NX, while pres
 
 ## §2 Architecture review
 
-Live request path: FastAPI imports `Request` already (`app/main.py:10`) and `/tts/stream` accepts it (`app/main.py:750-751`). The endpoint splits text into sentences (`app/main.py:776-779`), acquires BackendManager for the manager path (`app/main.py:780-785`), yields the 4-byte sample-rate header (`app/main.py:794-798`), then submits sync `backend.generate_streaming()` work into `_get_tts_stream_executor()` (`app/main.py:804-817`). Legacy path repeats the same executor/queue pattern (`app/main.py:845-871`).
+Live request path: FastAPI imports `Request` already (`server/main.py:10`) and `/tts/stream` accepts it (`server/main.py:750-751`). The endpoint splits text into sentences (`server/main.py:776-779`), acquires BackendManager for the manager path (`server/main.py:780-785`), yields the 4-byte sample-rate header (`server/main.py:794-798`), then submits sync `backend.generate_streaming()` work into `_get_tts_stream_executor()` (`server/main.py:804-817`). Legacy path repeats the same executor/queue pattern (`server/main.py:845-871`).
 
-Current HTTP concurrency is pinned: `_get_tts_stream_executor()` constructs `ThreadPoolExecutor(max_workers=1)` and documents the N>1 CUDA crash (`app/main.py:251-275`). The NX profile already sets `OVS_TTS_WORKER_CONCURRENCY=2`, so the env is dormant behind the Python cap (`configs/profiles/jetson-multilang-highperf-nx.json:20-22`).
+Current HTTP concurrency is pinned: `_get_tts_stream_executor()` constructs `ThreadPoolExecutor(max_workers=1)` and documents the N>1 CUDA crash (`server/main.py:251-275`). The NX profile already sets `OVS_TTS_WORKER_CONCURRENCY=2`, so the env is dormant behind the Python cap (`configs/profiles/jetson-multilang-highperf-nx.json:20-22`).
 
 Python worker IPC is mostly N-ready: `_WorkerIO` has a stdin lock, per-request queues, reader thread, and semaphore (`app/backends/jetson/trt_edge_llm_tts.py:486-517`). It inserts the queue before writing stdin (`trt_edge_llm_tts.py:526-540`), demuxes by `request_id`/`id` (`trt_edge_llm_tts.py:584-600`), treats `done` and `cancelled` as terminal (`trt_edge_llm_tts.py:549-553`), and can write cancel messages (`trt_edge_llm_tts.py:559-575`). `_generate_streaming_single()` builds streaming request JSON (`trt_edge_llm_tts.py:1081-1173`), obtains `_WorkerIO` under lifecycle lock only (`trt_edge_llm_tts.py:1189-1193`), yields chunks (`trt_edge_llm_tts.py:1218-1232`), and sends cancel on `GeneratorExit` (`trt_edge_llm_tts.py:1255-1269`).
 
@@ -18,9 +25,9 @@ Engine slot pools exist: `TalkerSlot` and `CodePredictorSlot` own per-request te
 
 ## §3 Part D disconnect watcher — implementation plan
 
-Current gap: Starlette cancellation does not reliably close the inner sync generator, and the manager branch has no `request.is_disconnected()` polling around `stream()` (`app/main.py:794-826`); legacy branch has the same absence (`app/main.py:845-873`). Implement the watcher inside each `StreamingResponse` async generator lifetime, scoped only to `/tts/stream`.
+Current gap: Starlette cancellation does not reliably close the inner sync generator, and the manager branch has no `request.is_disconnected()` polling around `stream()` (`server/main.py:794-826`); legacy branch has the same absence (`server/main.py:845-873`). Implement the watcher inside each `StreamingResponse` async generator lifetime, scoped only to `/tts/stream`.
 
-Plan: keep `Request` parameter as-is (`app/main.py:750-751`). For each sentence, create the sync generator object explicitly, run a drain function in `_get_tts_stream_executor()`, and have a `threading.Event`/cancel flag checked between chunks. Add an asyncio task polling `await request.is_disconnected()` every 100 ms. On disconnect, set the flag, call `gen.close()` from the drain thread cleanup path, and let `_generate_streaming_single()` translate `GeneratorExit` into `worker_io.cancel(req_id)` (`trt_edge_llm_tts.py:1255-1269`). Do this in both manager and legacy branches. Add a temporary counter around `_WorkerIO.cancel()` (`trt_edge_llm_tts.py:559-575`); stress should show cancel calls >= early-break requests and zero CUDA poison.
+Plan: keep `Request` parameter as-is (`server/main.py:750-751`). For each sentence, create the sync generator object explicitly, run a drain function in `_get_tts_stream_executor()`, and have a `threading.Event`/cancel flag checked between chunks. Add an asyncio task polling `await request.is_disconnected()` every 100 ms. On disconnect, set the flag, call `gen.close()` from the drain thread cleanup path, and let `_generate_streaming_single()` translate `GeneratorExit` into `worker_io.cancel(req_id)` (`trt_edge_llm_tts.py:1255-1269`). Do this in both manager and legacy branches. Add a temporary counter around `_WorkerIO.cancel()` (`trt_edge_llm_tts.py:559-575`); stress should show cancel calls >= early-break requests and zero CUDA poison.
 
 ## §4 StatefulCode2WavRunner audit + fix plan
 

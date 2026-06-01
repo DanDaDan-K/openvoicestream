@@ -1,3 +1,10 @@
+> Path note (post-restructure): the product service moved `app/`→`server/`
+> (`app/main.py`→`server/main.py`, `app/core/`→`server/core/`). Backend
+> implementations cited below as `app/backends/...` (jetson/rk/cpu) now live in the
+> `voxedge` package (`voxedge.backends.*`); those `app/backends/...` paths
+> are kept verbatim only to preserve the original line-anchored references — map
+> them to the corresponding `voxedge` module when implementing.
+
 # TTS Cohort Batch D-2 Implementation Spec
 
 ### 1. qwen3OmniTTSRuntime batch readiness audit
@@ -18,9 +25,9 @@ Place the micro-batcher in OVS Python for D-2. OVS already owns request construc
 
 Use `EDGE_LLM_TTS_COHORT_WINDOW_MS=8` default, configurable 0-20 ms. Flush on full N, timeout, same-params cohort complete, or low-latency streaming wait beyond the window. Cohort key must include talker/predictor sampling params, repetition penalty, EOS offset, seed, language, speaker, stream/chunk settings. Heterogeneous requests go to separate cohorts or batch=1 fallback because runtime sampling uses `requests[0]`.
 
-Run one cohort at a time against one runtime. `WorkerIO` admits N logical requests via semaphore at `app/core/worker_io.py:78-83`, but shared runtime workspaces require serial cohort execution. Batch=1 fallback uses existing `_worker_io.request(request)` call sites at `app/backends/jetson/trt_edge_llm_tts.py:896-897` and `app/backends/jetson/trt_edge_llm_tts.py:1095`.
+Run one cohort at a time against one runtime. `WorkerIO` admits N logical requests via semaphore at `server/core/worker_io.py:78-83`, but shared runtime workspaces require serial cohort execution. Batch=1 fallback uses existing `_worker_io.request(request)` call sites at `app/backends/jetson/trt_edge_llm_tts.py:896-897` and `app/backends/jetson/trt_edge_llm_tts.py:1095`.
 
-Cancel: OVS calls `worker_io.cancel(req_id)` on `GeneratorExit` at `app/backends/jetson/trt_edge_llm_tts.py:1156-1167`; `WorkerIO.cancel` writes `{"type":"cancel","id":...}` at `app/core/worker_io.py:284-314`. Worker cohort support must map cancel ids to lane flags and wire `TalkerGenerationRequest::shouldCancel` from `cpp/runtime/qwen3OmniTTSRuntime.h:162-163`; runtime finishes that lane at `cpp/runtime/qwen3OmniTTSRuntime.cpp:1949-1958`.
+Cancel: OVS calls `worker_io.cancel(req_id)` on `GeneratorExit` at `app/backends/jetson/trt_edge_llm_tts.py:1156-1167`; `WorkerIO.cancel` writes `{"type":"cancel","id":...}` at `server/core/worker_io.py:284-314`. Worker cohort support must map cancel ids to lane flags and wire `TalkerGenerationRequest::shouldCancel` from `cpp/runtime/qwen3OmniTTSRuntime.h:162-163`; runtime finishes that lane at `cpp/runtime/qwen3OmniTTSRuntime.cpp:1949-1958`.
 
 ### 3. Worker-side changes (if any)
 

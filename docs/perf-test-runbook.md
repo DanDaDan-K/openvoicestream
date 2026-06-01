@@ -1,3 +1,10 @@
+> Path note (post-restructure): the product service moved `app/`→`server/`
+> (`app/main.py`→`server/main.py`, `app/core/`→`server/core/`). Backend
+> implementations cited below as `app/backends/...` (jetson/rk/cpu) now live in the
+> `voxedge` package (`voxedge.backends.*`); those `app/backends/...` paths
+> are kept verbatim only to preserve the original line-anchored references — map
+> them to the corresponding `voxedge` module when implementing.
+
 # OpenVoiceStream — Per-Device Perf Test Runbook
 
 A single source of truth for **how to launch the service on each device**

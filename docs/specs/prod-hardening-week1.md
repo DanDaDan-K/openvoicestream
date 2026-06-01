@@ -8,9 +8,9 @@ This is design only; it specifies behavior, modules, touch points, and verificat
 
 | Deliverable | Summary | Primary files |
 | --- | --- | --- |
-| Optional API-Key Auth | Default-off API-key protection for public voice endpoints. | `app/core/api_auth.py`, `app/main.py` |
-| Global Concurrent Session Limit | Non-queueing admission control with HTTP `429` and WS `4429`. | `app/core/session_limiter.py`, `app/core/metrics.py`, `app/main.py` |
-| `/livez` + `/readyz` | Production probes while preserving `/health`. | `app/main.py`, `app/core/gpu_watchdog.py`, docker-compose healthchecks |
+| Optional API-Key Auth | Default-off API-key protection for public voice endpoints. | `server/core/api_auth.py`, `server/main.py` |
+| Global Concurrent Session Limit | Non-queueing admission control with HTTP `429` and WS `4429`. | `server/core/session_limiter.py`, `server/core/metrics.py`, `server/main.py` |
+| `/livez` + `/readyz` | Production probes while preserving `/health`. | `server/main.py`, `server/core/gpu_watchdog.py`, docker-compose healthchecks |
 
 Guiding principles:
 
@@ -22,105 +22,105 @@ Guiding principles:
 
 Files read:
 
-- `app/core/admin_auth.py`
-- `app/core/profile_loader.py`
-- `app/core/backend_manager.py`
-- `app/main.py`
+- `server/core/admin_auth.py`
+- `server/core/profile_loader.py`
+- `server/core/backend_manager.py`
+- `server/main.py`
 - `deploy/docker/` listing
 
 Admin auth anchors:
 
-- `app/core/admin_auth.py:1` documents the existing admin route policy.
-- `app/core/admin_auth.py:5` allows loopback clients without a key.
-- `app/core/admin_auth.py:8` defines `OVS_ADMIN_KEY`.
-- `app/core/admin_auth.py:10` intentionally ignores `X-Forwarded-For`.
-- `app/core/admin_auth.py:36` reads the admin key from env.
-- `app/core/admin_auth.py:40` strips empty key values.
-- `app/core/admin_auth.py:44` defines `require_admin`.
-- `app/core/admin_auth.py:55` implements loopback bypass.
-- `app/core/admin_auth.py:58` reloads `OVS_ADMIN_KEY` per dependency call.
-- `app/core/admin_auth.py:70` uses `hmac.compare_digest`.
+- `server/core/admin_auth.py:1` documents the existing admin route policy.
+- `server/core/admin_auth.py:5` allows loopback clients without a key.
+- `server/core/admin_auth.py:8` defines `OVS_ADMIN_KEY`.
+- `server/core/admin_auth.py:10` intentionally ignores `X-Forwarded-For`.
+- `server/core/admin_auth.py:36` reads the admin key from env.
+- `server/core/admin_auth.py:40` strips empty key values.
+- `server/core/admin_auth.py:44` defines `require_admin`.
+- `server/core/admin_auth.py:55` implements loopback bypass.
+- `server/core/admin_auth.py:58` reloads `OVS_ADMIN_KEY` per dependency call.
+- `server/core/admin_auth.py:70` uses `hmac.compare_digest`.
 
 Profile loader anchors:
 
-- `app/core/profile_loader.py:3` says profiles set env defaults before backend imports.
-- `app/core/profile_loader.py:26` defines operator-owned env prefixes.
-- `app/core/profile_loader.py:40` treats declared-but-empty docker env values specially.
-- `app/core/profile_loader.py:70` defines `_env`.
-- `app/core/profile_loader.py:92` resolves profile references.
-- `app/core/profile_loader.py:94` checks `OVS_PROFILE_JSON`, `OVS_PROFILE`, and `OVS_PROFILE_DEFAULT`.
-- `app/core/profile_loader.py:143` exposes `current_profile()`.
-- `app/core/profile_loader.py:155` defines `apply_profile()`.
-- `app/core/profile_loader.py:192` reads the profile `env` block.
-- `app/core/profile_loader.py:219` writes profile env unless operator-owned.
-- `app/core/profile_loader.py:243` defines `apply_profile_from_env()`.
+- `server/core/profile_loader.py:3` says profiles set env defaults before backend imports.
+- `server/core/profile_loader.py:26` defines operator-owned env prefixes.
+- `server/core/profile_loader.py:40` treats declared-but-empty docker env values specially.
+- `server/core/profile_loader.py:70` defines `_env`.
+- `server/core/profile_loader.py:92` resolves profile references.
+- `server/core/profile_loader.py:94` checks `OVS_PROFILE_JSON`, `OVS_PROFILE`, and `OVS_PROFILE_DEFAULT`.
+- `server/core/profile_loader.py:143` exposes `current_profile()`.
+- `server/core/profile_loader.py:155` defines `apply_profile()`.
+- `server/core/profile_loader.py:192` reads the profile `env` block.
+- `server/core/profile_loader.py:219` writes profile env unless operator-owned.
+- `server/core/profile_loader.py:243` defines `apply_profile_from_env()`.
 
 BackendManager anchors:
 
-- `app/core/backend_manager.py:49` defines `BackendState`.
-- `app/core/backend_manager.py:51` defines `BackendState.READY`.
-- `app/core/backend_manager.py:112` stores `_state`.
-- `app/core/backend_manager.py:150` transitions to READY during `start()`.
-- `app/core/backend_manager.py:169` exposes `state`.
-- `app/core/backend_manager.py:183` exposes `is_ready()`.
-- `app/core/backend_manager.py:199` exposes `status()`.
-- `app/core/backend_manager.py:210` defines `acquire()`.
-- `app/core/backend_manager.py:213` rejects acquire when not READY.
-- `app/core/backend_manager.py:218` increments `_inflight_http`.
-- `app/core/backend_manager.py:223` decrements `_inflight_http`.
-- `app/core/backend_manager.py:229` registers WebSocket handles.
-- `app/core/backend_manager.py:232` unregisters WebSocket handles.
-- `app/core/backend_manager.py:497` initializes manager singletons.
-- `app/core/backend_manager.py:541` exposes `tts_manager()`.
-- `app/core/backend_manager.py:547` exposes `asr_manager()`.
+- `server/core/backend_manager.py:49` defines `BackendState`.
+- `server/core/backend_manager.py:51` defines `BackendState.READY`.
+- `server/core/backend_manager.py:112` stores `_state`.
+- `server/core/backend_manager.py:150` transitions to READY during `start()`.
+- `server/core/backend_manager.py:169` exposes `state`.
+- `server/core/backend_manager.py:183` exposes `is_ready()`.
+- `server/core/backend_manager.py:199` exposes `status()`.
+- `server/core/backend_manager.py:210` defines `acquire()`.
+- `server/core/backend_manager.py:213` rejects acquire when not READY.
+- `server/core/backend_manager.py:218` increments `_inflight_http`.
+- `server/core/backend_manager.py:223` decrements `_inflight_http`.
+- `server/core/backend_manager.py:229` registers WebSocket handles.
+- `server/core/backend_manager.py:232` unregisters WebSocket handles.
+- `server/core/backend_manager.py:497` initializes manager singletons.
+- `server/core/backend_manager.py:541` exposes `tts_manager()`.
+- `server/core/backend_manager.py:547` exposes `asr_manager()`.
 
 Main app anchors:
 
-- `app/main.py:35` creates the FastAPI app.
-- `app/main.py:71` declares `_tts_stream_executor`.
-- `app/main.py:251` defines `_get_tts_stream_executor()`.
-- `app/main.py:286` constructs `_tts_stream_executor`.
-- `app/main.py:287` reads `OVS_TTS_STREAM_MAX_WORKERS`, default `2`.
-- `app/main.py:318` defines startup.
-- `app/main.py:323` imports profile loader helpers.
-- `app/main.py:324` applies the active profile from env.
-- `app/main.py:476` starts BackendManager wiring.
-- `app/main.py:538` calls `init_backend_managers`.
-- `app/main.py:552` starts ASR manager.
-- `app/main.py:554` starts TTS manager when configured and ready.
-- `app/main.py:563` defines `/health`.
-- `app/main.py:599` defines `/asr/capabilities`.
-- `app/main.py:615` defines `/tts/capabilities`.
-- `app/main.py:641` defines `/tts/speakers`.
-- `app/main.py:656` defines `/tts/speakers/register`.
-- `app/main.py:701` defines `/tts/speakers/{speaker_id}` delete.
-- `app/main.py:722` defines `/tts`.
-- `app/main.py:768` defines `/tts/stream` OPTIONS.
-- `app/main.py:773` defines `/tts/stream` POST.
-- `app/main.py:803` enters manager path for `/tts/stream`.
-- `app/main.py:1011` releases `/tts/stream` manager acquire in generator finalization.
-- `app/main.py:1130` defines `/tts/clone`.
-- `app/main.py:1179` defines `/tts/clone/embedding`.
-- `app/main.py:1208` defines `/tts/clone/stream`.
-- `app/main.py:1258` acquires manager for `/tts/clone/stream`.
-- `app/main.py:1286` releases clone-stream manager acquire in generator finalization.
-- `app/main.py:1325` defines `/asr`.
-- `app/main.py:1361` defines `/asr/stream`.
-- `app/main.py:1386` accepts `/asr/stream`.
-- `app/main.py:1394` registers `/asr/stream` with BackendManager.
-- `app/main.py:1430` unregisters `/asr/stream`.
-- `app/main.py:1584` defines `/v2v/stream`.
-- `app/main.py:1621` accepts `/v2v/stream`.
-- `app/main.py:1630` registers V2V with ASR manager.
-- `app/main.py:1632` registers V2V with TTS manager.
-- `app/main.py:2152` runs V2V TTS synthesis on `_tts_stream_executor`.
-- `app/main.py:2250` unregisters V2V from ASR manager.
-- `app/main.py:2252` unregisters V2V from TTS manager.
-- `app/main.py:2299` defines admin TTS runtime GET.
-- `app/main.py:2316` defines admin TTS runtime PATCH.
-- `app/main.py:2349` defines admin speakers reload.
-- `app/main.py:2373` defines admin backend reload.
-- `app/main.py:2391` defines admin backend status.
+- `server/main.py:35` creates the FastAPI app.
+- `server/main.py:71` declares `_tts_stream_executor`.
+- `server/main.py:251` defines `_get_tts_stream_executor()`.
+- `server/main.py:286` constructs `_tts_stream_executor`.
+- `server/main.py:287` reads `OVS_TTS_STREAM_MAX_WORKERS`, default `2`.
+- `server/main.py:318` defines startup.
+- `server/main.py:323` imports profile loader helpers.
+- `server/main.py:324` applies the active profile from env.
+- `server/main.py:476` starts BackendManager wiring.
+- `server/main.py:538` calls `init_backend_managers`.
+- `server/main.py:552` starts ASR manager.
+- `server/main.py:554` starts TTS manager when configured and ready.
+- `server/main.py:563` defines `/health`.
+- `server/main.py:599` defines `/asr/capabilities`.
+- `server/main.py:615` defines `/tts/capabilities`.
+- `server/main.py:641` defines `/tts/speakers`.
+- `server/main.py:656` defines `/tts/speakers/register`.
+- `server/main.py:701` defines `/tts/speakers/{speaker_id}` delete.
+- `server/main.py:722` defines `/tts`.
+- `server/main.py:768` defines `/tts/stream` OPTIONS.
+- `server/main.py:773` defines `/tts/stream` POST.
+- `server/main.py:803` enters manager path for `/tts/stream`.
+- `server/main.py:1011` releases `/tts/stream` manager acquire in generator finalization.
+- `server/main.py:1130` defines `/tts/clone`.
+- `server/main.py:1179` defines `/tts/clone/embedding`.
+- `server/main.py:1208` defines `/tts/clone/stream`.
+- `server/main.py:1258` acquires manager for `/tts/clone/stream`.
+- `server/main.py:1286` releases clone-stream manager acquire in generator finalization.
+- `server/main.py:1325` defines `/asr`.
+- `server/main.py:1361` defines `/asr/stream`.
+- `server/main.py:1386` accepts `/asr/stream`.
+- `server/main.py:1394` registers `/asr/stream` with BackendManager.
+- `server/main.py:1430` unregisters `/asr/stream`.
+- `server/main.py:1584` defines `/v2v/stream`.
+- `server/main.py:1621` accepts `/v2v/stream`.
+- `server/main.py:1630` registers V2V with ASR manager.
+- `server/main.py:1632` registers V2V with TTS manager.
+- `server/main.py:2152` runs V2V TTS synthesis on `_tts_stream_executor`.
+- `server/main.py:2250` unregisters V2V from ASR manager.
+- `server/main.py:2252` unregisters V2V from TTS manager.
+- `server/main.py:2299` defines admin TTS runtime GET.
+- `server/main.py:2316` defines admin TTS runtime PATCH.
+- `server/main.py:2349` defines admin speakers reload.
+- `server/main.py:2373` defines admin backend reload.
+- `server/main.py:2391` defines admin backend status.
 
 Docker discovery:
 
@@ -144,7 +144,7 @@ Health and probe endpoints stay open.
 
 Proposed path:
 
-- `app/core/api_auth.py`
+- `server/core/api_auth.py`
 
 Responsibilities:
 
@@ -156,7 +156,7 @@ Responsibilities:
 - Build HTTP `401` responses.
 - Build WS `4401` close reasons.
 - Mask key values for logs.
-- Expose a small check API for `app/main.py`.
+- Expose a small check API for `server/main.py`.
 
 Non-responsibilities:
 
@@ -195,14 +195,14 @@ Hot update:
 
 - Read env on every request check.
 - Do not cache parsed keys across requests.
-- This mirrors `admin_auth.py`: `_admin_key()` reads env at `app/core/admin_auth.py:36` and is called at `app/core/admin_auth.py:58`.
+- This mirrors `admin_auth.py`: `_admin_key()` reads env at `server/core/admin_auth.py:36` and is called at `server/core/admin_auth.py:58`.
 - Active WS sessions continue after a key change.
 - New HTTP requests and new WS sessions use the new env value.
 
 Comparison:
 
 - Use constant-time comparison.
-- Follow the `hmac.compare_digest` pattern at `app/core/admin_auth.py:70`.
+- Follow the `hmac.compare_digest` pattern at `server/core/admin_auth.py:70`.
 
 ### Protected Endpoints
 
@@ -210,40 +210,40 @@ When auth is enabled, protect these public voice endpoints:
 
 | Endpoint | Method | Anchor | Credential |
 | --- | --- | --- | --- |
-| `/asr/capabilities` | GET | `app/main.py:599` | HTTP bearer |
-| `/tts/capabilities` | GET | `app/main.py:615` | HTTP bearer |
-| `/tts/speakers` | GET | `app/main.py:641` | HTTP bearer |
-| `/tts/speakers/register` | POST | `app/main.py:656` | HTTP bearer |
-| `/tts/speakers/{speaker_id}` | DELETE | `app/main.py:701` | HTTP bearer |
-| `/tts` | POST | `app/main.py:722` | HTTP bearer |
-| `/tts/stream` | POST | `app/main.py:773` | HTTP bearer |
-| `/tts/clone` | POST | `app/main.py:1130` | HTTP bearer |
-| `/tts/clone/embedding` | POST | `app/main.py:1179` | HTTP bearer |
-| `/tts/clone/stream` | POST | `app/main.py:1208` | HTTP bearer |
-| `/asr` | POST | `app/main.py:1325` | HTTP bearer |
-| `/asr/stream` | WS | `app/main.py:1361` | bearer or query token |
-| `/v2v/stream` | WS | `app/main.py:1584` | bearer or query token |
+| `/asr/capabilities` | GET | `server/main.py:599` | HTTP bearer |
+| `/tts/capabilities` | GET | `server/main.py:615` | HTTP bearer |
+| `/tts/speakers` | GET | `server/main.py:641` | HTTP bearer |
+| `/tts/speakers/register` | POST | `server/main.py:656` | HTTP bearer |
+| `/tts/speakers/{speaker_id}` | DELETE | `server/main.py:701` | HTTP bearer |
+| `/tts` | POST | `server/main.py:722` | HTTP bearer |
+| `/tts/stream` | POST | `server/main.py:773` | HTTP bearer |
+| `/tts/clone` | POST | `server/main.py:1130` | HTTP bearer |
+| `/tts/clone/embedding` | POST | `server/main.py:1179` | HTTP bearer |
+| `/tts/clone/stream` | POST | `server/main.py:1208` | HTTP bearer |
+| `/asr` | POST | `server/main.py:1325` | HTTP bearer |
+| `/asr/stream` | WS | `server/main.py:1361` | bearer or query token |
+| `/v2v/stream` | WS | `server/main.py:1584` | bearer or query token |
 
 The task explicitly calls out `/asr/stream` and `/tts`.
-Other endpoints in the table are public voice endpoints found in `app/main.py`.
-`/tts/stream` OPTIONS at `app/main.py:768` should remain open for preflight unless a separate CORS policy says otherwise.
+Other endpoints in the table are public voice endpoints found in `server/main.py`.
+`/tts/stream` OPTIONS at `server/main.py:768` should remain open for preflight unless a separate CORS policy says otherwise.
 
 ### Unprotected Endpoints
 
 Do not protect with `OVS_API_KEYS`:
 
-- `/health`, existing route at `app/main.py:563`.
+- `/health`, existing route at `server/main.py:563`.
 - `/livez`, new route.
 - `/readyz`, new route.
-- `/admin/tts/runtime`, GET at `app/main.py:2299`.
-- `/admin/tts/runtime`, PATCH at `app/main.py:2316`.
-- `/admin/tts/speakers/reload` at `app/main.py:2349`.
-- `/admin/backend/reload` at `app/main.py:2373`.
-- `/admin/backend/status` at `app/main.py:2391`.
+- `/admin/tts/runtime`, GET at `server/main.py:2299`.
+- `/admin/tts/runtime`, PATCH at `server/main.py:2316`.
+- `/admin/tts/speakers/reload` at `server/main.py:2349`.
+- `/admin/backend/reload` at `server/main.py:2373`.
+- `/admin/backend/status` at `server/main.py:2391`.
 
 Admin invariants:
 
-- Keep loopback bypass at `app/core/admin_auth.py:55`.
+- Keep loopback bypass at `server/core/admin_auth.py:55`.
 - Keep `OVS_ADMIN_KEY` separate from `OVS_API_KEYS`.
 - `OVS_API_KEYS` must not satisfy admin auth.
 - `OVS_ADMIN_KEY` must not satisfy public API auth.
@@ -307,8 +307,8 @@ WebSocket upgrade note:
 
 - HTTP `401` is only possible before the WebSocket upgrade completes.
 - After `accept()`, Starlette/FastAPI can only send WS frames and close frames.
-- Existing `/asr/stream` accepts at `app/main.py:1386`.
-- Existing `/v2v/stream` accepts at `app/main.py:1621`.
+- Existing `/asr/stream` accepts at `server/main.py:1386`.
+- Existing `/v2v/stream` accepts at `server/main.py:1621`.
 - Week 1 requires deterministic close: check before backend allocation, accept, close `4401`, and return.
 
 ### Data Flow
@@ -335,17 +335,17 @@ Ordering:
 
 Add:
 
-- `app/core/api_auth.py`
+- `server/core/api_auth.py`
 
 Modify:
 
-- `app/main.py`
+- `server/main.py`
 
 Primary anchors:
 
-- HTTP guards near `app/main.py:599`, `:615`, `:641`, `:656`, `:701`, `:722`, `:773`, `:1130`, `:1179`, `:1208`, `:1325`.
-- WS guard near `app/main.py:1361`, before `app/main.py:1394`.
-- WS guard near `app/main.py:1584`, before `app/main.py:1630`.
+- HTTP guards near `server/main.py:599`, `:615`, `:641`, `:656`, `:701`, `:722`, `:773`, `:1130`, `:1179`, `:1208`, `:1325`.
+- WS guard near `server/main.py:1361`, before `server/main.py:1394`.
+- WS guard near `server/main.py:1584`, before `server/main.py:1630`.
 
 ### Logging and Masking
 
@@ -413,11 +413,11 @@ It must not queue.
 
 Proposed limiter:
 
-- `app/core/session_limiter.py`
+- `server/core/session_limiter.py`
 
 Metrics stub:
 
-- `app/core/metrics.py`
+- `server/core/metrics.py`
 
 `session_limiter.py` owns limit derivation, process-wide initialization, non-blocking acquire, release, and read-only snapshots.
 `metrics.py` owns Week 1 in-process counters and gauges that can be wired to Prometheus in Week 2.
@@ -460,15 +460,15 @@ Precedence:
 
 Relevant anchors:
 
-- Startup begins at `app/main.py:318`.
-- Profile is applied at `app/main.py:324`.
-- Model download starts at `app/main.py:357`.
-- `current_profile()` is at `app/core/profile_loader.py:143`.
-- Profile `env` handling starts at `app/core/profile_loader.py:192`.
+- Startup begins at `server/main.py:318`.
+- Profile is applied at `server/main.py:324`.
+- Model download starts at `server/main.py:357`.
+- `current_profile()` is at `server/core/profile_loader.py:143`.
+- Profile `env` handling starts at `server/core/profile_loader.py:192`.
 
 Recommended placement:
 
-- Initialize limiter after profile application at `app/main.py:324`.
+- Initialize limiter after profile application at `server/main.py:324`.
 - Initialize before model downloads and backend preload.
 - Fail startup early if configuration is invalid.
 
@@ -503,14 +503,14 @@ Does not count:
 
 Session-limited anchors:
 
-- `/tts`: `app/main.py:722`.
-- `/tts/stream`: `app/main.py:773`.
-- `/tts/clone`: `app/main.py:1130`.
-- `/tts/clone/embedding`: `app/main.py:1179`.
-- `/tts/clone/stream`: `app/main.py:1208`.
-- `/asr`: `app/main.py:1325`.
-- `/asr/stream`: `app/main.py:1361`.
-- `/v2v/stream`: `app/main.py:1584`.
+- `/tts`: `server/main.py:722`.
+- `/tts/stream`: `server/main.py:773`.
+- `/tts/clone`: `server/main.py:1130`.
+- `/tts/clone/embedding`: `server/main.py:1179`.
+- `/tts/clone/stream`: `server/main.py:1208`.
+- `/asr`: `server/main.py:1325`.
+- `/asr/stream`: `server/main.py:1361`.
+- `/v2v/stream`: `server/main.py:1584`.
 
 ### Acquire Semantics
 
@@ -569,8 +569,8 @@ Slot lifetime:
 
 - Acquire at WS accept.
 - Release at WS close, including error close.
-- For `/asr/stream`, existing accept is `app/main.py:1386` and unregister is `app/main.py:1430`.
-- For `/v2v/stream`, existing accept is `app/main.py:1621` and unregisters are `app/main.py:2250` and `app/main.py:2252`.
+- For `/asr/stream`, existing accept is `server/main.py:1386` and unregister is `server/main.py:1430`.
+- For `/v2v/stream`, existing accept is `server/main.py:1621` and unregisters are `server/main.py:2250` and `server/main.py:2252`.
 
 ### Data Flow
 
@@ -598,10 +598,10 @@ Streaming HTTP:
 
 Streaming anchors:
 
-- `/tts/stream` manager acquire starts at `app/main.py:807`.
-- `/tts/stream` manager release is at `app/main.py:1011`.
-- `/tts/clone/stream` manager acquire starts at `app/main.py:1258`.
-- `/tts/clone/stream` manager release is at `app/main.py:1286`.
+- `/tts/stream` manager acquire starts at `server/main.py:807`.
+- `/tts/stream` manager release is at `server/main.py:1011`.
+- `/tts/clone/stream` manager acquire starts at `server/main.py:1258`.
+- `/tts/clone/stream` manager release is at `server/main.py:1286`.
 
 ### Relationship to `_tts_stream_executor`
 
@@ -612,24 +612,24 @@ BackendManager inflight counters are for reload drain, not admission control.
 
 Executor anchors:
 
-- `_tts_stream_executor` declared at `app/main.py:71`.
-- `_get_tts_stream_executor()` starts at `app/main.py:251`.
-- Executor constructed at `app/main.py:286`.
-- Default workers read at `app/main.py:287`.
-- `/tts/stream` uses executor at `app/main.py:915` and `app/main.py:962`.
-- `/tts/clone/stream` uses executor at `app/main.py:1279`.
-- `/v2v/stream` uses executor at `app/main.py:2152`.
+- `_tts_stream_executor` declared at `server/main.py:71`.
+- `_get_tts_stream_executor()` starts at `server/main.py:251`.
+- Executor constructed at `server/main.py:286`.
+- Default workers read at `server/main.py:287`.
+- `/tts/stream` uses executor at `server/main.py:915` and `server/main.py:962`.
+- `/tts/clone/stream` uses executor at `server/main.py:1279`.
+- `/v2v/stream` uses executor at `server/main.py:2152`.
 
 Recommendation:
 
 - `max_concurrent_sessions` SHOULD be less than or equal to `_tts_stream_executor.max_workers` for Orin targets.
 - Orin Nano: both should normally be `1`.
 - Orin NX: both can be `2`.
-- Existing comments at `app/main.py:253` through `app/main.py:285` document CUDA and sustained N=2 caveats.
+- Existing comments at `server/main.py:253` through `server/main.py:285` document CUDA and sustained N=2 caveats.
 
 ### Metrics Stub
 
-Create `app/core/metrics.py`.
+Create `server/core/metrics.py`.
 Week 1 has no Prometheus dependency.
 Use thread-safe or asyncio-safe counters.
 Expose snapshots for tests and readiness.
@@ -660,7 +660,7 @@ Implementation notes:
 ### Regression Risk
 
 - Too-high session limit can expose `_tts_stream_executor` and CUDA shared-state issues.
-- BackendManager `acquire()` still must wrap backend work so reload drain sees inflight HTTP at `app/core/backend_manager.py:218`.
+- BackendManager `acquire()` still must wrap backend work so reload drain sees inflight HTTP at `server/core/backend_manager.py:218`.
 - BackendManager registered sockets may be force-closed during reload; limiter release still must run.
 - `/readyz` will report not-ready when slots are full; this is intentional and must not be used as liveness.
 
@@ -700,8 +700,8 @@ Add explicit production probes.
 
 Existing route:
 
-- `app/main.py:563` defines `/health`.
-- `app/main.py:596` returns the current result.
+- `server/main.py:563` defines `/health`.
+- `server/main.py:596` returns the current result.
 
 Current body reports:
 
@@ -741,8 +741,8 @@ Requirements:
 
 Placement:
 
-- Add near health section beginning at `app/main.py:561`.
-- Place adjacent to existing `/health` at `app/main.py:563`.
+- Add near health section beginning at `server/main.py:561`.
+- Place adjacent to existing `/health` at `server/main.py:563`.
 
 ### `/readyz`
 
@@ -775,14 +775,14 @@ Reasons must be stable and machine-readable.
 
 State enum:
 
-- `BackendState.READY` is at `app/core/backend_manager.py:51`.
+- `BackendState.READY` is at `server/core/backend_manager.py:51`.
 
 Accessors:
 
-- `tts_manager()` at `app/core/backend_manager.py:541`.
-- `asr_manager()` at `app/core/backend_manager.py:547`.
-- `BackendManager.state` at `app/core/backend_manager.py:169`.
-- `BackendManager.is_ready()` at `app/core/backend_manager.py:183`.
+- `tts_manager()` at `server/core/backend_manager.py:541`.
+- `asr_manager()` at `server/core/backend_manager.py:547`.
+- `BackendManager.state` at `server/core/backend_manager.py:169`.
+- `BackendManager.is_ready()` at `server/core/backend_manager.py:183`.
 
 Interpretation:
 
@@ -790,11 +790,11 @@ Interpretation:
 - ASR manager is required when ASR is configured.
 - TTS manager is required when TTS is configured and not intentionally absent.
 - ASR-only profiles should not fail because TTS is absent.
-- Existing TTS configured check appears at `app/main.py:421`.
+- Existing TTS configured check appears at `server/main.py:421`.
 
 Lazy TTS:
 
-- Existing startup supports `LAZY_TTS` at `app/main.py:423`.
+- Existing startup supports `LAZY_TTS` at `server/main.py:423`.
 - Week 1 must choose readiness semantics before implementation.
 - Recommended production posture: avoid `LAZY_TTS` in readiness-managed deployments.
 
@@ -817,7 +817,7 @@ It is not the hard gate; session limiter admission remains the hard gate.
 
 New module:
 
-- `app/core/gpu_watchdog.py`
+- `server/core/gpu_watchdog.py`
 
 Function:
 
@@ -887,7 +887,7 @@ Current diff status:
 ### Edge Cases
 
 - During backend DRAINING, RELOADING, or FAILED, `/readyz` returns 503.
-- Backend state machine is documented at `app/core/backend_manager.py:11` through `app/core/backend_manager.py:22`.
+- Backend state machine is documented at `server/core/backend_manager.py:11` through `server/core/backend_manager.py:22`.
 - After successful reload or rollback to READY, `/readyz` returns 200 again.
 - Concurrent `/readyz` probes are read-only and do not allocate sessions.
 - When sessions are full, `/readyz` returns 503.
@@ -898,7 +898,7 @@ Current diff status:
 
 - Using `/readyz` as liveness can restart healthy but saturated containers; `/livez` is liveness.
 - Strict readiness can mark lazy TTS deployments unready; decide policy before implementation.
-- Startup catches BackendManager wiring exceptions at `app/main.py:555`; `/readyz` should return `backend_manager_unavailable`.
+- Startup catches BackendManager wiring exceptions at `server/main.py:555`; `/readyz` should return `backend_manager_unavailable`.
 - Changing `/health` body can break callers; preserve it.
 
 ### Test Checklist
@@ -974,11 +974,11 @@ Week 1:
 
 ## Implementation Sequence
 
-### 1. Create `app/core/metrics.py` Stub
+### 1. Create `server/core/metrics.py` Stub
 
 Files:
 
-- `app/core/metrics.py`
+- `server/core/metrics.py`
 
 Verify:
 
@@ -986,11 +986,11 @@ Verify:
 - Confirm active increments and decrements.
 - Confirm rejected counters increment by reason.
 
-### 2. Create `app/core/api_auth.py`
+### 2. Create `server/core/api_auth.py`
 
 Files:
 
-- `app/core/api_auth.py`
+- `server/core/api_auth.py`
 
 Verify:
 
@@ -998,38 +998,38 @@ Verify:
 - `curl -i -X POST http://127.0.0.1:8000/tts`
 - `curl -i -H 'Authorization: Bearer test-key' -X POST http://127.0.0.1:8000/tts`
 
-### 3. Create `app/core/session_limiter.py`
+### 3. Create `server/core/session_limiter.py`
 
 Files:
 
-- `app/core/session_limiter.py`
-- `app/core/metrics.py`
+- `server/core/session_limiter.py`
+- `server/core/metrics.py`
 
 Verify:
 
 - `pytest tests -k session_limiter`
 - Configure limit `1`, hold one slot, and confirm second acquire rejects immediately.
 
-### 4. Create `app/core/gpu_watchdog.py` Stub
+### 4. Create `server/core/gpu_watchdog.py` Stub
 
 Files:
 
-- `app/core/gpu_watchdog.py`
+- `server/core/gpu_watchdog.py`
 
 Verify:
 
 - `pytest tests -k gpu_watchdog`
 - Import module and assert `is_ok()` is true.
 
-### 5. Wire Auth Middleware or Guards into `app/main.py`
+### 5. Wire Auth Middleware or Guards into `server/main.py`
 
 Files:
 
-- `app/main.py`
+- `server/main.py`
 
 Anchors:
 
-- `app/main.py:599`, `:615`, `:641`, `:656`, `:701`, `:722`, `:773`, `:1130`, `:1179`, `:1208`, `:1325`, `:1361`, `:1584`.
+- `server/main.py:599`, `:615`, `:641`, `:656`, `:701`, `:722`, `:773`, `:1130`, `:1179`, `:1208`, `:1325`, `:1361`, `:1584`.
 
 Verify:
 
@@ -1043,16 +1043,16 @@ Verify:
 
 Files:
 
-- `app/main.py`
-- `app/core/session_limiter.py`
-- `app/core/metrics.py`
+- `server/main.py`
+- `server/core/session_limiter.py`
+- `server/core/metrics.py`
 
 Anchors:
 
-- Startup near `app/main.py:318`.
-- Profile applied at `app/main.py:324`.
-- HTTP handlers at `app/main.py:722`, `:773`, `:1130`, `:1179`, `:1208`, `:1325`.
-- WS accepts at `app/main.py:1386` and `app/main.py:1621`.
+- Startup near `server/main.py:318`.
+- Profile applied at `server/main.py:324`.
+- HTTP handlers at `server/main.py:722`, `:773`, `:1130`, `:1179`, `:1208`, `:1325`.
+- WS accepts at `server/main.py:1386` and `server/main.py:1621`.
 
 Verify:
 
@@ -1062,20 +1062,20 @@ Verify:
 - Concurrent HTTP voice request returns `429`.
 - Slot releases after close.
 
-### 7. Add `/livez` and `/readyz` Routes to `app/main.py`
+### 7. Add `/livez` and `/readyz` Routes to `server/main.py`
 
 Files:
 
-- `app/main.py`
-- `app/core/gpu_watchdog.py`
-- `app/core/session_limiter.py`
+- `server/main.py`
+- `server/core/gpu_watchdog.py`
+- `server/core/session_limiter.py`
 
 Anchors:
 
-- Health section at `app/main.py:561`.
-- Existing `/health` at `app/main.py:563`.
-- `BackendState.READY` at `app/core/backend_manager.py:51`.
-- Manager `state` at `app/core/backend_manager.py:169`.
+- Health section at `server/main.py:561`.
+- Existing `/health` at `server/main.py:563`.
+- `BackendState.READY` at `server/core/backend_manager.py:51`.
+- Manager `state` at `server/core/backend_manager.py:169`.
 
 Verify:
 
@@ -1088,12 +1088,12 @@ Verify:
 
 Files:
 
-- `app/main.py`
+- `server/main.py`
 
 Anchors:
 
-- Route starts at `app/main.py:563`.
-- Existing return is at `app/main.py:596`.
+- Route starts at `server/main.py:563`.
+- Existing return is at `server/main.py:596`.
 
 Verify:
 
@@ -1106,15 +1106,15 @@ Verify:
 
 Files:
 
-- `app/core/profile_loader.py`
+- `server/core/profile_loader.py`
 - selected profile JSON files if product owners approve defaults.
 - profile validation tests if present.
 
 Anchors:
 
-- `current_profile()` at `app/core/profile_loader.py:143`.
-- `apply_profile()` at `app/core/profile_loader.py:155`.
-- Profile env handling at `app/core/profile_loader.py:192`.
+- `current_profile()` at `server/core/profile_loader.py:143`.
+- `apply_profile()` at `server/core/profile_loader.py:155`.
+- Profile env handling at `server/core/profile_loader.py:192`.
 
 Verify:
 

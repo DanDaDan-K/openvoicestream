@@ -1,3 +1,10 @@
+> Path note (post-restructure): the product service moved `app/`→`server/`
+> (`app/main.py`→`server/main.py`, `app/core/`→`server/core/`). Backend
+> implementations cited below as `app/backends/...` (jetson/rk/cpu) now live in the
+> `voxedge` package (`voxedge.backends.*`); those `app/backends/...` paths
+> are kept verbatim only to preserve the original line-anchored references — map
+> them to the corresponding `voxedge` module when implementing.
+
 # ASR Slot-Pool D1 Implementation Spec
 
 ## 1. Shared-engine path in TRT-Edge-LLM fork
@@ -83,20 +90,20 @@ Current OVS facts from `/Users/harvest/project/seeed-local-voice`:
 - `_load_config()` reads the manifest at `app/backends/jetson/trt_edge_llm_asr.py:172` through `app/backends/jetson/trt_edge_llm_asr.py:178`, engine/audio paths at `app/backends/jetson/trt_edge_llm_asr.py:197` through `app/backends/jetson/trt_edge_llm_asr.py:203`, stream-mode profile values at `app/backends/jetson/trt_edge_llm_asr.py:215` through `app/backends/jetson/trt_edge_llm_asr.py:235`, mel asset paths at `app/backends/jetson/trt_edge_llm_asr.py:237` through `app/backends/jetson/trt_edge_llm_asr.py:243`, and sampling defaults at `app/backends/jetson/trt_edge_llm_asr.py:249` through `app/backends/jetson/trt_edge_llm_asr.py:252`.
 - `_ensure_worker()` currently creates `WorkerIO(self._worker, concurrency=1)` at `app/backends/jetson/trt_edge_llm_asr.py:488`.
 - `_worker_request(...)` relies on `WorkerIO.request(...)` and documents that `Semaphore(1)` serializes calls at `app/backends/jetson/trt_edge_llm_asr.py:504` through `app/backends/jetson/trt_edge_llm_asr.py:508`.
-- `WorkerIO` itself stores `threading.Semaphore(max(1, int(concurrency)))` at `app/core/worker_io.py:83`; `request(...)` acquires it at `app/core/worker_io.py:246` and releases it at `app/core/worker_io.py:282`.
-- ASR websocket admission uses `try_acquire_ws(...)` at `app/main.py:2057` through `app/main.py:2059`; the token is released at `app/main.py:2120` through `app/main.py:2124`.
-- `try_acquire_ws(...)` closes saturated WS sessions with code 4429 at `app/core/session_limiter.py:296` through `app/core/session_limiter.py:328`.
-- HTTP-style 429 behavior already exists for TTS streaming: `status_code=429` and `Retry-After: 5` at `app/main.py:1246` through `app/main.py:1250`.
-- Streaming ASR work is currently funneled through a single-thread executor: `_get_asr_executor()` constructs `ThreadPoolExecutor(max_workers=1, ...)` at `app/main.py:496` through `app/main.py:501`; `_asr_stream_backend(...)` uses that executor for `prepare_finalize`, `finalize`, and `accept_waveform` at `app/main.py:2189`, `app/main.py:2190`, `app/main.py:2213`, `app/main.py:2214`, and `app/main.py:2230`.
+- `WorkerIO` itself stores `threading.Semaphore(max(1, int(concurrency)))` at `server/core/worker_io.py:83`; `request(...)` acquires it at `server/core/worker_io.py:246` and releases it at `server/core/worker_io.py:282`.
+- ASR websocket admission uses `try_acquire_ws(...)` at `server/main.py:2057` through `server/main.py:2059`; the token is released at `server/main.py:2120` through `server/main.py:2124`.
+- `try_acquire_ws(...)` closes saturated WS sessions with code 4429 at `server/core/session_limiter.py:296` through `server/core/session_limiter.py:328`.
+- HTTP-style 429 behavior already exists for TTS streaming: `status_code=429` and `Retry-After: 5` at `server/main.py:1246` through `server/main.py:1250`.
+- Streaming ASR work is currently funneled through a single-thread executor: `_get_asr_executor()` constructs `ThreadPoolExecutor(max_workers=1, ...)` at `server/main.py:496` through `server/main.py:501`; `_asr_stream_backend(...)` uses that executor for `prepare_finalize`, `finalize`, and `accept_waveform` at `server/main.py:2189`, `server/main.py:2190`, `server/main.py:2213`, `server/main.py:2214`, and `server/main.py:2230`.
 
 D1 design:
 
 - Add an ASR concurrency config value, e.g. `EDGE_LLM_ASR_MAX_CONCURRENT` / manifest `max_concurrent`, in `_load_config()` near the existing stream config block at `app/backends/jetson/trt_edge_llm_asr.py:215`.
 - Pass that value to `WorkerIO(self._worker, concurrency=N)` at `app/backends/jetson/trt_edge_llm_asr.py:488`.
 - Update comments and lifecycle assumptions in `_worker_request(...)` at `app/backends/jetson/trt_edge_llm_asr.py:504` through `app/backends/jetson/trt_edge_llm_asr.py:508`; same session id can remain per lifecycle, but multiple different session ids must be allowed concurrently.
-- Override ASR `concurrency_capability(...)` in `TRTEdgeLLMASRBackend` so the resolver does not keep the ASR default N=1 from `app/core/asr_backend.py:136` through `app/core/asr_backend.py:147`.
-- Increase `_get_asr_executor()` from 1 worker to N at `app/main.py:496` through `app/main.py:501`, or bypass it for nonblocking worker IO once the worker protocol is safe for concurrent sessions.
-- Preserve reject-not-queue semantics: HTTP callers should receive 429 as in `app/main.py:1246` through `app/main.py:1250`; WS callers should continue to receive 4429 from `app/core/session_limiter.py:296` through `app/core/session_limiter.py:328`.
+- Override ASR `concurrency_capability(...)` in `TRTEdgeLLMASRBackend` so the resolver does not keep the ASR default N=1 from `server/core/asr_backend.py:136` through `server/core/asr_backend.py:147`.
+- Increase `_get_asr_executor()` from 1 worker to N at `server/main.py:496` through `server/main.py:501`, or bypass it for nonblocking worker IO once the worker protocol is safe for concurrent sessions.
+- Preserve reject-not-queue semantics: HTTP callers should receive 429 as in `server/main.py:1246` through `server/main.py:1250`; WS callers should continue to receive 4429 from `server/core/session_limiter.py:296` through `server/core/session_limiter.py:328`.
 
 ## 5. No engine rebuild needed
 

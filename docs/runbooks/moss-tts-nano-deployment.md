@@ -1,3 +1,10 @@
+> Path note (post-restructure): the product service moved `app/`→`server/`
+> (`app/main.py`→`server/main.py`, `app/core/`→`server/core/`). Backend
+> implementations cited below as `app/backends/...` (jetson/rk/cpu) now live in the
+> `voxedge` package (`voxedge.backends.*`); those `app/backends/...` paths
+> are kept verbatim only to preserve the original line-anchored references — map
+> them to the corresponding `voxedge` module when implementing.
+
 # MOSS-TTS-Nano Deployment Runbook
 
 **Status:** Production ready on two paths as of 2026-05-24.
@@ -30,7 +37,7 @@ curl -s -X POST http://localhost:8000/tts \
   -o /tmp/out.wav
 ```
 
-Endpoints (inherited from `app/main.py`):
+Endpoints (inherited from `server/main.py`):
 
 | Endpoint | Purpose |
 |---|---|
@@ -47,7 +54,7 @@ Endpoints (inherited from `app/main.py`):
 |---|---|---|
 | C++ worker | `moss_tts_nano_worker` (561 KB) | `deploy/jetson-workers/moss_tts_nano_worker` → image `/opt/jv-workers/` |
 | Python backend | `MossTtsNanoBackend` | `app/backends/jetson/moss_tts_nano.py` |
-| Registry | `jetson.moss_tts_nano` | `app/core/tts_backend.py:135` |
+| Registry | `jetson.moss_tts_nano` | `server/core/tts_backend.py:135` |
 | Profile | 6 required engines + env vars | `configs/profiles/jetson-moss-tts-nano.json` |
 | Engine bundle | 5 TTS plan + 1 codec plan + tokenizer + meta | host `/opt/models/moss-tts-nano/` (1.42 GB) → container `/opt/models/` (via `speech-models` volume) |
 | Engine build script | trtexec recipe | `scripts/build_moss_tts_engines.sh` |

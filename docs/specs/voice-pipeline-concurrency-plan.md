@@ -57,7 +57,7 @@ Both with `N=1` default = byte-identical to today's behavior.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  v2v WS layer (app/main.py)                                      │
+│  v2v WS layer (server/main.py)                                      │
 │  ── unchanged ──                                                  │
 └──────┬───────────────────────────────────────┬──────────────────┘
        │                                       │

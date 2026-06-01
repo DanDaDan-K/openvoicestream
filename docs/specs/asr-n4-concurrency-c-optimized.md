@@ -1,3 +1,10 @@
+> Path note (post-restructure): the product service moved `app/`→`server/`
+> (`app/main.py`→`server/main.py`, `app/core/`→`server/core/`). Backend
+> implementations cited below as `app/backends/...` (jetson/rk/cpu) now live in the
+> `voxedge` package (`voxedge.backends.*`); those `app/backends/...` paths
+> are kept verbatim only to preserve the original line-anchored references — map
+> them to the corresponding `voxedge` module when implementing.
+
 ## 1. Background + Decision Facts Table
 
 This spec upgrades the Qwen3-ASR backend in `seeed-local-voice` to support `N=4` concurrent ASR sessions using the C-optimized slot-pool architecture:
@@ -47,7 +54,7 @@ WS[1..4] -> asyncio.Semaphore(4) -> slot_id[0..3]
 
 ### Required entries
 
-- `app/main.py:496-502` — leave `_asr_executor(max_workers=1)` untouched through Phase 4. Phase 5 is the only step that changes it to profile-driven `asr_max_slots`, after CER consistency passes, 30-minute sustained load reports 0 GPU errors, and RSS shows no growth. Replace the existing comment in Phase 5 with one that states encoder safety lives in the C++ `encoder_mutex_`, while Python stayed single-worker until isolation verification completed.
+- `server/main.py:496-502` — leave `_asr_executor(max_workers=1)` untouched through Phase 4. Phase 5 is the only step that changes it to profile-driven `asr_max_slots`, after CER consistency passes, 30-minute sustained load reports 0 GPU errors, and RSS shows no growth. Replace the existing comment in Phase 5 with one that states encoder safety lives in the C++ `encoder_mutex_`, while Python stayed single-worker until isolation verification completed.
 
 ```python
 asr_max_slots = int(profile.get("asr", {}).get("asr_max_slots", 1))
@@ -57,15 +64,15 @@ _asr_executor = ThreadPoolExecutor(
 )
 ```
 
-- `app/main.py:2107-2108` — reassess `async with get_coordinator().acquire('asr'):`. Keep it only if the coordinator represents global service admission, metrics, or cross-pipeline fairness. It must not be the only ASR concurrency guard. Slot ownership must move to the Qwen3-ASR backend semaphore so `N=4` is enforced at the resource boundary. If the coordinator is currently a hard `N=1` ASR gate, replace that behavior with backend slot acquisition.
+- `server/main.py:2107-2108` — reassess `async with get_coordinator().acquire('asr'):`. Keep it only if the coordinator represents global service admission, metrics, or cross-pipeline fairness. It must not be the only ASR concurrency guard. Slot ownership must move to the Qwen3-ASR backend semaphore so `N=4` is enforced at the resource boundary. If the coordinator is currently a hard `N=1` ASR gate, replace that behavior with backend slot acquisition.
 
-- `app/main.py:2151` — add slot acquisition before `asr_be.create_stream(language=language)`. Convert the call path to await an async stream factory, or add an explicit async acquisition API that returns a stream with a held slot.
+- `server/main.py:2151` — add slot acquisition before `asr_be.create_stream(language=language)`. Convert the call path to await an async stream factory, or add an explicit async acquisition API that returns a stream with a held slot.
 
 ```python
 stream = await asr_be.create_stream(language=language)
 ```
 
-- `app/main.py:2164-2173` — in the reset / WebSocket reconnect path, release the old stream slot before creating the replacement stream. Use `try/finally` so a failed reconnect attempt cannot retain the old slot.
+- `server/main.py:2164-2173` — in the reset / WebSocket reconnect path, release the old stream slot before creating the replacement stream. Use `try/finally` so a failed reconnect attempt cannot retain the old slot.
 
 ```python
 if stream is not None:
@@ -73,7 +80,7 @@ if stream is not None:
 stream = await asr_be.create_stream(language=language)
 ```
 
-- `app/main.py:2295-2303` — in the final close path, ensure `stream.close()` always releases the slot even when cancellation or inference exceptions occur. The WebSocket handler should wrap session lifetime in `try/finally` and call `await stream.close()` exactly once.
+- `server/main.py:2295-2303` — in the final close path, ensure `stream.close()` always releases the slot even when cancellation or inference exceptions occur. The WebSocket handler should wrap session lifetime in `try/finally` and call `await stream.close()` exactly once.
 
 - `app/backends/jetson/qwen3_asr.py:74` — in `Qwen3ASRBackend.__init__`, add `self._slot_sem = asyncio.Semaphore(asr_max_slots)` and a slot count field. Load `asr_max_slots` from the ASR profile with default `1` for rollback compatibility.
 

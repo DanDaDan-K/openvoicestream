@@ -92,7 +92,7 @@ other state transition. Only a fresh WebSocket connection resets the
 latch and produces a new header. Clients should parse the header once
 on connect and treat every later binary frame as pure PCM payload.
 
-(Implementation reference: `app/main.py:1214,1246-1253` — the
+(Implementation reference: `server/main.py:1214,1246-1253` — the
 `sr_header_sent` flag lives in `tts_out_task` scope, is initialized
 `False` on WS connect, set `True` on the first successful synth, and
 never reset for the lifetime of the connection.)
