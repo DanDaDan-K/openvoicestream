@@ -10,6 +10,7 @@ when LANGUAGE_MODE=en, keeping the image small for default users.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -144,6 +145,12 @@ def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") 
     kokoro = MODELS.get("en", {}).get("kokoro-multi-lang-v1_0")
     if tts_backend == "jetson.matcha_trt" and matcha:
         extra_required["matcha-icefall-zh-en"] = matcha
+        # Slim image: the SPLIT_TRT acoustic path needs standalone onnx/ files
+        # that neither engine_resolver nor the sherpa CDN tarball provide.
+        # Pull them from HF here (idempotent + fail-open; no-op unless the
+        # profile selects MATCHA_ACOUSTIC_EP=SPLIT_TRT).
+        matcha_base = os.environ.get("MATCHA_MODEL_BASE") or os.path.join(model_dir, "matcha-icefall-zh-en")
+        _ensure_matcha_split_onnx(matcha_base)
     if tts_backend == "jetson.kokoro_trt" and kokoro:
         extra_required["kokoro-multi-lang-v1_0"] = kokoro
     if asr_backend == "jetson.trt_edge_llm":
@@ -299,12 +306,20 @@ def _ensure_qwen3_artifacts() -> None:
     artifact_set = os.environ.get("QWEN3_ARTIFACT_SET") or "orin-nano-highperf-2026-05-10"
     root = os.environ.get("QWEN3_ARTIFACT_ROOT")
     if not script.exists():
+        # Slim image: the qwen3-edgellm-jetson submodule COPY was narrowed to
+        # deploy/ only, so the deploy script is absent. Fall back to the
+        # self-contained in-app HF downloader (qwen3_artifact_downloader) which
+        # reads the same manifest (shipped in the slim image at
+        # /opt/qwen3-edgellm-jetson/deploy/artifacts/qwen3_manifest.json),
+        # picks the matching set, and snapshot_downloads the required engine
+        # files from HF. Without this, the slim image silently skipped all
+        # qwen3 ASR provisioning and the backend later raised FileNotFoundError.
         logger.warning(
-            "Qwen3 artifact deploy script missing at %s. Clone "
-            "https://github.com/suharvest/qwen3-edgellm-jetson.git as a sibling "
-            "of OpenVoiceStream or set QWEN3_EDGELLM_JETSON_ROOT to point at it.",
+            "Qwen3 artifact deploy script missing at %s — falling back to "
+            "in-app HF downloader (slim image path).",
             script,
         )
+        _ensure_qwen3_artifacts_via_hf(manifest, artifact_set)
         return
 
     cmd = [sys.executable, str(script), "--manifest", manifest, "--set", artifact_set]
@@ -318,6 +333,151 @@ def _ensure_qwen3_artifacts() -> None:
     except subprocess.CalledProcessError as exc:
         logger.error("Qwen3 artifact check/download failed with exit code %s", exc.returncode)
         sys.exit(exc.returncode)
+
+
+# Standalone split-encoder ONNX files for the Matcha SPLIT_TRT acoustic path.
+# These live on the HF artifact repo under models/matcha-icefall-zh-en/onnx/.
+# The matcha provisioning flow otherwise only (a) extracts a host-keyed engine
+# bundle (engine_resolver) and (b) pulls the sherpa CDN tarball — neither of
+# which contains these standalone onnx/ files. matcha_trt's SPLIT_TRT path
+# hard-requires both at preload (FileNotFoundError otherwise).
+_MATCHA_SPLIT_ONNX_FILES = (
+    "matcha_encoder_trt.onnx",
+    "matcha_estimator_step0_trt.onnx",
+)
+
+
+def _ensure_matcha_split_onnx(model_base: str) -> None:
+    """Provision the Matcha split-encoder standalone ONNX files from HF.
+
+    Only relevant for the SPLIT_TRT acoustic path (``MATCHA_ACOUSTIC_EP`` =
+    ``SPLIT_TRT``/``TRT_SPLIT``/``HYBRID_TRT``). Idempotent: present files are
+    skipped. Fail-open: a download error is logged but does not abort startup
+    (the backend's own preload re-checks and raises if still missing).
+    """
+    ep = (os.environ.get("MATCHA_ACOUSTIC_EP") or "").upper()
+    if ep not in ("SPLIT_TRT", "TRT_SPLIT", "HYBRID_TRT"):
+        return
+
+    # The encoder ONNX env points at .../onnx/matcha_encoder_trt.onnx; derive
+    # the onnx dir from it when set, else fall back to <model_base>/onnx.
+    enc_env = os.environ.get("MATCHA_SPLIT_ENCODER_ONNX")
+    onnx_dir = Path(enc_env).parent if enc_env else Path(model_base) / "onnx"
+
+    targets = {name: onnx_dir / name for name in _MATCHA_SPLIT_ONNX_FILES}
+    missing = {name: dest for name, dest in targets.items() if not dest.exists()}
+    if not missing:
+        logger.info("Matcha split-encoder ONNX already present under %s.", onnx_dir)
+        return
+
+    logger.info(
+        "Matcha split-encoder ONNX provisioning: %d/%d missing under %s — fetching from HF.",
+        len(missing), len(targets), onnx_dir,
+    )
+    try:
+        from app.core.hf_artifacts import download_file, ArtifactError
+    except Exception as exc:
+        logger.error("Matcha split ONNX: hf_artifacts unavailable (%s) — skipping.", exc)
+        return
+
+    for name, dest in missing.items():
+        rel = f"models/matcha-icefall-zh-en/onnx/{name}"
+        try:
+            download_file(rel, dest)
+            logger.info("Matcha split ONNX downloaded: %s", dest)
+        except ArtifactError as exc:
+            logger.error(
+                "Matcha split ONNX download failed for %s (%s) — backend preload "
+                "will re-check.", name, exc,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-open on any unexpected error
+            logger.error("Matcha split ONNX unexpected error for %s: %s", name, exc)
+
+
+def _ensure_qwen3_artifacts_via_hf(manifest_path: str, artifact_set: str) -> None:
+    """Slim-image fallback: provision Qwen3 ASR artifacts via the in-app HF downloader.
+
+    The fat-image path shells out to ``deploy_qwen3_artifacts.py``; that script
+    is absent in the slim image. Here we read the same manifest, determine the
+    set's required files and their on-disk dest under ``root``, compute which are
+    missing, and call ``qwen3_artifact_downloader.ensure_artifacts`` (which does
+    the actual ``snapshot_download`` from HF with allow_patterns derived from the
+    required_files).
+
+    Gated by the existing env flags. Fail-open: a download error is logged and
+    the backend's own preload-time FileNotFoundError still gates correctness.
+    """
+    if os.environ.get("OVS_AUTO_DOWNLOAD_ARTIFACTS", "1") != "1":
+        logger.info("OVS_AUTO_DOWNLOAD_ARTIFACTS=0 → skipping Qwen3 HF auto-download.")
+        return
+
+    # The profile may set QWEN3_ARTIFACT_MANIFEST to a path relative to the
+    # qwen3-edgellm-jetson root (e.g. "deploy/artifacts/qwen3_manifest.json"),
+    # which does not resolve against the container cwd. Resolve candidates in
+    # order: the given path, <QWEN3_EDGELLM_JETSON_ROOT>/<path>, and the known
+    # slim-image absolute location.
+    qej_root = os.environ.get("QWEN3_EDGELLM_JETSON_ROOT", "/opt/qwen3-edgellm-jetson")
+    candidates = [
+        Path(manifest_path),
+        Path(qej_root) / manifest_path,
+        Path("/opt/qwen3-edgellm-jetson/deploy/artifacts/qwen3_manifest.json"),
+    ]
+    mp = next((c for c in candidates if c.exists()), None)
+    if mp is None:
+        logger.warning(
+            "Qwen3 manifest not found (tried %s) — cannot HF auto-download.",
+            [str(c) for c in candidates],
+        )
+        return
+    try:
+        manifest = json.loads(mp.read_text())
+    except Exception as exc:
+        logger.warning("Failed to parse Qwen3 manifest %s (%s).", mp, exc)
+        return
+
+    sets = manifest.get("artifact_sets", {})
+    set_spec = sets.get(artifact_set)
+    if set_spec is None:
+        logger.warning(
+            "Qwen3 artifact set %r not in manifest %s — skipping HF download.",
+            artifact_set, mp,
+        )
+        return
+
+    root = Path(set_spec.get("root") or os.environ.get("QWEN3_ARTIFACT_ROOT") or "/opt/models/qwen3-edgellm")
+    required_files = set_spec.get("required_files") or []
+    if not required_files:
+        logger.warning("Qwen3 set %r declares no required_files — nothing to fetch.", artifact_set)
+        return
+
+    # required_files are paths relative to the set root. The profile env
+    # (QWEN3_ARTIFACT_ROOT, EDGE_LLM_ASR_ENGINE_DIR, EDGE_LLM_ASR_AUDIO_ENC_DIR)
+    # is layered on top of the same root, so root-relative resolution matches.
+    expected_paths = [str(root / rf) for rf in required_files]
+    missing_paths = [p for p in expected_paths if not Path(p).exists()]
+    if not missing_paths:
+        logger.info("Qwen3 ASR artifacts already present under %s (%d files).", root, len(expected_paths))
+        return
+
+    logger.info(
+        "Qwen3 ASR slim provisioning: %d/%d files missing under %s — fetching from HF.",
+        len(missing_paths), len(expected_paths), root,
+    )
+    try:
+        from app.core.qwen3_artifact_downloader import ensure_artifacts
+        ensure_artifacts(missing_paths)
+    except Exception as exc:
+        logger.error("Qwen3 ASR HF auto-download failed (%s) — backend preload will re-check.", exc)
+        return
+
+    still_missing = [p for p in expected_paths if not Path(p).exists()]
+    if still_missing:
+        logger.warning(
+            "Qwen3 ASR HF download finished but %d files still missing (e.g. %s).",
+            len(still_missing), still_missing[0],
+        )
+    else:
+        logger.info("Qwen3 ASR artifacts ready under %s.", root)
 
 
 def _ensure_rk_artifacts() -> None:
