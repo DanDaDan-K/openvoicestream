@@ -176,12 +176,27 @@ class SLVClient:
         # eviction (1012 "superseded by new session") apart from a real death.
         self._last_close_code: "int | None" = None
         self._last_close_reason: str = ""
+        # Monotonic session generation — bumped each time a fresh WS clears
+        # the limiter grace window and becomes healthy. Lets the app detect a
+        # session revived by the send-path connect() (mic pump) that never had
+        # tools (re)advertised, and lazily re-advertise before the turn (#3).
+        self._session_gen: int = 0
 
     def last_close_code(self) -> "int | None":
         return self._last_close_code
 
     def last_close_reason(self) -> str:
         return self._last_close_reason
+
+    def session_gen(self) -> int:
+        """Monotonic counter of healthy WS sessions opened so far.
+
+        Bumped in ``_open_with_retry`` once a fresh WS survives the limiter
+        grace window. The app compares it against the generation it last
+        advertised tools to, so a send-path-revived session (opened by the
+        mic pump's ``connect()``, which never advertises) gets its tools
+        re-advertised before the server-loop LLM turn fires (#3)."""
+        return self._session_gen
 
     def _touch_activity(self) -> None:
         try:
@@ -368,6 +383,10 @@ class SLVClient:
                 # dispatch loop doesn't misread a past eviction.
                 self._last_close_code = None
                 self._last_close_reason = ""
+                # New session is live: advance the generation so the app can
+                # tell this session apart from the one it last advertised
+                # tools to (send-path revival → re-advertise, #3).
+                self._session_gen += 1
                 return
             # Reader fired → connection died inside grace window.
             # Tear down what we just built and back off.
@@ -421,10 +440,25 @@ class SLVClient:
 
     # ── send helpers ────────────────────────────────────────────────
 
-    async def _send_json(self, payload: dict[str, Any]) -> None:
+    async def _send_json(
+        self, payload: dict[str, Any], *, connect_if_dead: bool = True
+    ) -> None:
         async with self._send_lock:
             if self._ws is None:
                 if self._closed:
+                    return
+                if not connect_if_dead:
+                    # The caller's payload is bound to the session that just
+                    # died (e.g. a tool_result carrying a call_id the server
+                    # issued on the OLD session). Auto-connecting would deliver
+                    # it to a FRESH session that never made that call → it's
+                    # silently ignored and the server turn stalls (#6). Drop it
+                    # instead; the new session will run its own clean turn.
+                    logger.info(
+                        "_send_json: WS dead — dropping %s (not auto-connecting; "
+                        "would misdeliver to a fresh session)",
+                        payload.get("type"),
+                    )
                     return
                 await self.connect()
             try:
@@ -530,7 +564,11 @@ class SLVClient:
         else:
             payload["error"] = error or "tool execution failed"
         logger.info("SLV tool_result id=%s name=%s ok=%s", call_id, name, ok)
-        await self._send_json(payload)
+        # A tool_result is bound to the session that issued the SERVER_TOOL_CALL.
+        # If that WS died mid-dispatch, do NOT auto-connect — the call_id is
+        # meaningless to a fresh session (#6). Drop it; the live session (if any)
+        # will drive its own turn.
+        await self._send_json(payload, connect_if_dead=False)
 
     # ── reader ──────────────────────────────────────────────────────
 

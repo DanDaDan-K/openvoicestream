@@ -1327,6 +1327,13 @@ class BaseApp:
                 system_prompt=system_prompt,
                 llm_params=llm_params or None,
             )
+            # Record which session generation now carries our tools so the
+            # dispatch path can detect a later send-path-revived session that
+            # hasn't been advertised to yet and lazily re-advertise (#3).
+            try:
+                self._advertised_gen = self.slv.session_gen()
+            except AttributeError:  # pragma: no cover - older SLV double
+                pass
             logger.info(
                 "server-loop mode: advertised %d tool(s) to SLV", len(tools_payload)
             )
@@ -1349,6 +1356,34 @@ class BaseApp:
             logger.info("server-loop: re-advertised tools after reconnect")
         except Exception:  # pragma: no cover - defensive
             logger.exception("server-loop re-advertise after reconnect failed")
+
+    async def _readvertise_if_session_advanced(self) -> None:
+        """Re-advertise tools if the live SLV session is one we haven't
+        advertised to yet (#3).
+
+        The mic pump's ``send_audio`` calls ``slv.connect()`` to revive a dead
+        WS, which opens the socket + sends config but does NOT advertise tools.
+        ``events()`` then keeps streaming on the new reader without the dispatch
+        loop ever reaching its reconnect/readvertise guard — so the server-loop
+        LLM on the fresh session has zero tools and the first tool_call after
+        revival silently fails. Called at the top of ``_dispatch_one`` so the
+        first observed event of a new generation (usually an early ASRPartial,
+        well before the server's ASR-final → LLM turn) triggers a re-advertise.
+        Cheap no-op on the steady-state path (generation unchanged).
+        """
+        if not self._server_loop_enabled():
+            return
+        try:
+            gen = self.slv.session_gen()
+        except AttributeError:  # pragma: no cover - older SLV double
+            return
+        if gen != getattr(self, "_advertised_gen", -1):
+            logger.info(
+                "slv dispatch: session gen advanced (%s→%s) without a "
+                "readvertise (send-path revival) — re-advertising tools",
+                getattr(self, "_advertised_gen", -1), gen,
+            )
+            await self._readvertise_after_reconnect()
 
     async def _handle_server_tool_call(self, evt: "ServerToolCall") -> None:
         """Execute a remote SERVER_TOOL_CALL against the local registry and
@@ -1707,6 +1742,12 @@ class BaseApp:
                 backoff = min(backoff * 2, 5.0)
 
     async def _dispatch_one(self, evt) -> None:  # noqa: ANN001
+        # #3: a send-path connect() (mic pump reviving a dead WS) opens a fresh
+        # session without advertising tools, and events() keeps streaming on it
+        # without the dispatch guard ever firing. Re-advertise the moment we see
+        # an event from an un-advertised generation, before the turn needs tools.
+        await self._readvertise_if_session_advanced()
+
         # ── server-loop remote tool call (#37 Phase 2-product) ──────
         # Handle before any state gate: the server-side LLM loop is
         # blocked waiting for our CLIENT_TOOL_RESULT, so we must always
