@@ -160,3 +160,88 @@ def test_http_429_when_full(monkeypatch):
         # Now the slot is free again.
         r = c.get("/work")
         assert r.status_code == 200
+
+
+# ── WS admission split (try_acquire_ws_token / close_ws_rejected) ───
+#
+# These back the /v2v admission-time eviction path (app/main.py): the slot
+# must be acquirable WITHOUT closing the incoming socket, so a stale holder
+# can be evicted before the newcomer gives up. See _v2v_evict_and_reacquire.
+
+import asyncio
+
+
+class _FakeWS:
+    """Records close() calls; never raises."""
+    def __init__(self):
+        self.closed = False
+        self.close_code = None
+        self.close_reason = None
+
+    async def close(self, code=None, reason=None):
+        self.closed = True
+        self.close_code = code
+        self.close_reason = reason
+
+
+def test_try_acquire_ws_token_success():
+    session_limiter.init_limiter({"name": "desktop"})
+    token, info = session_limiter.try_acquire_ws_token("/v2v/stream")
+    assert token is not None
+    assert info["reason"] == "ok"
+
+
+def test_try_acquire_ws_token_too_many_does_not_close(monkeypatch):
+    monkeypatch.setenv("OVS_MAX_CONCURRENT_SESSIONS", "1")
+    sl = session_limiter.init_limiter({})
+    held = sl.try_acquire()
+    token, info = session_limiter.try_acquire_ws_token("/v2v/stream")
+    assert token is None
+    assert info["reason"] == "too_many"
+    assert info["snapshot"] == {"active": 1, "limit": 1}
+    held.release()
+
+
+def test_try_acquire_ws_token_no_limiter():
+    session_limiter._reset_for_tests()
+    token, info = session_limiter.try_acquire_ws_token("/v2v/stream")
+    assert token is None
+    assert info["reason"] == "no_limiter"
+
+
+def test_close_ws_rejected_too_many_emits_4429(monkeypatch):
+    monkeypatch.setenv("OVS_MAX_CONCURRENT_SESSIONS", "1")
+    session_limiter.init_limiter({})
+    ws = _FakeWS()
+    info = {"reason": "too_many", "snapshot": {"active": 1, "limit": 1}}
+    asyncio.run(session_limiter.close_ws_rejected(ws, "/v2v/stream", info))
+    assert ws.closed
+    assert ws.close_code == 4429
+    assert "too_many_sessions" in ws.close_reason
+
+
+def test_close_ws_rejected_no_limiter_emits_1011():
+    ws = _FakeWS()
+    asyncio.run(session_limiter.close_ws_rejected(ws, "/v2v/stream", {"reason": "no_limiter"}))
+    assert ws.closed
+    assert ws.close_code == 1011
+
+
+def test_legacy_try_acquire_ws_still_closes_4429(monkeypatch):
+    """The thin wrapper preserves pre-split behaviour for /asr/stream."""
+    monkeypatch.setenv("OVS_MAX_CONCURRENT_SESSIONS", "1")
+    sl = session_limiter.init_limiter({})
+    held = sl.try_acquire()
+    ws = _FakeWS()
+    token = asyncio.run(session_limiter.try_acquire_ws(ws, "/asr/stream"))
+    assert token is None
+    assert ws.closed and ws.close_code == 4429
+    held.release()
+
+
+def test_legacy_try_acquire_ws_success_does_not_close():
+    session_limiter.init_limiter({"name": "desktop"})
+    ws = _FakeWS()
+    token = asyncio.run(session_limiter.try_acquire_ws(ws, "/asr/stream"))
+    assert token is not None
+    assert not ws.closed

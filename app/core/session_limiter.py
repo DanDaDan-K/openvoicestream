@@ -304,40 +304,76 @@ async def acquire_http(endpoint: str) -> AsyncIterator[SessionToken]:
         token.release()
 
 
-async def try_acquire_ws(ws, endpoint: str) -> SessionToken | None:
-    """Acquire a slot for a WS session. Caller must have already accepted.
+def try_acquire_ws_token(endpoint: str) -> tuple["SessionToken | None", dict]:
+    """Acquire a WS slot WITHOUT touching the socket.
 
-    On rejection: closes the WS with 4429 (reason JSON) and returns
-    ``None``. Caller MUST return without further work.
+    Returns ``(token, info)``. On success ``token`` is a SessionToken and
+    ``info`` is ``{"reason": "ok"}``. On rejection ``token`` is ``None`` and
+    ``info`` carries ``{"reason": "no_limiter"}`` or
+    ``{"reason": "too_many", "snapshot": {...}}`` so the caller can decide
+    whether to evict-and-retry before rendering the rejection close frame
+    (see ``close_ws_rejected``). Never blocks, never closes the socket.
+
+    This split exists so the /v2v admission path can attempt admission-time
+    eviction of a stale holder: the legacy ``try_acquire_ws`` closed the
+    *incoming* socket the instant the slot was full, leaving no room to
+    reclaim the leaked slot first.
+    """
+    limiter = _limiter
+    if limiter is None:
+        return None, {"reason": "no_limiter"}
+    token = limiter.try_acquire()
+    if token is None:
+        return None, {"reason": "too_many", "snapshot": limiter.snapshot()}
+    return token, {"reason": "ok"}
+
+
+async def close_ws_rejected(ws, endpoint: str, info: dict) -> None:
+    """Close a WS that failed admission, mirroring ``try_acquire_ws`` codes.
+
+    ``info`` is the dict returned by ``try_acquire_ws_token``. Emits the
+    rejection metric + warning log for the ``too_many`` case so behaviour is
+    identical to the pre-split single-shot path.
     """
     import json as _json
     from app.core import metrics as _metrics
-    limiter = _limiter
-    if limiter is None:
+    reason = info.get("reason")
+    if reason == "no_limiter":
         try:
             await ws.close(code=1011, reason='{"error":"session_limiter_unavailable"}')
         except Exception:
             pass
-        return None
-    token = limiter.try_acquire()
+        return
+    snap = info.get("snapshot") or {"active": 0, "limit": 0}
+    try:
+        _metrics.inc_sessions_rejected("ws")
+    except Exception:
+        logger.warning("session_limiter: inc_sessions_rejected(ws) raised", exc_info=True)
+    logger.warning(
+        "session_limiter: WS 4429 endpoint=%s active=%d limit=%d",
+        endpoint, snap["active"], snap["limit"],
+    )
+    payload = _json.dumps({
+        "error": "too_many_sessions",
+        "current": snap["active"],
+        "limit": snap["limit"],
+    })
+    try:
+        await ws.close(code=4429, reason=payload)
+    except Exception:
+        pass
+
+
+async def try_acquire_ws(ws, endpoint: str) -> SessionToken | None:
+    """Acquire a slot for a WS session. Caller must have already accepted.
+
+    On rejection: closes the WS with 4429 (reason JSON) and returns
+    ``None``. Caller MUST return without further work. Thin wrapper over
+    ``try_acquire_ws_token`` + ``close_ws_rejected`` (unchanged behaviour for
+    callers that don't want admission-time eviction, e.g. /asr/stream).
+    """
+    token, info = try_acquire_ws_token(endpoint)
     if token is None:
-        snap = limiter.snapshot()
-        try:
-            _metrics.inc_sessions_rejected("ws")
-        except Exception:
-            logger.warning("session_limiter: inc_sessions_rejected(ws) raised", exc_info=True)
-        reason = _json.dumps({
-            "error": "too_many_sessions",
-            "current": snap["active"],
-            "limit": snap["limit"],
-        })
-        logger.warning(
-            "session_limiter: WS 4429 endpoint=%s active=%d limit=%d",
-            endpoint, snap["active"], snap["limit"],
-        )
-        try:
-            await ws.close(code=4429, reason=reason)
-        except Exception:
-            pass
+        await close_ws_rejected(ws, endpoint, info)
         return None
     return token

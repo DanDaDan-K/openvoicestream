@@ -24,6 +24,96 @@ class _WSHandle:
     def __init__(self, websocket, task):
         self.websocket = websocket
         self.task = task
+
+
+# /v2v admission-time eviction (limit=1 single-client deployments, e.g.
+# voice-arm): track live /v2v WS holders so a fresh connection can reclaim a
+# slot leaked by a zombie peer — app-layer reader dead but the websockets
+# protocol layer still auto-ponging, so uvicorn ping/pong never times it out
+# and the held slot never releases. See _v2v_evict_and_reacquire. Plain set
+# (not WeakSet): every holder is removed on _v2v_release_early's
+# finally-guaranteed path.
+_V2V_HOLDERS: "set" = set()
+_v2v_evict_lock = None  # lazily created asyncio.Lock (no top-level asyncio import)
+
+
+def _get_v2v_evict_lock():
+    # Lazy init is atomic across coroutines: no await between check and set.
+    global _v2v_evict_lock
+    if _v2v_evict_lock is None:
+        import asyncio as _asyncio
+        _v2v_evict_lock = _asyncio.Lock()
+    return _v2v_evict_lock
+
+
+def _v2v_evict_enabled() -> bool:
+    """Admission-time eviction is opt-in and only safe for limit==1.
+
+    Gated on ``OVS_V2V_EVICT_ON_FULL``. Only enabled when the resolved
+    session limit is 1 (single conversant): then a newcomer arriving against
+    a full slot can only be that same client reconnecting after abandoning a
+    dead session, so evicting the holder is always correct. For limit>=2
+    (multi-tenant) a newcomer cannot prove the holder is stale → stays off.
+    """
+    from app.core.session_limiter import get_limiter
+    if not _env_truthy(os.environ.get("OVS_V2V_EVICT_ON_FULL")):
+        return False
+    lim = get_limiter()
+    return lim is not None and lim.limit == 1
+
+
+async def _v2v_evict_and_reacquire(endpoint: str, *, timeout_s: float = 2.0):
+    """Evict stale /v2v holder(s) and retry admission once → ``(token, info)``.
+
+    Serialised by a module lock so two simultaneous newcomers don't both
+    evict. Closes each holder's WS (1012) and cancels its handler task; the
+    holder's own outer finally (``_v2v_release_early``) releases the slot,
+    which we then reclaim via a bounded poll. On timeout returns
+    ``(None, info)`` and the caller renders a normal 4429.
+    """
+    import asyncio as _asyncio
+    from app.core.session_limiter import try_acquire_ws_token
+
+    async with _get_v2v_evict_lock():
+        # Re-check under the lock: a prior waiter may have already freed the
+        # slot, in which case we just take it without evicting anyone.
+        token, info = try_acquire_ws_token(endpoint)
+        if token is not None:
+            return token, info
+        holders = list(_V2V_HOLDERS)
+        if not holders:
+            # Slot held by something we don't own (e.g. an in-flight /tts
+            # HTTP request sharing the limiter) — not ours to evict.
+            return None, info
+        logger.warning(
+            "v2v admission full; evicting %d stale holder(s) (limit=1, endpoint=%s)",
+            len(holders), endpoint,
+        )
+        for h in holders:
+            _ws = getattr(h, "websocket", None)
+            if _ws is not None:
+                try:
+                    res = _ws.close(code=1012, reason="evicted: superseded by new session")
+                    if _asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    logger.debug("v2v evict: ws.close raised", exc_info=True)
+            _task = getattr(h, "task", None)
+            if _task is not None and not _task.done():
+                _task.cancel()
+        # Bounded wait for the evicted holder's finally to release the slot.
+        steps = max(1, int(timeout_s / 0.05))
+        for _ in range(steps):
+            await _asyncio.sleep(0.05)
+            token, info = try_acquire_ws_token(endpoint)
+            if token is not None:
+                return token, info
+        logger.warning(
+            "v2v evict: slot not released within %.1fs; rejecting newcomer", timeout_s,
+        )
+        return None, info
+
+
 from typing import Literal, Optional
 
 # Week 2: configure logging (JSON or text) from OVS_LOG_FORMAT before
@@ -2805,7 +2895,7 @@ async def v2v_stream(ws: WebSocket):
     coord = get_coordinator()
 
     from app.core.api_auth import check_ws
-    from app.core.session_limiter import try_acquire_ws
+    from app.core.session_limiter import try_acquire_ws_token, close_ws_rejected
 
     # Auth before accept; deterministic 4401 close on failure.
     if not await check_ws(ws):
@@ -2817,9 +2907,20 @@ async def v2v_stream(ws: WebSocket):
 
     await ws.accept()
 
-    # Reject-not-queue admission gate.
-    _v2v_session_token = await try_acquire_ws(ws, "/v2v/stream")
+    # Reject-not-queue admission gate. When the slot is full AND admission-time
+    # eviction is enabled (OVS_V2V_EVICT_ON_FULL + limit==1 single-client, e.g.
+    # voice-arm), reclaim a slot leaked by a zombie holder before giving up:
+    # the newcomer can only be that same client reconnecting after abandoning a
+    # dead session. Otherwise behaves exactly like the legacy single-shot gate.
+    _v2v_session_token, _admit_info = try_acquire_ws_token("/v2v/stream")
+    if (
+        _v2v_session_token is None
+        and _admit_info.get("reason") == "too_many"
+        and _v2v_evict_enabled()
+    ):
+        _v2v_session_token, _admit_info = await _v2v_evict_and_reacquire("/v2v/stream")
     if _v2v_session_token is None:
+        await close_ws_rejected(ws, "/v2v/stream", _admit_info)
         try:
             reset_request_context(_v2v_ctx_tokens)
         except BaseException:
@@ -2845,6 +2946,10 @@ async def v2v_stream(ws: WebSocket):
         _v2v_asr_mgr.register_ws(_v2v_handle)
     if _v2v_tts_mgr is not None:
         _v2v_tts_mgr.register_ws(_v2v_handle)
+    # Track as a live /v2v holder so a future newcomer can evict this session
+    # if it leaks its slot (see _v2v_evict_and_reacquire). Removed in
+    # _v2v_release_early (finally-guaranteed).
+    _V2V_HOLDERS.add(_v2v_handle)
 
     # MUST-FIX 1 round 2: make release idempotent + a nonlocal flag so the
     # outer setup try/except BaseException can safely cover CancelledError
@@ -2859,6 +2964,10 @@ async def v2v_stream(ws: WebSocket):
         if _v2v_released["done"]:
             return
         _v2v_released["done"] = True
+        try:
+            _V2V_HOLDERS.discard(_v2v_handle)
+        except Exception:
+            pass
         if _v2v_asr_mgr is not None:
             try:
                 _v2v_asr_mgr.unregister_ws(_v2v_handle)
