@@ -118,7 +118,7 @@ docker run -d --name "$CONTAINER" --runtime nvidia --network host --ipc host \
   -e LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/onnxruntime/capi:/host-cuda:/host-nvidia-libs:/host-libs \
   -e PYTHONPATH=/opt/speech:/usr/lib/python3.10/dist-packages \
   "$IMAGE" \
-  python3 -m uvicorn app.main:app --host 0.0.0.0 --port "$SERVICE_PORT" >/dev/null
+  python3 -m uvicorn server.main:app --host 0.0.0.0 --port "$SERVICE_PORT" >/dev/null
 
 for _ in $(seq 1 120); do
   if curl -sf "http://127.0.0.1:$SERVICE_PORT/health" >/tmp/slv_highperf_health.json; then

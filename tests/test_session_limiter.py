@@ -1,8 +1,8 @@
-"""Unit tests for app.core.session_limiter."""
+"""Unit tests for server.core.session_limiter."""
 
 import pytest
 
-from app.core import session_limiter, metrics
+from server.core import session_limiter, metrics
 
 
 @pytest.fixture(autouse=True)
@@ -164,7 +164,7 @@ def test_http_429_when_full(monkeypatch):
 
 # ── WS admission split (try_acquire_ws_token / close_ws_rejected) ───
 #
-# These back the /v2v admission-time eviction path (app/main.py): the slot
+# These back the /v2v admission-time eviction path (server/main.py): the slot
 # must be acquirable WITHOUT closing the incoming socket, so a stale holder
 # can be evicted before the newcomer gives up. See _v2v_evict_and_reacquire.
 

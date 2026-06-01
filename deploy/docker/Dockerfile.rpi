@@ -7,7 +7,7 @@
 # ── Multi-target (BAKE_MODELS) ──────────────────────────────────────────────
 # RPi bakes NO model artifacts in any variant: Paraformer ASR + Matcha TTS are
 # fetched on first start from the sensecraft-statics CDN by
-# app/core/model_downloader.py (LANGUAGE_MODE=zh_en → MODELS["zh_en"] tarballs),
+# server/core/model_downloader.py (LANGUAGE_MODE=zh_en → MODELS["zh_en"] tarballs),
 # or bind-mounted via -v. So `base`, `final-thick`, and `final-slim` are
 # identical here; the stage names exist only so CI can pass a uniform
 # `--target final-slim` / `--target final-thick` across all platforms.
@@ -54,15 +54,15 @@ RUN pip3 install --no-cache-dir --break-system-packages --index-url ${PIP_INDEX}
 
 # ── voxedge (edge-native voice library) ───────────────────────────────
 # Post-migration the CPU sherpa ASR/TTS backends live in voxedge
-# (app/core/asr_backend.py maps cpu.sherpa_asr → voxedge.backends.sherpa.asr).
+# (server/core/asr_backend.py maps cpu.sherpa_asr → voxedge.backends.sherpa.asr).
 # Install the pure-Python wheel; sherpa-onnx (its only heavy dep) is already
 # installed above and imported lazily, so no [sherpa] extra is needed.
 COPY deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl /tmp/wheels/voxedge-0.0.1a0-py3-none-any.whl
 RUN pip3 install --no-cache-dir --break-system-packages --index-url ${PIP_INDEX} /tmp/wheels/voxedge-0.0.1a0-py3-none-any.whl \
     && rm -rf /tmp/wheels
 
-# Application code (post-refactor layout: app/core, app/utils — backends in voxedge)
-COPY app/      /opt/speech/app/
+# Application code (post-refactor layout: server/core, server/utils — backends in voxedge)
+COPY server/      /opt/speech/server/
 COPY configs/  /opt/speech/configs/
 
 # Model dir (populated at runtime via volume mount)
@@ -91,7 +91,7 @@ WORKDIR /opt/speech
 ENV PYTHONPATH=/opt/speech
 EXPOSE 8000
 
-CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "-m", "uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # ── Multi-target stages (no baked artifacts; thick == slim == base) ─────────
 FROM base AS final-thick

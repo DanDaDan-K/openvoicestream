@@ -1,6 +1,6 @@
-"""Unit tests for app.core.metrics (Week 1 stub)."""
+"""Unit tests for server.core.metrics (Week 1 stub)."""
 
-from app.core import metrics
+from server.core import metrics
 
 
 def setup_function(_func):

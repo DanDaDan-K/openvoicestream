@@ -7,12 +7,12 @@ Repository: `seeed-local-voice`.
 
 ## Source Review Ledger
 
-- Read `app/core/metrics.py`.
-- Read `app/core/gpu_watchdog.py`.
-- Read `app/core/api_auth.py`.
-- Read `app/core/session_limiter.py`.
-- Read `app/main.py`, with focus on logging setup, probes, middleware gap, WS entry points, and perf logging hooks.
-- Read `app/core/backend_manager.py`, with focus on state machine, reload, rollback, drain, and manager status.
+- Read `server/core/metrics.py`.
+- Read `server/core/gpu_watchdog.py`.
+- Read `server/core/api_auth.py`.
+- Read `server/core/session_limiter.py`.
+- Read `server/main.py`, with focus on logging setup, probes, middleware gap, WS entry points, and perf logging hooks.
+- Read `server/core/backend_manager.py`, with focus on state machine, reload, rollback, drain, and manager status.
 - Read `bench/perf/` tree, including client, runners, CLI, stress harnesses, corpus manifests, results, and timing docs.
 - Read `app/requirements.txt`.
 - Read `deploy/docker-compose.yml`.
@@ -24,10 +24,10 @@ Repository: `seeed-local-voice`.
 
 ## Week 1 Baseline Not Re-Specified
 
-- Optional API key auth already exists in `app/core/api_auth.py`.
-- Global concurrency cap already exists in `app/core/session_limiter.py`.
-- In-process counter stub already exists in `app/core/metrics.py`.
-- GPU watchdog stub already exists in `app/core/gpu_watchdog.py`.
+- Optional API key auth already exists in `server/core/api_auth.py`.
+- Global concurrency cap already exists in `server/core/session_limiter.py`.
+- In-process counter stub already exists in `server/core/metrics.py`.
+- GPU watchdog stub already exists in `server/core/gpu_watchdog.py`.
 - `/livez`, `/readyz`, and `/health` are already separated.
 - Four Week 1 commits exist on main and are not pushed.
 - Week 2 preserves Week 1 public function signatures where stated.
@@ -37,129 +37,129 @@ Repository: `seeed-local-voice`.
 
 ### 1. Affected Files And Anchors
 
-- `app/core/metrics.py:1` currently identifies the file as a Week 1 in-process stub.
-- `app/core/metrics.py:17` defines the module lock used by the stub.
-- `app/core/metrics.py:20` stores `_sessions_active`.
-- `app/core/metrics.py:23` stores `_sessions_rejected_total`.
-- `app/core/metrics.py:24` stores `_auth_rejected_total`.
-- `app/core/metrics.py:27` defines `inc_sessions_active()`.
-- `app/core/metrics.py:35` defines `dec_sessions_active()`.
-- `app/core/metrics.py:47` defines `get_sessions_active()`.
-- `app/core/metrics.py:52` defines `inc_sessions_rejected(reason)`.
-- `app/core/metrics.py:62` defines `get_sessions_rejected(reason=None)`.
-- `app/core/metrics.py:69` defines `inc_auth_rejected(endpoint)`.
-- `app/core/metrics.py:75` defines `get_auth_rejected(endpoint=None)`.
-- `app/core/metrics.py:82` defines `snapshot()`.
-- `app/core/metrics.py:92` defines `_reset_for_tests()`.
-- `app/core/session_limiter.py:157` records active session acquire through `metrics.inc_sessions_active()`.
-- `app/core/session_limiter.py:167` records active session release through `metrics.dec_sessions_active()`.
-- `app/core/session_limiter.py:249` records HTTP session rejection.
-- `app/core/session_limiter.py:287` records WS session rejection.
-- `app/core/api_auth.py:119` imports metrics on HTTP auth rejection.
-- `app/core/api_auth.py:120` records `inc_auth_rejected(request.url.path or "unknown")`.
-- `app/core/api_auth.py:140` records manual unauthorized responses.
-- `app/core/api_auth.py:184` imports metrics on WS auth rejection.
-- `app/core/api_auth.py:185` records `inc_auth_rejected(ws.url.path or "unknown")`.
-- `app/main.py:29` configures current text logging.
-- `app/main.py:35` creates the FastAPI app.
-- `app/main.py:326` registers startup with `@app.on_event("startup")`.
-- `app/main.py:342` initializes the session limiter.
-- `app/main.py:590` defines `/livez`.
-- `app/main.py:601` defines `/readyz`.
-- `app/main.py:672` defines `/health`.
-- `app/main.py:682` exposes temporary `_WorkerIO` cancel count in `/health`.
-- `app/main.py:839` defines `/tts`.
-- `app/main.py:845` wraps `/tts` with `acquire_http("/tts")`.
-- `app/main.py:863` calls `backend.synthesize()` for manager-backed TTS.
-- `app/main.py:878` calls `tts_service.synthesize()` for legacy TTS.
-- `app/main.py:887` exposes audio duration response header.
-- `app/main.py:888` exposes inference time response header.
-- `app/main.py:889` exposes `X-RTF`.
-- `app/main.py:899` defines `/tts/stream`.
-- `app/main.py:912` imports metrics in `/tts/stream`.
-- `app/main.py:920` tries the streaming HTTP session acquire.
-- `app/main.py:923` records HTTP streaming rejection.
-- `app/main.py:972` starts the manager-backed streaming generator.
-- `app/main.py:1004` starts the `/tts/stream` disconnect watcher.
-- `app/main.py:1079` defines `_submit()` for sentence streaming.
-- `app/main.py:1085` calls `backend.generate_streaming(...)`.
-- `app/main.py:1117` dispatches streaming synthesis to the TTS stream executor.
-- `app/main.py:1152` observes the first TTS stream chunk per sentence.
-- `app/main.py:1193` starts the legacy streaming generator.
-- `app/main.py:1245` calls legacy `backend.generate_streaming(...)`.
-- `app/main.py:1271` dispatches legacy streaming synthesis to the TTS stream executor.
-- `app/main.py:1475` calls clone streaming `backend.generate_streaming(...)`.
-- `app/main.py:1511` calls legacy clone streaming `backend.generate_streaming(...)`.
-- `app/main.py:1533` defines `/asr`.
-- `app/main.py:1552` calls manager-backed `asr_be.transcribe(...)`.
-- `app/main.py:1562` calls legacy `asr_be.transcribe(...)`.
-- `app/main.py:1576` defines `/asr/stream`.
-- `app/main.py:1605` checks WS auth before accept.
-- `app/main.py:1608` accepts `/asr/stream`.
-- `app/main.py:1611` acquires the WS session slot.
-- `app/main.py:1619` creates the WS handle for backend manager tracking.
-- `app/main.py:1680` logs ASR stream open.
-- `app/main.py:1706` runs `force_endpoint` in ASR executor.
-- `app/main.py:1708` runs `stream.prepare_finalize`.
-- `app/main.py:1709` runs `stream.finalize`.
-- `app/main.py:1728` runs `stream.prepare_finalize` on empty bytes EOS.
-- `app/main.py:1729` runs `stream.finalize` on empty bytes EOS.
-- `app/main.py:1741` accepts ASR waveform in executor.
-- `app/main.py:1751` runs `stream.prepare_finalize` after VAD endpoint.
-- `app/main.py:1752` runs `stream.finalize` after VAD endpoint.
-- `app/main.py:1813` defines `/v2v/stream`.
-- `app/main.py:1854` checks V2V WS auth.
-- `app/main.py:1857` accepts V2V WS.
-- `app/main.py:1860` acquires V2V WS session.
-- `app/main.py:1869` creates the V2V WS handle.
-- `app/main.py:1999` logs V2V stream open.
-- `app/main.py:2037` creates `tts_q`.
-- `app/main.py:2059` defines V2V dispatcher.
-- `app/main.py:2080` runs VAD process.
-- `app/main.py:2094` cancels current TTS task on speech start.
-- `app/main.py:2097` sets the current TTS stop event.
-- `app/main.py:2129` accepts V2V ASR audio.
-- `app/main.py:2159` enqueues V2V TTS sentences.
-- `app/main.py:2164` enqueues flushed V2V TTS sentences.
-- `app/main.py:2174` cancels current TTS task on client abort.
-- `app/main.py:2177` sets current TTS stop event on client abort.
-- `app/main.py:2186` cancels ASR manager on barge-in.
-- `app/main.py:2212` polls V2V ASR partials.
-- `app/main.py:2257` finalizes V2V ASR with status.
-- `app/main.py:2366` calls V2V `synth_be.generate_streaming(...)`.
-- `app/main.py:2403` dispatches V2V TTS synth to the TTS stream executor.
-- `app/main.py:2425` catches `asyncio.CancelledError` during V2V TTS.
-- `app/main.py:2493` cancels ASR manager on WS close.
-- `app/main.py:2505` releases the V2V session token.
-- `app/core/backend_manager.py:49` defines `BackendState`.
-- `app/core/backend_manager.py:81` defines `BackendManager`.
-- `app/core/backend_manager.py:129` defines `start()`.
-- `app/core/backend_manager.py:151` transitions to READY.
-- `app/core/backend_manager.py:154` defines `shutdown()`.
-- `app/core/backend_manager.py:157` transitions shutdown to DRAINING.
-- `app/core/backend_manager.py:165` transitions shutdown to FAILED.
-- `app/core/backend_manager.py:199` defines `status()`.
-- `app/core/backend_manager.py:210` defines `acquire()`.
-- `app/core/backend_manager.py:218` increments `_inflight_http`.
-- `app/core/backend_manager.py:224` decrements `_inflight_http`.
-- `app/core/backend_manager.py:229` registers WS handles.
-- `app/core/backend_manager.py:232` unregisters WS handles.
-- `app/core/backend_manager.py:237` defines `_wait_for_http_drain`.
-- `app/core/backend_manager.py:264` defines `_force_close_ws_sessions`.
-- `app/core/backend_manager.py:287` defines `reload()`.
-- `app/core/backend_manager.py:301` rejects concurrent reloads.
-- `app/core/backend_manager.py:309` rejects reload when not READY.
-- `app/core/backend_manager.py:375` transitions to DRAINING.
-- `app/core/backend_manager.py:378` force-closes WS sessions.
-- `app/core/backend_manager.py:379` waits for HTTP drain.
-- `app/core/backend_manager.py:387` transitions to RELOADING.
-- `app/core/backend_manager.py:411` transitions reload success to READY.
-- `app/core/backend_manager.py:421` returns `status: reloaded`.
-- `app/core/backend_manager.py:433` catches reload failures.
-- `app/core/backend_manager.py:463` transitions rollback success to READY.
-- `app/core/backend_manager.py:465` returns `status: rolled_back`.
-- `app/core/backend_manager.py:477` transitions rollback failure to FAILED.
-- `app/core/backend_manager.py:497` defines `init_backend_managers(...)`.
+- `server/core/metrics.py:1` currently identifies the file as a Week 1 in-process stub.
+- `server/core/metrics.py:17` defines the module lock used by the stub.
+- `server/core/metrics.py:20` stores `_sessions_active`.
+- `server/core/metrics.py:23` stores `_sessions_rejected_total`.
+- `server/core/metrics.py:24` stores `_auth_rejected_total`.
+- `server/core/metrics.py:27` defines `inc_sessions_active()`.
+- `server/core/metrics.py:35` defines `dec_sessions_active()`.
+- `server/core/metrics.py:47` defines `get_sessions_active()`.
+- `server/core/metrics.py:52` defines `inc_sessions_rejected(reason)`.
+- `server/core/metrics.py:62` defines `get_sessions_rejected(reason=None)`.
+- `server/core/metrics.py:69` defines `inc_auth_rejected(endpoint)`.
+- `server/core/metrics.py:75` defines `get_auth_rejected(endpoint=None)`.
+- `server/core/metrics.py:82` defines `snapshot()`.
+- `server/core/metrics.py:92` defines `_reset_for_tests()`.
+- `server/core/session_limiter.py:157` records active session acquire through `metrics.inc_sessions_active()`.
+- `server/core/session_limiter.py:167` records active session release through `metrics.dec_sessions_active()`.
+- `server/core/session_limiter.py:249` records HTTP session rejection.
+- `server/core/session_limiter.py:287` records WS session rejection.
+- `server/core/api_auth.py:119` imports metrics on HTTP auth rejection.
+- `server/core/api_auth.py:120` records `inc_auth_rejected(request.url.path or "unknown")`.
+- `server/core/api_auth.py:140` records manual unauthorized responses.
+- `server/core/api_auth.py:184` imports metrics on WS auth rejection.
+- `server/core/api_auth.py:185` records `inc_auth_rejected(ws.url.path or "unknown")`.
+- `server/main.py:29` configures current text logging.
+- `server/main.py:35` creates the FastAPI app.
+- `server/main.py:326` registers startup with `@app.on_event("startup")`.
+- `server/main.py:342` initializes the session limiter.
+- `server/main.py:590` defines `/livez`.
+- `server/main.py:601` defines `/readyz`.
+- `server/main.py:672` defines `/health`.
+- `server/main.py:682` exposes temporary `_WorkerIO` cancel count in `/health`.
+- `server/main.py:839` defines `/tts`.
+- `server/main.py:845` wraps `/tts` with `acquire_http("/tts")`.
+- `server/main.py:863` calls `backend.synthesize()` for manager-backed TTS.
+- `server/main.py:878` calls `tts_service.synthesize()` for legacy TTS.
+- `server/main.py:887` exposes audio duration response header.
+- `server/main.py:888` exposes inference time response header.
+- `server/main.py:889` exposes `X-RTF`.
+- `server/main.py:899` defines `/tts/stream`.
+- `server/main.py:912` imports metrics in `/tts/stream`.
+- `server/main.py:920` tries the streaming HTTP session acquire.
+- `server/main.py:923` records HTTP streaming rejection.
+- `server/main.py:972` starts the manager-backed streaming generator.
+- `server/main.py:1004` starts the `/tts/stream` disconnect watcher.
+- `server/main.py:1079` defines `_submit()` for sentence streaming.
+- `server/main.py:1085` calls `backend.generate_streaming(...)`.
+- `server/main.py:1117` dispatches streaming synthesis to the TTS stream executor.
+- `server/main.py:1152` observes the first TTS stream chunk per sentence.
+- `server/main.py:1193` starts the legacy streaming generator.
+- `server/main.py:1245` calls legacy `backend.generate_streaming(...)`.
+- `server/main.py:1271` dispatches legacy streaming synthesis to the TTS stream executor.
+- `server/main.py:1475` calls clone streaming `backend.generate_streaming(...)`.
+- `server/main.py:1511` calls legacy clone streaming `backend.generate_streaming(...)`.
+- `server/main.py:1533` defines `/asr`.
+- `server/main.py:1552` calls manager-backed `asr_be.transcribe(...)`.
+- `server/main.py:1562` calls legacy `asr_be.transcribe(...)`.
+- `server/main.py:1576` defines `/asr/stream`.
+- `server/main.py:1605` checks WS auth before accept.
+- `server/main.py:1608` accepts `/asr/stream`.
+- `server/main.py:1611` acquires the WS session slot.
+- `server/main.py:1619` creates the WS handle for backend manager tracking.
+- `server/main.py:1680` logs ASR stream open.
+- `server/main.py:1706` runs `force_endpoint` in ASR executor.
+- `server/main.py:1708` runs `stream.prepare_finalize`.
+- `server/main.py:1709` runs `stream.finalize`.
+- `server/main.py:1728` runs `stream.prepare_finalize` on empty bytes EOS.
+- `server/main.py:1729` runs `stream.finalize` on empty bytes EOS.
+- `server/main.py:1741` accepts ASR waveform in executor.
+- `server/main.py:1751` runs `stream.prepare_finalize` after VAD endpoint.
+- `server/main.py:1752` runs `stream.finalize` after VAD endpoint.
+- `server/main.py:1813` defines `/v2v/stream`.
+- `server/main.py:1854` checks V2V WS auth.
+- `server/main.py:1857` accepts V2V WS.
+- `server/main.py:1860` acquires V2V WS session.
+- `server/main.py:1869` creates the V2V WS handle.
+- `server/main.py:1999` logs V2V stream open.
+- `server/main.py:2037` creates `tts_q`.
+- `server/main.py:2059` defines V2V dispatcher.
+- `server/main.py:2080` runs VAD process.
+- `server/main.py:2094` cancels current TTS task on speech start.
+- `server/main.py:2097` sets the current TTS stop event.
+- `server/main.py:2129` accepts V2V ASR audio.
+- `server/main.py:2159` enqueues V2V TTS sentences.
+- `server/main.py:2164` enqueues flushed V2V TTS sentences.
+- `server/main.py:2174` cancels current TTS task on client abort.
+- `server/main.py:2177` sets current TTS stop event on client abort.
+- `server/main.py:2186` cancels ASR manager on barge-in.
+- `server/main.py:2212` polls V2V ASR partials.
+- `server/main.py:2257` finalizes V2V ASR with status.
+- `server/main.py:2366` calls V2V `synth_be.generate_streaming(...)`.
+- `server/main.py:2403` dispatches V2V TTS synth to the TTS stream executor.
+- `server/main.py:2425` catches `asyncio.CancelledError` during V2V TTS.
+- `server/main.py:2493` cancels ASR manager on WS close.
+- `server/main.py:2505` releases the V2V session token.
+- `server/core/backend_manager.py:49` defines `BackendState`.
+- `server/core/backend_manager.py:81` defines `BackendManager`.
+- `server/core/backend_manager.py:129` defines `start()`.
+- `server/core/backend_manager.py:151` transitions to READY.
+- `server/core/backend_manager.py:154` defines `shutdown()`.
+- `server/core/backend_manager.py:157` transitions shutdown to DRAINING.
+- `server/core/backend_manager.py:165` transitions shutdown to FAILED.
+- `server/core/backend_manager.py:199` defines `status()`.
+- `server/core/backend_manager.py:210` defines `acquire()`.
+- `server/core/backend_manager.py:218` increments `_inflight_http`.
+- `server/core/backend_manager.py:224` decrements `_inflight_http`.
+- `server/core/backend_manager.py:229` registers WS handles.
+- `server/core/backend_manager.py:232` unregisters WS handles.
+- `server/core/backend_manager.py:237` defines `_wait_for_http_drain`.
+- `server/core/backend_manager.py:264` defines `_force_close_ws_sessions`.
+- `server/core/backend_manager.py:287` defines `reload()`.
+- `server/core/backend_manager.py:301` rejects concurrent reloads.
+- `server/core/backend_manager.py:309` rejects reload when not READY.
+- `server/core/backend_manager.py:375` transitions to DRAINING.
+- `server/core/backend_manager.py:378` force-closes WS sessions.
+- `server/core/backend_manager.py:379` waits for HTTP drain.
+- `server/core/backend_manager.py:387` transitions to RELOADING.
+- `server/core/backend_manager.py:411` transitions reload success to READY.
+- `server/core/backend_manager.py:421` returns `status: reloaded`.
+- `server/core/backend_manager.py:433` catches reload failures.
+- `server/core/backend_manager.py:463` transitions rollback success to READY.
+- `server/core/backend_manager.py:465` returns `status: rolled_back`.
+- `server/core/backend_manager.py:477` transitions rollback failure to FAILED.
+- `server/core/backend_manager.py:497` defines `init_backend_managers(...)`.
 - `app/requirements.txt:1` starts the dependency list.
 - `bench/perf/README.md:9` documents ASR RTF, TFD, and WER/CER.
 - `bench/perf/README.md:10` documents TTS RTF and TFD.
@@ -228,8 +228,8 @@ Repository: `seeed-local-voice`.
 
 ### 2. New Module Paths And Function Signatures
 
-- Keep `app/core/metrics.py` as the only public metrics module.
-- Do not add Prometheus imports to `app/main.py` outside endpoint glue.
+- Keep `server/core/metrics.py` as the only public metrics module.
+- Do not add Prometheus imports to `server/main.py` outside endpoint glue.
 - Add `prometheus_client>=0.20,<1` to `app/requirements.txt`.
 - Preserve `inc_sessions_active() -> int`.
 - Preserve `dec_sessions_active() -> int`.
@@ -261,7 +261,7 @@ Repository: `seeed-local-voice`.
 - Add route handler pseudocode `async def metrics_endpoint(request: Request) -> Response`.
 - Add optional auth helper pseudocode `def _metrics_requires_key() -> bool`.
 - Add optional auth helper pseudocode `def _check_metrics_key(request: Request) -> None`.
-- Do not define custom collectors outside `app/core/metrics.py`.
+- Do not define custom collectors outside `server/core/metrics.py`.
 - Do not expose raw prometheus registry globals from the module.
 
 ### 3. Metric Inventory
@@ -294,18 +294,18 @@ Repository: `seeed-local-voice`.
 ### 4. Data Flow
 
 - Existing session limiter code continues to call current helper names.
-- `SessionLimiter.try_acquire()` at `app/core/session_limiter.py:147` remains the acquire boundary.
-- `metrics.inc_sessions_active()` at `app/core/session_limiter.py:157` maps to the Prometheus active session Gauge.
-- `SessionLimiter._release()` at `app/core/session_limiter.py:160` remains the release boundary.
-- `metrics.dec_sessions_active()` at `app/core/session_limiter.py:167` decrements the same Gauge.
-- `acquire_http()` rejection at `app/core/session_limiter.py:247` records `ovs_sessions_rejected_total{reason="http"}`.
-- `try_acquire_ws()` rejection at `app/core/session_limiter.py:285` records `ovs_sessions_rejected_total{reason="ws"}`.
-- HTTP auth rejection at `app/core/api_auth.py:117` records `ovs_auth_rejected_total{endpoint=request.url.path}`.
-- WS auth rejection at `app/core/api_auth.py:182` records `ovs_auth_rejected_total{endpoint=ws.url.path}`.
+- `SessionLimiter.try_acquire()` at `server/core/session_limiter.py:147` remains the acquire boundary.
+- `metrics.inc_sessions_active()` at `server/core/session_limiter.py:157` maps to the Prometheus active session Gauge.
+- `SessionLimiter._release()` at `server/core/session_limiter.py:160` remains the release boundary.
+- `metrics.dec_sessions_active()` at `server/core/session_limiter.py:167` decrements the same Gauge.
+- `acquire_http()` rejection at `server/core/session_limiter.py:247` records `ovs_sessions_rejected_total{reason="http"}`.
+- `try_acquire_ws()` rejection at `server/core/session_limiter.py:285` records `ovs_sessions_rejected_total{reason="ws"}`.
+- HTTP auth rejection at `server/core/api_auth.py:117` records `ovs_auth_rejected_total{endpoint=request.url.path}`.
+- WS auth rejection at `server/core/api_auth.py:182` records `ovs_auth_rejected_total{endpoint=ws.url.path}`.
 - `/metrics` handler emits `render_prometheus()` with the Prometheus content type.
-- `/metrics` is default unprotected, matching `/livez` at `app/main.py:590`.
-- `/metrics` is default unprotected, matching `/readyz` at `app/main.py:601`.
-- `/metrics` is default unprotected, matching `/health` at `app/main.py:672`.
+- `/metrics` is default unprotected, matching `/livez` at `server/main.py:590`.
+- `/metrics` is default unprotected, matching `/readyz` at `server/main.py:601`.
+- `/metrics` is default unprotected, matching `/health` at `server/main.py:672`.
 - If `OVS_METRICS_REQUIRE_KEY` is truthy, `/metrics` requires the same API key source as Week 1 public endpoints.
 - Metrics auth must not call `_require_api_key` blindly if that would protect `/metrics` only when keys exist but ignore `OVS_METRICS_REQUIRE_KEY`.
 - Metrics auth should reuse `api_auth.check_http(request)` only after confirming the env flag is enabled.
@@ -316,50 +316,50 @@ Repository: `seeed-local-voice`.
 
 ### 5. Instrumentation Anchors
 
-- Record TTS non-streaming RTF after `backend.synthesize(...)` returns at `app/main.py:863`.
-- Record TTS non-streaming RTF after `tts_service.synthesize(...)` returns at `app/main.py:878`.
-- Use `meta.get("rtf", 0)` already exposed at `app/main.py:889`.
-- Use backend label from manager backend `backend.name` near `app/main.py:855`.
-- Use backend label from legacy backend `tts_service.backend_name()` near `app/main.py:883`.
-- Record TTS streaming TTFA in manager stream path when first chunk passes through `app/main.py:1152`.
-- Start the TTFA timer immediately before `_submit(0, queues[0])` at `app/main.py:1126`.
-- Observe TTFA when `first_chunk_seen` flips at `app/main.py:1152`.
-- Record TTS streaming queue depth from `len(sentences)` at `app/main.py:955`.
-- Record `ovs_queue_depth{queue="tts_stream"}` around queue creation at `app/main.py:1122`.
-- Record TTS legacy streaming TTFA when the first chunk yields at `app/main.py:1277`.
-- Start legacy TTFA before `loop.run_in_executor(...)` at `app/main.py:1271`.
-- Record clone streaming TTFA in manager clone path around `app/main.py:1475`.
-- Record clone streaming TTFA in legacy clone path around `app/main.py:1511`.
-- Record ASR offline decode duration around `asr_be.transcribe(...)` at `app/main.py:1552`.
-- Record ASR offline decode duration around legacy `asr_be.transcribe(...)` at `app/main.py:1562`.
-- Record ASR streaming decode duration around `stream.finalize` at `app/main.py:1709`.
-- Record ASR streaming decode duration around `stream.finalize` at `app/main.py:1729`.
-- Record ASR streaming decode duration around `stream.finalize` at `app/main.py:1752`.
-- Record ASR V2V decode duration around `asr_manager.finalize_with_status(...)` at `app/main.py:2257`.
-- Record active WS session increment immediately after accept at `app/main.py:1608`.
-- Record active WS session decrement in the `/asr/stream` finally block near `app/main.py:1655`.
-- Record active WS session increment immediately after accept at `app/main.py:1857`.
-- Record active WS session decrement in V2V cleanup near `app/main.py:2505`.
-- Record V2V `tts_q` depth after `await tts_q.put(sentence)` at `app/main.py:2160`.
-- Record V2V `tts_q` depth after flush puts at `app/main.py:2164`.
-- Record V2V `tts_q` depth after `await tts_q.get()` at `app/main.py:2345`.
-- Record worker cancel with `backend="tts"` and `reason="speech_start"` when task is cancelled at `app/main.py:2094`.
-- Record worker cancel with `backend="tts"` and `reason="client_abort"` when task is cancelled at `app/main.py:2174`.
-- Record worker cancel with `backend="tts"` and `reason="task_cancelled"` at `app/main.py:2425`.
-- Record worker cancel with `backend="asr"` and `reason="bargein"` at `app/main.py:2186`.
-- Record worker cancel with `backend="asr"` and `reason="ws_close"` at `app/main.py:2493`.
-- Record backend state `init` during manager construction at `app/core/backend_manager.py:112`.
-- Record backend state `failed` on start failure at `app/core/backend_manager.py:139`.
-- Record backend state `ready` after start at `app/core/backend_manager.py:151`.
-- Record backend state `draining` on shutdown at `app/core/backend_manager.py:157`.
-- Record backend state `failed` after shutdown at `app/core/backend_manager.py:165`.
-- Record backend state `draining` during reload at `app/core/backend_manager.py:375`.
-- Record backend state `reloading` during reload at `app/core/backend_manager.py:387`.
-- Record backend state `ready` on reload success at `app/core/backend_manager.py:411`.
-- Increment reload total `success` before return at `app/core/backend_manager.py:421`.
-- Increment reload total `fail` in the exception branch at `app/core/backend_manager.py:433`.
-- Increment reload total `rollback` before return at `app/core/backend_manager.py:465`.
-- Record backend state `failed` on rollback failure at `app/core/backend_manager.py:477`.
+- Record TTS non-streaming RTF after `backend.synthesize(...)` returns at `server/main.py:863`.
+- Record TTS non-streaming RTF after `tts_service.synthesize(...)` returns at `server/main.py:878`.
+- Use `meta.get("rtf", 0)` already exposed at `server/main.py:889`.
+- Use backend label from manager backend `backend.name` near `server/main.py:855`.
+- Use backend label from legacy backend `tts_service.backend_name()` near `server/main.py:883`.
+- Record TTS streaming TTFA in manager stream path when first chunk passes through `server/main.py:1152`.
+- Start the TTFA timer immediately before `_submit(0, queues[0])` at `server/main.py:1126`.
+- Observe TTFA when `first_chunk_seen` flips at `server/main.py:1152`.
+- Record TTS streaming queue depth from `len(sentences)` at `server/main.py:955`.
+- Record `ovs_queue_depth{queue="tts_stream"}` around queue creation at `server/main.py:1122`.
+- Record TTS legacy streaming TTFA when the first chunk yields at `server/main.py:1277`.
+- Start legacy TTFA before `loop.run_in_executor(...)` at `server/main.py:1271`.
+- Record clone streaming TTFA in manager clone path around `server/main.py:1475`.
+- Record clone streaming TTFA in legacy clone path around `server/main.py:1511`.
+- Record ASR offline decode duration around `asr_be.transcribe(...)` at `server/main.py:1552`.
+- Record ASR offline decode duration around legacy `asr_be.transcribe(...)` at `server/main.py:1562`.
+- Record ASR streaming decode duration around `stream.finalize` at `server/main.py:1709`.
+- Record ASR streaming decode duration around `stream.finalize` at `server/main.py:1729`.
+- Record ASR streaming decode duration around `stream.finalize` at `server/main.py:1752`.
+- Record ASR V2V decode duration around `asr_manager.finalize_with_status(...)` at `server/main.py:2257`.
+- Record active WS session increment immediately after accept at `server/main.py:1608`.
+- Record active WS session decrement in the `/asr/stream` finally block near `server/main.py:1655`.
+- Record active WS session increment immediately after accept at `server/main.py:1857`.
+- Record active WS session decrement in V2V cleanup near `server/main.py:2505`.
+- Record V2V `tts_q` depth after `await tts_q.put(sentence)` at `server/main.py:2160`.
+- Record V2V `tts_q` depth after flush puts at `server/main.py:2164`.
+- Record V2V `tts_q` depth after `await tts_q.get()` at `server/main.py:2345`.
+- Record worker cancel with `backend="tts"` and `reason="speech_start"` when task is cancelled at `server/main.py:2094`.
+- Record worker cancel with `backend="tts"` and `reason="client_abort"` when task is cancelled at `server/main.py:2174`.
+- Record worker cancel with `backend="tts"` and `reason="task_cancelled"` at `server/main.py:2425`.
+- Record worker cancel with `backend="asr"` and `reason="bargein"` at `server/main.py:2186`.
+- Record worker cancel with `backend="asr"` and `reason="ws_close"` at `server/main.py:2493`.
+- Record backend state `init` during manager construction at `server/core/backend_manager.py:112`.
+- Record backend state `failed` on start failure at `server/core/backend_manager.py:139`.
+- Record backend state `ready` after start at `server/core/backend_manager.py:151`.
+- Record backend state `draining` on shutdown at `server/core/backend_manager.py:157`.
+- Record backend state `failed` after shutdown at `server/core/backend_manager.py:165`.
+- Record backend state `draining` during reload at `server/core/backend_manager.py:375`.
+- Record backend state `reloading` during reload at `server/core/backend_manager.py:387`.
+- Record backend state `ready` on reload success at `server/core/backend_manager.py:411`.
+- Increment reload total `success` before return at `server/core/backend_manager.py:421`.
+- Increment reload total `fail` in the exception branch at `server/core/backend_manager.py:433`.
+- Increment reload total `rollback` before return at `server/core/backend_manager.py:465`.
+- Record backend state `failed` on rollback failure at `server/core/backend_manager.py:477`.
 
 ### 6. Reusing `bench/perf/` Hooks
 
@@ -373,7 +373,7 @@ Repository: `seeed-local-voice`.
 - `bench/perf/client.py:286` is the client-side equivalent of ASR finalize compute.
 - `bench/perf/client.py:293` is the client-side RTF formula for streaming ASR.
 - `bench/perf/client.py:294` is the compute-bound ASR finalize RTF formula.
-- `bench/perf/client.py:333` captures first TTS chunk, matching server-side `app/main.py:1152`.
+- `bench/perf/client.py:333` captures first TTS chunk, matching server-side `server/main.py:1152`.
 - `bench/perf/client.py:351` computes TTS RTF as total wall divided by synthesized duration.
 - `bench/perf/load_2client_tts.py:23` and `bench/perf/load_2client_tts.py:32` show the TTFA clock boundaries.
 - `bench/perf/multi_sentence_pipeline.py:48` shows the first PCM beyond sample-rate header rule.
@@ -451,7 +451,7 @@ Repository: `seeed-local-voice`.
 
 ### 9. Test Checklist
 
-- Unit: importing `app.core.metrics` works without starting FastAPI.
+- Unit: importing `server.core.metrics` works without starting FastAPI.
 - Unit: `inc_sessions_active()` returns incremented integer.
 - Unit: `dec_sessions_active()` clamps at zero.
 - Unit: `inc_sessions_rejected("http")` returns expected count.
@@ -502,34 +502,34 @@ Repository: `seeed-local-voice`.
 
 ### 1. Affected Files And Anchors
 
-- `app/core/gpu_watchdog.py:1` identifies the current watchdog stub.
-- `app/core/gpu_watchdog.py:12` defines `is_ok()`.
-- `app/core/gpu_watchdog.py:18` currently returns `True`.
-- `app/main.py:326` registers startup where the background task should be launched.
-- `app/main.py:337` initializes the session limiter before model downloads.
-- `app/main.py:349` initializes coordinator after limiter.
-- `app/main.py:355` checks RK runtime before backend imports.
-- `app/main.py:396` starts ASR backend preload.
-- `app/main.py:440` starts TTS service setup.
-- `app/main.py:496` wires backend managers.
-- `app/main.py:578` logs service ready.
-- `app/main.py:601` defines `/readyz`.
-- `app/main.py:615` imports backend manager in `/readyz`.
-- `app/main.py:616` imports session limiter in `/readyz`.
-- `app/main.py:617` imports `gpu_watchdog` in `/readyz`.
-- `app/main.py:657` begins watchdog readiness check.
-- `app/main.py:659` calls `_gw_mod.is_ok()`.
-- `app/main.py:660` appends `gpu_watchdog_failed`.
-- `app/main.py:664` returns 503 when reasons exist.
-- `app/main.py:669` returns ready.
-- `app/core/metrics.py` will export watchdog metrics from Deliverable 1.
+- `server/core/gpu_watchdog.py:1` identifies the current watchdog stub.
+- `server/core/gpu_watchdog.py:12` defines `is_ok()`.
+- `server/core/gpu_watchdog.py:18` currently returns `True`.
+- `server/main.py:326` registers startup where the background task should be launched.
+- `server/main.py:337` initializes the session limiter before model downloads.
+- `server/main.py:349` initializes coordinator after limiter.
+- `server/main.py:355` checks RK runtime before backend imports.
+- `server/main.py:396` starts ASR backend preload.
+- `server/main.py:440` starts TTS service setup.
+- `server/main.py:496` wires backend managers.
+- `server/main.py:578` logs service ready.
+- `server/main.py:601` defines `/readyz`.
+- `server/main.py:615` imports backend manager in `/readyz`.
+- `server/main.py:616` imports session limiter in `/readyz`.
+- `server/main.py:617` imports `gpu_watchdog` in `/readyz`.
+- `server/main.py:657` begins watchdog readiness check.
+- `server/main.py:659` calls `_gw_mod.is_ok()`.
+- `server/main.py:660` appends `gpu_watchdog_failed`.
+- `server/main.py:664` returns 503 when reasons exist.
+- `server/main.py:669` returns ready.
+- `server/core/metrics.py` will export watchdog metrics from Deliverable 1.
 - `app/requirements.txt` should not gain hard GPU dependencies.
 - Compose files do not need watchdog env by default unless operators choose to set interval.
 
 ### 2. New Module Paths And Function Signatures
 
-- Keep implementation in `app/core/gpu_watchdog.py`.
-- Do not add platform-specific modules under `app/core` for Week 2.
+- Keep implementation in `server/core/gpu_watchdog.py`.
+- Do not add platform-specific modules under `server/core` for Week 2.
 - Preserve `is_ok() -> bool`.
 - Add pseudocode `def status() -> dict`.
 - Add pseudocode `async def start() -> None`.
@@ -625,12 +625,12 @@ Repository: `seeed-local-voice`.
 
 ### 5. Data Flow
 
-- `app/main.py` startup launches watchdog after profile/env application at `app/main.py:330`.
+- `server/main.py` startup launches watchdog after profile/env application at `server/main.py:330`.
 - Starting after profile load lets detector use `LANGUAGE_MODE`, `RK_PLATFORM`, and profile env.
 - Starting before model preload catches hardware issues during warmup but should not block startup.
-- The task should be launched near `app/main.py:342` to run alongside other startup work.
-- `/readyz` reads cached watchdog state at `app/main.py:659`.
-- If `is_ok()` returns false, `/readyz` returns 503 as it already does at `app/main.py:664`.
+- The task should be launched near `server/main.py:342` to run alongside other startup work.
+- `/readyz` reads cached watchdog state at `server/main.py:659`.
+- If `is_ok()` returns false, `/readyz` returns 503 as it already does at `server/main.py:664`.
 - Week 2 should enrich `/readyz` detail with `gpu_watchdog.status()`.
 - Existing `reasons` array should retain `gpu_watchdog_failed`.
 - Add optional `details.gpu_watchdog` object to readiness response.
@@ -694,8 +694,8 @@ Repository: `seeed-local-voice`.
 
 ### 8. Test Checklist
 
-- Unit: importing `app.core.gpu_watchdog` does not import pycuda.
-- Unit: importing `app.core.gpu_watchdog` does not import pynvml.
+- Unit: importing `server.core.gpu_watchdog` does not import pycuda.
+- Unit: importing `server.core.gpu_watchdog` does not import pynvml.
 - Unit: `is_ok()` returns a bool.
 - Unit: `status()` returns a dict with `reason`.
 - Unit: invalid interval returns default 5 seconds.
@@ -731,38 +731,38 @@ Repository: `seeed-local-voice`.
 
 ### 1. Affected Files And Anchors
 
-- `app/main.py:29` currently calls `logging.basicConfig(...)`.
-- `app/main.py:30` sets current level to INFO.
-- `app/main.py:31` sets current text format.
-- `app/main.py:33` creates `logger`.
-- `app/main.py:35` creates the FastAPI app before any middleware is declared.
-- `app/main.py` currently has no `@app.middleware("http")` match in the reviewed source.
-- `app/core/api_auth.py:86` defines `mask_key(value)`.
-- `app/core/api_auth.py:124` logs HTTP auth rejection.
-- `app/core/api_auth.py:128` logs masked supplied token.
-- `app/core/api_auth.py:189` logs WS auth rejection.
-- `app/core/api_auth.py:193` logs masked supplied token.
-- `app/main.py:590` defines `/livez`.
-- `app/main.py:601` defines `/readyz`.
-- `app/main.py:672` defines `/health`.
-- `app/main.py:839` defines `/tts`.
-- `app/main.py:899` defines `/tts/stream`.
-- `app/main.py:1533` defines `/asr`.
-- `app/main.py:1576` defines `/asr/stream`.
-- `app/main.py:1605` runs WS auth before accept.
-- `app/main.py:1608` accepts ASR WS.
-- `app/main.py:1813` defines `/v2v/stream`.
-- `app/main.py:1854` runs V2V WS auth before accept.
-- `app/main.py:1857` accepts V2V WS.
-- `app/main.py:1999` logs V2V stream open with backend context in message text.
-- `app/main.py:2506` logs V2V stream closed.
-- `app/core/backend_manager.py:140` logs start failure.
-- `app/core/backend_manager.py:152` logs manager ready.
-- `app/core/backend_manager.py:257` logs drain timeout.
-- `app/core/backend_manager.py:274` logs WS close failure.
-- `app/core/backend_manager.py:414` logs reload success.
-- `app/core/backend_manager.py:433` logs reload failure.
-- `app/core/backend_manager.py:472` logs rollback failure.
+- `server/main.py:29` currently calls `logging.basicConfig(...)`.
+- `server/main.py:30` sets current level to INFO.
+- `server/main.py:31` sets current text format.
+- `server/main.py:33` creates `logger`.
+- `server/main.py:35` creates the FastAPI app before any middleware is declared.
+- `server/main.py` currently has no `@app.middleware("http")` match in the reviewed source.
+- `server/core/api_auth.py:86` defines `mask_key(value)`.
+- `server/core/api_auth.py:124` logs HTTP auth rejection.
+- `server/core/api_auth.py:128` logs masked supplied token.
+- `server/core/api_auth.py:189` logs WS auth rejection.
+- `server/core/api_auth.py:193` logs masked supplied token.
+- `server/main.py:590` defines `/livez`.
+- `server/main.py:601` defines `/readyz`.
+- `server/main.py:672` defines `/health`.
+- `server/main.py:839` defines `/tts`.
+- `server/main.py:899` defines `/tts/stream`.
+- `server/main.py:1533` defines `/asr`.
+- `server/main.py:1576` defines `/asr/stream`.
+- `server/main.py:1605` runs WS auth before accept.
+- `server/main.py:1608` accepts ASR WS.
+- `server/main.py:1813` defines `/v2v/stream`.
+- `server/main.py:1854` runs V2V WS auth before accept.
+- `server/main.py:1857` accepts V2V WS.
+- `server/main.py:1999` logs V2V stream open with backend context in message text.
+- `server/main.py:2506` logs V2V stream closed.
+- `server/core/backend_manager.py:140` logs start failure.
+- `server/core/backend_manager.py:152` logs manager ready.
+- `server/core/backend_manager.py:257` logs drain timeout.
+- `server/core/backend_manager.py:274` logs WS close failure.
+- `server/core/backend_manager.py:414` logs reload success.
+- `server/core/backend_manager.py:433` logs reload failure.
+- `server/core/backend_manager.py:472` logs rollback failure.
 - `app/requirements.txt:1` starts dependency list.
 - `deploy/docker-compose.yml:28` starts Jetson speech environment block.
 - `deploy/docker-compose.radxa.yml:27` starts Radxa speech environment block.
@@ -771,7 +771,7 @@ Repository: `seeed-local-voice`.
 
 ### 2. New Module Paths And Function Signatures
 
-- Add `app/core/logging_config.py`.
+- Add `server/core/logging_config.py`.
 - Add pseudocode `request_id_var: ContextVar[str | None]`.
 - Add pseudocode `session_id_var: ContextVar[str | None]`.
 - Add pseudocode `backend_var: ContextVar[str | None]`.
@@ -786,7 +786,7 @@ Repository: `seeed-local-voice`.
 - Add pseudocode `def generate_request_id() -> str`.
 - Add pseudocode `def request_id_from_headers(headers) -> str | None`.
 - Add pseudocode `def sanitize_headers_for_log(headers) -> dict`.
-- Add HTTP middleware in `app/main.py`.
+- Add HTTP middleware in `server/main.py`.
 - Middleware pseudocode signature `@app.middleware("http")`.
 - Middleware pseudocode signature `async def request_context_middleware(request: Request, call_next)`.
 - Add WS helper pseudocode `def init_ws_context(ws: WebSocket) -> TokenBundle`.
@@ -823,7 +823,7 @@ Repository: `seeed-local-voice`.
 
 ### 4. Request ID Flow
 
-- HTTP middleware runs after app creation at `app/main.py:35`.
+- HTTP middleware runs after app creation at `server/main.py:35`.
 - HTTP middleware reads inbound `X-Request-ID`.
 - If inbound `X-Request-ID` exists and is sane, propagate it.
 - If missing, generate a new request id.
@@ -839,34 +839,34 @@ Repository: `seeed-local-voice`.
 - WS handlers read `X-Request-ID` from headers before or after auth.
 - WS handlers generate request id if header missing.
 - WS handlers store request id in contextvars before first log in handler.
-- For `/asr/stream`, set context near `app/main.py:1576` before `check_ws` at `app/main.py:1605`.
-- For `/v2v/stream`, set context near `app/main.py:1813` before `check_ws` at `app/main.py:1854`.
+- For `/asr/stream`, set context near `server/main.py:1576` before `check_ws` at `server/main.py:1605`.
+- For `/v2v/stream`, set context near `server/main.py:1813` before `check_ws` at `server/main.py:1854`.
 - WS context resets in final cleanup.
 - Contextvars propagate across `await` boundaries.
 - Contextvars do not automatically propagate into `run_in_executor` threads.
 - Executor worker logs may not include request id unless wrapped.
 - Week 2 should wrap executor functions only where logs are expected and cheap.
-- For `/tts/stream`, `_run()` at `app/main.py:1082` can copy context before executor dispatch.
-- For legacy `/tts/stream`, `_run()` at `app/main.py:1242` can copy context before executor dispatch.
-- For V2V TTS, `_run_synth()` at `app/main.py:2356` can copy context before executor dispatch.
+- For `/tts/stream`, `_run()` at `server/main.py:1082` can copy context before executor dispatch.
+- For legacy `/tts/stream`, `_run()` at `server/main.py:1242` can copy context before executor dispatch.
+- For V2V TTS, `_run_synth()` at `server/main.py:2356` can copy context before executor dispatch.
 - If executor context wrapping is too invasive, document executor log context as best-effort.
 - The request id must pass across normal async awaits.
 
 ### 5. Session And Backend Context Flow
 
-- HTTP `/tts` can set backend context after manager acquisition near `app/main.py:855`.
-- HTTP `/tts` legacy path can set backend context near `app/main.py:878`.
-- HTTP `/tts/stream` can set backend context after `backend = await acquire_cm.__aenter__()` at `app/main.py:962`.
-- HTTP `/tts/stream` legacy path can set backend context after `backend = tts_service.get_backend()` at `app/main.py:1176`.
-- HTTP `/asr` can set backend context after manager acquisition at `app/main.py:1550`.
-- HTTP `/asr` legacy path can set backend context near `app/main.py:1560`.
-- WS `/asr/stream` can set backend context after backend selection at `app/main.py:1626`.
-- WS `/v2v/stream` can set backend context after ASR/TTS selection at `app/main.py:1948` and `app/main.py:1987`.
+- HTTP `/tts` can set backend context after manager acquisition near `server/main.py:855`.
+- HTTP `/tts` legacy path can set backend context near `server/main.py:878`.
+- HTTP `/tts/stream` can set backend context after `backend = await acquire_cm.__aenter__()` at `server/main.py:962`.
+- HTTP `/tts/stream` legacy path can set backend context after `backend = tts_service.get_backend()` at `server/main.py:1176`.
+- HTTP `/asr` can set backend context after manager acquisition at `server/main.py:1550`.
+- HTTP `/asr` legacy path can set backend context near `server/main.py:1560`.
+- WS `/asr/stream` can set backend context after backend selection at `server/main.py:1626`.
+- WS `/v2v/stream` can set backend context after ASR/TTS selection at `server/main.py:1948` and `server/main.py:1987`.
 - Session id can be generated at session admission.
-- `/asr/stream` session id can be created after accept at `app/main.py:1608`.
-- `/v2v/stream` session id can be created after accept at `app/main.py:1857`.
-- `/tts/stream` session id can be created when `_session_token` is acquired at `app/main.py:920`.
-- `/tts` non-streaming session id can be created inside `acquire_http` context at `app/main.py:845`.
+- `/asr/stream` session id can be created after accept at `server/main.py:1608`.
+- `/v2v/stream` session id can be created after accept at `server/main.py:1857`.
+- `/tts/stream` session id can be created when `_session_token` is acquired at `server/main.py:920`.
+- `/tts` non-streaming session id can be created inside `acquire_http` context at `server/main.py:845`.
 - Do not change external API payloads to include session id in Week 2.
 - Session id exists for logs only.
 - Backend context can be overwritten inside nested ASR/TTS phases.
@@ -874,7 +874,7 @@ Repository: `seeed-local-voice`.
 
 ### 6. Security Masking
 
-- Reuse the principle from `api_auth.mask_key` at `app/core/api_auth.py:86`.
+- Reuse the principle from `api_auth.mask_key` at `server/core/api_auth.py:86`.
 - Authorization header values must never be logged raw.
 - Masked Authorization should show scheme plus masked token prefix only if useful.
 - Query param `token` must never be logged raw.
@@ -883,8 +883,8 @@ Repository: `seeed-local-voice`.
 - Empty token becomes `token=<missing>`.
 - Multiple token params are all masked.
 - Header maps logged for debugging must pass through `sanitize_headers_for_log`.
-- Existing auth logs already call `mask_key` at `app/core/api_auth.py:128`.
-- Existing WS auth logs already call `mask_key` at `app/core/api_auth.py:193`.
+- Existing auth logs already call `mask_key` at `server/core/api_auth.py:128`.
+- Existing WS auth logs already call `mask_key` at `server/core/api_auth.py:193`.
 - New middleware access logs must not log raw headers.
 - New middleware access logs must not log raw query strings containing token.
 - Request IDs must be validated to avoid log injection.
@@ -918,7 +918,7 @@ Repository: `seeed-local-voice`.
 - JSON formatting app logs only is acceptable if uvicorn logs remain text in dev.
 - Production should prefer JSON for root and uvicorn loggers.
 - Existing Unicode log messages should encode correctly in JSON.
-- Text mode should preserve current format from `app/main.py:31`.
+- Text mode should preserve current format from `server/main.py:31`.
 - Contextvars can leak if tokens are not reset in finally blocks.
 - WS early returns before main try/finally can leak context.
 - Wrap WS handler body with outer try/finally for context cleanup.
@@ -927,10 +927,10 @@ Repository: `seeed-local-voice`.
 - Streaming responses continue after middleware returns; context may reset too early for generator logs.
 - For streaming responses, the generator executes after middleware returns in some ASGI paths.
 - Set context again inside streaming generator where logs and metrics happen.
-- `/tts/stream` generator at `app/main.py:972` should capture context values.
-- Legacy `/tts/stream` generator at `app/main.py:1193` should capture context values.
-- Clone stream generator at `app/main.py:1466` should capture context values.
-- V2V tasks created at `app/main.py:2454` should inherit context at create time.
+- `/tts/stream` generator at `server/main.py:972` should capture context values.
+- Legacy `/tts/stream` generator at `server/main.py:1193` should capture context values.
+- Clone stream generator at `server/main.py:1466` should capture context values.
+- V2V tasks created at `server/main.py:2454` should inherit context at create time.
 - Python task context propagation handles async tasks by default.
 - Executor thread logs need explicit `contextvars.copy_context()`.
 - If JSON formatter fails, logging must not crash request handling.
@@ -1072,9 +1072,9 @@ Repository: `seeed-local-voice`.
 
 ## Implementation Sequencing
 
-- Step 1: implement Prometheus metrics primitives in `app/core/metrics.py`.
+- Step 1: implement Prometheus metrics primitives in `server/core/metrics.py`.
 - Step 2: preserve Week 1 metrics tests and add Prometheus exposition tests.
-- Step 3: add `/metrics` endpoint in `app/main.py`.
+- Step 3: add `/metrics` endpoint in `server/main.py`.
 - Step 4: add optional `/metrics` API key protection with `OVS_METRICS_REQUIRE_KEY`.
 - Step 5: instrument BackendManager state and reload counters.
 - Step 6: instrument request/session metrics at HTTP and WS anchors.

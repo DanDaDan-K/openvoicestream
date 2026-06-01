@@ -15,7 +15,7 @@
 #   final-thick  — FROM base + COPY baked model/engine artifacts (factory /
 #                  offline image; CustomVoice ref talker embeds baked in).
 #   final-slim   — FROM base only; model/engine artifacts are pulled at first
-#                  start from HF/CDN by app/core/model_downloader.py.
+#                  start from HF/CDN by server/core/model_downloader.py.
 # Docker cannot conditionally skip a COPY, so the two variants are separate
 # BuildKit targets selected via --target.
 #
@@ -88,7 +88,7 @@ RUN set -eux; \
     rm -rf /root/.cache /tmp/*
 
 # Application code
-COPY app/      /opt/speech/app/
+COPY server/      /opt/speech/server/
 COPY configs/  /opt/speech/configs/
 COPY voices/   /opt/speech/voices/
 COPY deploy/artifacts/ /opt/speech/deploy/artifacts/
@@ -125,12 +125,12 @@ COPY --chmod=0755 \
     deploy/jetson-workers/MANIFEST.json \
     /opt/jv-workers/
 # Runtime only reads the qwen3 artifact manifest under deploy/ (see
-# app/core/qwen3_artifact_downloader.py). The rest of the engine repo
+# server/core/qwen3_artifact_downloader.py). The rest of the engine repo
 # (engine-overlay/, models/, native/, scripts/, tests/, docs/) is build-time
 # tooling for jetson-voice-engine — excluded to keep the runtime image slim.
 COPY third_party/qwen3-edgellm-jetson/deploy/ /opt/qwen3-edgellm-jetson/deploy/
 
-# Models are downloaded on first start by app/core/model_downloader.py based on
+# Models are downloaded on first start by server/core/model_downloader.py based on
 # LANGUAGE_MODE / OVS_PROFILE. Cached in /opt/models volume.
 RUN set -eux; \
     mkdir -p /opt/models /opt/edgellm /opt/edgellm-bin /opt/models/qwen3-edgellm; \
@@ -172,7 +172,7 @@ WORKDIR /opt/speech
 EXPOSE 8000
 
 ENTRYPOINT ["/opt/speech/entrypoint.jetson.sh"]
-CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "-m", "uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # ===========================================================================
 # Stage: final-thick — base + baked model/engine artifacts (factory/offline)
@@ -195,7 +195,7 @@ COPY deploy/jetson-workers/customvoice-v071/ref_talker_embeds_15row.bin /opt/edg
 # ===========================================================================
 # Stage: final-slim — base only; models/engines pulled at first start from HF/CDN
 # ===========================================================================
-# No model/engine artifacts. On first start, app/core/model_downloader.py
+# No model/engine artifacts. On first start, server/core/model_downloader.py
 # (ensure_models) fetches everything the active profile needs:
 #   - Qwen3 ASR/TTS engines     → _ensure_qwen3_artifacts (qwen3-edgellm script + manifest)
 #   - MOSS TTS engines+codec     → _ensure_moss_artifacts  (deploy/artifacts/moss_manifest.json)

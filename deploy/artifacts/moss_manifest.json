@@ -2,7 +2,7 @@
   "name": "moss-tts-nano",
   "version": "2026-05-23",
   "artifact_set": "orin-nx-moss-tts-nano-2026-05-23",
-  "description": "MOSS-TTS-Nano 0.1B for Jetson Orin (slim-image runtime provision): 5 TTS plans + 1 codec plan + tokenizer + manifests + re-linked C++ worker. Mirrors the HF manifest at models/moss-tts-nano/manifest.json (#48) with an added worker entry. Used by app.core.moss_artifacts to provision /opt/models/moss-tts-nano (engines + codec_onnx) and /opt/jv-workers/moss_tts_nano_worker at runtime when the slim image does not bake them.",
+  "description": "MOSS-TTS-Nano 0.1B for Jetson Orin (slim-image runtime provision): 5 TTS plans + 1 codec plan + tokenizer + manifests + re-linked C++ worker. Mirrors the HF manifest at models/moss-tts-nano/manifest.json (#48) with an added worker entry. Used by server.core.moss_artifacts to provision /opt/models/moss-tts-nano (engines + codec_onnx) and /opt/jv-workers/moss_tts_nano_worker at runtime when the slim image does not bake them.",
   "hf_repo": "harvestsu/seeed-local-voice-artifacts",
   "hf_prefix": "models/moss-tts-nano",
   "revision": "main",

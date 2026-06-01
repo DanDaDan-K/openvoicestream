@@ -84,7 +84,7 @@ RUN set -eux; \
     rm -rf /root/.cache /tmp/*
 
 # Application code
-COPY app/      /opt/speech/app/
+COPY server/      /opt/speech/server/
 COPY configs/  /opt/speech/configs/
 COPY voices/   /opt/speech/voices/
 COPY deploy/artifacts/ /opt/speech/deploy/artifacts/
@@ -116,7 +116,7 @@ COPY --chmod=0755 \
     deploy/jetson-workers/MANIFEST.json \
     /opt/jv-workers/
 # Runtime only reads the qwen3 artifact manifest under deploy/ (see
-# app/core/qwen3_artifact_downloader.py). The rest of the engine repo
+# server/core/qwen3_artifact_downloader.py). The rest of the engine repo
 # (engine-overlay/, models/, native/, scripts/, tests/, docs/) is build-time
 # tooling for jetson-voice-engine — excluded to keep the runtime image slim.
 COPY third_party/qwen3-edgellm-jetson/deploy/ /opt/qwen3-edgellm-jetson/deploy/
@@ -160,7 +160,7 @@ WORKDIR /opt/speech
 EXPOSE 8000
 
 ENTRYPOINT ["/opt/speech/entrypoint.jetson.sh"]
-CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "-m", "uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # ===========================================================================
 # Stage: final-thick — base + baked CustomVoice ref talker embeds (offline)

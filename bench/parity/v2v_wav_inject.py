@@ -20,7 +20,7 @@ means:
 It is deterministic and repeatable: same WAV in -> same asr_final out, same
 injected text -> same TTS. Perfect for #37 before/after diffing.
 
-PROTOCOL (mirrors agent/openvoicestream_agent/slv_client.py)
+PROTOCOL (mirrors agent/ovs_agent/slv_client.py)
 ------------------------------------------------------------
   1. open WS, send {"type":"config", ...} (multi_utterance, vad as configured)
   2. stream WAV PCM chunks (realtime-paced) + trailing silence

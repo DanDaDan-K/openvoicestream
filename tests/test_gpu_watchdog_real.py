@@ -14,7 +14,7 @@ import sys
 
 import pytest
 
-from app.core import gpu_watchdog as gw
+from server.core import gpu_watchdog as gw
 
 
 def setup_function(_func):

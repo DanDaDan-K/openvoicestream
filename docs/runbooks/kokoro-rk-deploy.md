@@ -54,7 +54,7 @@ docker run -d --name openvoicestream-kokoro --restart=unless-stopped \
   -e RK_ARTIFACT_MANIFEST=/opt/speech/deploy/artifacts/rk_manifest.json \
   \
   openvoicestream:rk-kokoro-2026-05-23-rebuilt \
-  python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8621
+  python3 -m uvicorn server.main:app --host 0.0.0.0 --port 8621
 ```
 
 ## 1. Pre-flight

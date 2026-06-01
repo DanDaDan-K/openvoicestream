@@ -18,7 +18,7 @@ ARG BASE=openvoicestream:jetson-v1.11
 FROM ${BASE}
 
 # Only the Python tree is hot — everything else inherited.
-COPY app/      /opt/speech/app/
+COPY server/      /opt/speech/server/
 COPY configs/  /opt/speech/configs/
 
 LABEL org.opencontainers.image.title="OpenVoiceStream (Jetson, patched)"

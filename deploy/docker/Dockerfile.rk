@@ -104,7 +104,7 @@ RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
 
 # ── Application code ──────────────────────────────────────────────────
 
-COPY app/                          /opt/speech/app/
+COPY server/                          /opt/speech/server/
 COPY configs/                      /opt/speech/configs/
 COPY deploy/artifacts/             /opt/speech/deploy/artifacts/
 COPY voices/                       /opt/speech/voices/
@@ -151,7 +151,7 @@ WORKDIR /opt/speech
 ENV PYTHONPATH=/opt/speech
 EXPOSE 8000
 
-CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "-m", "uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # ===========================================================================
 # Stage: final-thick — base + baked Kokoro engines + voice-pack (offline)
@@ -180,8 +180,8 @@ COPY deploy/kokoro-artifacts/voice-pack/style.npy   /opt/kokoro-rknn/style.npy
 # ===========================================================================
 # Stage: final-slim — base only; RK artifacts pulled at first start from HF
 # ===========================================================================
-# No Kokoro engines / voice-pack baked. On first start, app/core/model_downloader
-# (ensure_models, language_mode="rk") calls app/core/rk_artifacts.ensure_rk_artifacts
+# No Kokoro engines / voice-pack baked. On first start, server/core/model_downloader
+# (ensure_models, language_mode="rk") calls server/core/rk_artifacts.ensure_rk_artifacts
 # which reads RK_ARTIFACT_MANIFEST (set in base) + the profile's RK_ARTIFACT_SET
 # and pulls the matching set from HF (deploy/artifacts/rk_manifest.json):
 #   - rk3576-default/multilang  → rk3576-multilang-2026-05-17 (Qwen3 ASR + Matcha TTS)

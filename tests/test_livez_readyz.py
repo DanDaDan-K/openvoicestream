@@ -7,7 +7,7 @@ route handlers, or call the handler functions directly.
 
 import pytest
 
-from app.core import session_limiter, metrics
+from server.core import session_limiter, metrics
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +37,7 @@ def test_livez_always_200():
 def test_readyz_503_when_limiter_unset():
     """Without initialised limiter, /readyz reports session_limiter_unavailable."""
     import importlib
-    from app.core import session_limiter as sl_mod
+    from server.core import session_limiter as sl_mod
     sl_mod._reset_for_tests()
     # Mimic the main.py readyz handler logic
     limiter = sl_mod.get_limiter()
@@ -58,6 +58,6 @@ def test_readyz_503_when_sessions_full():
 
 
 def test_readyz_gpu_watchdog_failed_when_patched(monkeypatch):
-    from app.core import gpu_watchdog
+    from server.core import gpu_watchdog
     monkeypatch.setattr(gpu_watchdog, "is_ok", lambda: False)
     assert gpu_watchdog.is_ok() is False

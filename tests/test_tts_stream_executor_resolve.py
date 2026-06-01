@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from app import main as appmod
+from server import main as appmod
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +38,7 @@ def _reset_executor(monkeypatch):
 
 
 def _patch_tts_service(monkeypatch, is_ready: bool, name: str):
-    from app.core import tts_service as svc
+    from server.core import tts_service as svc
     monkeypatch.setattr(svc, "is_ready", lambda: is_ready)
     monkeypatch.setattr(svc, "backend_name", lambda: name)
 
@@ -101,7 +101,7 @@ def test_executor_falls_back_to_capability_when_no_env(monkeypatch):
     # Force the loaded profile to declare matcha_trt (cap default K=2).
     monkeypatch.delenv("OVS_TTS_STREAM_MAX_WORKERS", raising=False)
     monkeypatch.delenv("OVS_TTS_STREAM_MAX_WORKERS_MATCHA", raising=False)
-    from app.core import profile_loader
+    from server.core import profile_loader
     monkeypatch.setattr(
         profile_loader,
         "current_profile",
@@ -119,7 +119,7 @@ def test_executor_falls_back_to_capability_when_no_env(monkeypatch):
 def test_executor_env_clamped_to_capability(monkeypatch, caplog):
     """Spec §5: env-based override is clamped to the backend ceiling."""
     monkeypatch.setenv("OVS_TTS_STREAM_MAX_WORKERS_MATCHA", "16")
-    from app.core import profile_loader
+    from server.core import profile_loader
     monkeypatch.setattr(
         profile_loader,
         "current_profile",

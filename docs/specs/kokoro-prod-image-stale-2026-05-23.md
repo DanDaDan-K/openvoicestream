@@ -17,7 +17,7 @@ Effective production outage of TTS on radxa.
 ## Root cause
 
 The `kwargs.pop("speaker_id", None)` guard at
-`app/backends/rk/tts.py:137` (commit `6155ebe`, 2026-05-23 10:32 +0800)
+`server/backends/rk/tts.py:137` (commit `6155ebe`, 2026-05-23 10:32 +0800)
 **is not present in the deployed image.**
 
 Build timeline:
@@ -28,7 +28,7 @@ Build timeline:
 | 2026-05-23 10:32 +0800 | Commit `6155ebe` lands the speaker_id pop fix |
 
 Image was built ~5 minutes before the fix commit. The image's
-`/opt/speech/app/backends/rk/tts.py` therefore contains the pre-fix
+`/opt/speech/server/backends/rk/tts.py` therefore contains the pre-fix
 version where `speaker_id` is both extracted via `resolve_speaker_kwargs`
 and re-passed via `**kwargs` to `synthesize_stream(...)`.
 
@@ -39,15 +39,15 @@ container to stock image state during its cleanup, re-exposing the bug.
 
 | Location | MD5 | State |
 |---|---|---|
-| Repo `app/backends/rk/tts.py` (HEAD `6155ebe`) | `4961497d910cac5531ceafe35e4f1713` | Fixed |
-| Image `/opt/speech/app/backends/rk/tts.py` (before patch) | `6ef45a137e1d062341744c72618cd707` | Broken (pre-fix) |
-| Container `/opt/speech/app/backends/rk/tts.py` (after `docker cp`) | `4961497d910cac5531ceafe35e4f1713` | Fixed (matches repo) |
+| Repo `server/backends/rk/tts.py` (HEAD `6155ebe`) | `4961497d910cac5531ceafe35e4f1713` | Fixed |
+| Image `/opt/speech/server/backends/rk/tts.py` (before patch) | `6ef45a137e1d062341744c72618cd707` | Broken (pre-fix) |
+| Container `/opt/speech/server/backends/rk/tts.py` (after `docker cp`) | `4961497d910cac5531ceafe35e4f1713` | Fixed (matches repo) |
 
 ## Hot-patch applied 2026-05-23
 
 ```
-fleet push radxa app/backends/rk/tts.py /tmp/tts.py
-docker cp /tmp/tts.py openvoicestream-kokoro:/opt/speech/app/backends/rk/tts.py
+fleet push radxa server/backends/rk/tts.py /tmp/tts.py
+docker cp /tmp/tts.py openvoicestream-kokoro:/opt/speech/server/backends/rk/tts.py
 docker restart openvoicestream-kokoro
 ```
 
@@ -59,7 +59,7 @@ log shows `Speech service ready.`, no TypeError after restart.
 ## Image-level follow-up
 
 `deploy/docker/Dockerfile.rk:74` already does
-`COPY app/ /opt/speech/app/` — there is **no special overlay needed**.
+`COPY server/ /opt/speech/server/` — there is **no special overlay needed**.
 Any rebuild of `openvoicestream:rk-kokoro-*` from current `HEAD`
 (or any commit ≥ `6155ebe`) will automatically pick up the fix.
 

@@ -24,7 +24,7 @@ if not os.path.isdir("/opt/models/matcha-icefall-zh-en/engines"):
         allow_module_level=True,
     )
 
-sys.path.insert(0, "/opt/speech/app")
+sys.path.insert(0, "/opt/speech/server")
 import numpy as np
 import onnxruntime as ort
 import tensorrt as trt

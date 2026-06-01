@@ -9,13 +9,13 @@ eliminating the heavy `dustynv/onnxruntime` base image dependency.
 
 - Jetson Orin (Nano/NX/AGX) with JetPack 6.x (R36.4.0+), TRT 10.3, CUDA 12.6
 - Docker with `--runtime=nvidia`
-- Model files downloaded by `app/core/model_downloader.py` on first start
+- Model files downloaded by `server/core/model_downloader.py` on first start
 - Python 3.10+ with `onnx`, `onnxruntime`, `numpy` (for ONNX surgery; can run on any machine)
 
 ## Quick Start (Pre-built Engines)
 
 Pre-built engines for Orin Nano (SM 8.7, TRT 10.3, JP 6.2, CUDA 12.6) are
-resolved automatically by `app.core.engine_resolver` from the Hugging Face
+resolved automatically by `server.core.engine_resolver` from the Hugging Face
 artifact repo. For manual placement, copy the encoder FP32 engine and decoder
 TRT engine to the model directory:
 
@@ -177,8 +177,8 @@ Kept (lightweight):
 | `scripts/surgery_matcha_acoustic.py` | Matcha acoustic ONNX surgery |
 | `scripts/build_paraformer_trt.sh` | Build Paraformer TRT engines |
 | `scripts/diag_2x2.py` | 2×2 precision diagnosis |
-| `app/backends/jetson/paraformer_trt.py` | Paraformer TRT backend |
-| `app/backends/jetson/matcha_trt.py` | Matcha TRT + ORT-CPU backend |
+| `server/backends/jetson/paraformer_trt.py` | Paraformer TRT backend |
+| `server/backends/jetson/matcha_trt.py` | Matcha TRT + ORT-CPU backend |
 | `deploy/docker/Dockerfile.jetson` | Slim Docker build |
 | `configs/profiles/jetson-zh-en.json` | zh_en deployment profile |
 | `deploy/artifacts/engines/orin-nano/` | Pre-built TRT engines |

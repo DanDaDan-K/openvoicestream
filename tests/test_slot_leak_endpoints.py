@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.core import session_limiter, metrics
+from server.core import session_limiter, metrics
 
 
 @pytest.fixture(autouse=True)
@@ -94,7 +94,7 @@ def test_tts_stream_lazy_start_failure_releases_slot(monkeypatch, tmp_path):
     must not leak. We patch the lazy-start coroutine to raise, then drive
     the endpoint through TestClient and assert the limiter is empty.
     """
-    # Required env BEFORE importing app.main (startup reads them).
+    # Required env BEFORE importing server.main (startup reads them).
     monkeypatch.setenv("MODEL_DIR", str(tmp_path))
     monkeypatch.setenv("LAZY_TTS", "1")
     monkeypatch.setenv("LANGUAGE_MODE", "disabled")
@@ -105,7 +105,7 @@ def test_tts_stream_lazy_start_failure_releases_slot(monkeypatch, tmp_path):
     session_limiter.init_limiter({})
 
     # Defer-import the app so the fresh limiter init is picked up.
-    from app import main as appmod
+    from server import main as appmod
 
     async def _boom():
         raise RuntimeError("simulated FAILED tts manager")
@@ -149,7 +149,7 @@ def test_tts_stream_cancelled_during_backend_acquire_releases_slot(
 
     session_limiter.init_limiter({})
 
-    from app import main as appmod
+    from server import main as appmod
 
     # Build a fake "manager" whose acquire() context-manager raises
     # CancelledError in __aenter__. The slot is acquired BEFORE this
@@ -171,7 +171,7 @@ def test_tts_stream_cancelled_during_backend_acquire_releases_slot(
     monkeypatch.setattr(appmod, "_ensure_tts_manager_started", _ensure_ok)
 
     # Capability gate must pass so we reach the acquire path.
-    from app.core import tts_service as _svc
+    from server.core import tts_service as _svc
     monkeypatch.setattr(_svc, "has_capability", lambda _c: True)
 
     sl = session_limiter.get_limiter()
@@ -206,7 +206,7 @@ def test_tts_clone_stream_cancelled_during_backend_acquire_releases_slot(
 
     session_limiter.init_limiter({})
 
-    from app import main as appmod
+    from server import main as appmod
 
     class _CMRaisesCancelled:
         async def __aenter__(self):
@@ -224,7 +224,7 @@ def test_tts_clone_stream_cancelled_during_backend_acquire_releases_slot(
 
     monkeypatch.setattr(appmod, "_ensure_tts_manager_started", _ensure_ok)
 
-    from app.core import tts_service as _svc
+    from server.core import tts_service as _svc
     monkeypatch.setattr(_svc, "has_capability", lambda _c: True)
 
     sl = session_limiter.get_limiter()
@@ -279,12 +279,12 @@ def test_v2v_stream_cancelled_during_setup_releases_slot(
     # V2V handler calls get_coordinator() before any try/except, so the
     # coordinator must be initialised or it raises RuntimeError before
     # the slot is ever acquired (making the test trivially pass).
-    from app.core import coordinator as _coord_mod
+    from server.core import coordinator as _coord_mod
     _coord_mod.init_coordinator({})
 
-    from app import main as appmod
-    from app.core import api_auth as _api_auth
-    from app.core import session_limiter as _sl_mod
+    from server import main as appmod
+    from server.core import api_auth as _api_auth
+    from server.core import session_limiter as _sl_mod
 
     # Track _v2v_release_early invocation. We can't observe the local
     # function directly, but we *can* observe its observable side
@@ -368,7 +368,7 @@ def test_cleanup_exception_does_not_skip_slot_release(monkeypatch, tmp_path):
 
     session_limiter.init_limiter({})
 
-    from app import main as appmod
+    from server import main as appmod
 
     class _FakeBackend:
         sample_rate = 16000
@@ -390,7 +390,7 @@ def test_cleanup_exception_does_not_skip_slot_release(monkeypatch, tmp_path):
 
     monkeypatch.setattr(appmod, "_ensure_tts_manager_started", _ensure_ok)
 
-    from app.core import tts_service as _svc
+    from server.core import tts_service as _svc
     monkeypatch.setattr(_svc, "has_capability", lambda _c: True)
 
     # Force the ValueError-cleanup branch in /tts/stream.

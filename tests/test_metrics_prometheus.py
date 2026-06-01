@@ -9,7 +9,7 @@ Asserts:
 
 from __future__ import annotations
 
-from app.core import metrics
+from server.core import metrics
 
 
 def setup_function(_func) -> None:

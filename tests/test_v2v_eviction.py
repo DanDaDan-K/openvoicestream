@@ -1,4 +1,4 @@
-"""Unit tests for /v2v admission-time eviction (app.main).
+"""Unit tests for /v2v admission-time eviction (server.main).
 
 Covers the limit==1 single-client eviction path that reclaims a slot leaked
 by a zombie holder (app-layer reader dead but WS protocol layer still alive).
@@ -8,8 +8,8 @@ import asyncio
 
 import pytest
 
-from app.core import session_limiter, metrics
-import app.main as main
+from server.core import session_limiter, metrics
+import server.main as main
 
 
 @pytest.fixture(autouse=True)

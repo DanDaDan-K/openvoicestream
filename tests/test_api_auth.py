@@ -1,9 +1,9 @@
-"""Unit tests for app.core.api_auth."""
+"""Unit tests for server.core.api_auth."""
 
 import os
 import pytest
 
-from app.core import api_auth, metrics
+from server.core import api_auth, metrics
 
 
 @pytest.fixture(autouse=True)
@@ -168,7 +168,7 @@ def test_hot_update_changes_check(monkeypatch):
 
 def _build_app():
     from fastapi import FastAPI, Depends, Request
-    from app.core.api_auth import check_http
+    from server.core.api_auth import check_http
     app = FastAPI()
 
     @app.get("/protected")

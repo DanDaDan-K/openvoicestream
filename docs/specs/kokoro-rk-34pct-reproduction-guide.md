@@ -142,7 +142,7 @@ mostly *not running 5.25 s of vocoder for a 0.9 s utterance*.
 
 **Status as of 2026-05-23 rebuild:** image
 `openvoicestream:rk-kokoro-2026-05-23-rebuilt` is **self-contained** — it
-bakes in the fixed `app/backends/rk/tts.py` (speaker-id pop, commit
+bakes in the fixed `server/backends/rk/tts.py` (speaker-id pop, commit
 `6155ebe`), the current submodule `kokoro_rknn.py` (4-stage + 3-bucket +
 misaki wire, submodule `65b9a13`), the misaki ZH G2P stack, and all 14
 active bucket-{8,16,32} artifacts. No host bind-mounts of model files or
@@ -150,12 +150,12 @@ active bucket-{8,16,32} artifacts. No host bind-mounts of model files or
 
 The original (pre-rebuild) production container `openvoicestream-kokoro`
 ran image `openvoicestream:rk-kokoro-2026-05-23` with the *broken*
-`app/backends/rk/tts.py` (missing speaker-id kwarg pop) and the
+`server/backends/rk/tts.py` (missing speaker-id kwarg pop) and the
 *3-stage* `kokoro_rknn.py`. Both were overridden by host bind-mounts
 (retained here as the rollback recipe / archaeological record):
 
 ```
-/tmp/fixed-tts.py                         → /opt/speech/app/backends/rk/tts.py            (ro)
+/tmp/fixed-tts.py                         → /opt/speech/server/backends/rk/tts.py            (ro)
 /tmp/fixed-kokoro_rknn.py                 → /opt/speech/third_party/rkvoice-stream/.../
                                             kokoro_rknn.py                                (ro)
 /home/radxa/models/tts/kokoro-bucket-32   → /opt/kokoro-rknn                              (ro)
@@ -215,7 +215,7 @@ Fetch via the existing `model_downloader` (driven by
 
 ```bash
 fleet exec radxa -- "docker exec openvoicestream-kokoro \
-    python -m app.model_downloader --artifact-set rk3588-kokoro-hybrid-34pct-2026-05-23"
+    python -m server.model_downloader --artifact-set rk3588-kokoro-hybrid-34pct-2026-05-23"
 ```
 
 Or wget directly:
@@ -339,7 +339,7 @@ docker rm -f openvoicestream-kokoro 2>/dev/null
 
 docker run -d --name openvoicestream-kokoro --restart=unless-stopped \
   --network host \
-  -v /tmp/fixed-tts.py:/opt/speech/app/backends/rk/tts.py:ro \
+  -v /tmp/fixed-tts.py:/opt/speech/server/backends/rk/tts.py:ro \
   -v /tmp/fixed-kokoro_rknn.py:/opt/speech/third_party/rkvoice-stream/rkvoice_stream/backends/tts/kokoro_rknn.py:ro \
   -v /home/radxa/models/tts/kokoro-bucket-32:/opt/kokoro-rknn:ro \
   -v /home/radxa/models/tts/kokoro-bucket-8:/opt/kokoro-bucket-8:ro \
@@ -398,7 +398,7 @@ Notes:
   fleet push <new-host>  \
     third_party/rkvoice-stream/rkvoice_stream/backends/tts/kokoro_rknn.py \
     /tmp/fixed-kokoro_rknn.py
-  fleet push <new-host>  app/backends/rk/tts.py  /tmp/fixed-tts.py
+  fleet push <new-host>  server/backends/rk/tts.py  /tmp/fixed-tts.py
   ```
 
 - After image rebuild (§6), drop the two `/tmp/fixed-*.py` bind-mounts.
@@ -551,7 +551,7 @@ the source specs in §10.
 `+tokens.txt` rebuild) was produced natively on the radxa
 (`/home/radxa/build-kokoro-rebuild/`) and now bakes in:
 
-- Updated `app/backends/rk/tts.py` (speaker-id pop, md5
+- Updated `server/backends/rk/tts.py` (speaker-id pop, md5
   `4961497d910cac5531ceafe35e4f1713`)
 - Updated submodule `kokoro_rknn.py` at HEAD `65b9a13` (4-stage +
   bucket-8 + bucket-16 + misaki wire, md5 `0dbb03149b1ee2b587abd2f0b4cf821b`)
@@ -570,7 +570,7 @@ on the radxa host as the rollback target (image id `312c874ab7ff`).
 
 The original deferred work (preserved here for archaeology / rollback):
 
-1. **Bake fixed `app/backends/rk/tts.py`** (md5
+1. **Bake fixed `server/backends/rk/tts.py`** (md5
    `4961497d910cac5531ceafe35e4f1713`, includes speaker-id kwarg pop). The
    source is in main repo since commit `c7302f9`. Drop the
    `/tmp/fixed-tts.py` bind-mount.
@@ -630,7 +630,7 @@ Verification (post-rebuild):
 ```bash
 # 1. md5 of in-image files (no overlay)
 fleet exec radxa -- "docker exec openvoicestream-kokoro md5sum \
-    /opt/speech/app/backends/rk/tts.py \
+    /opt/speech/server/backends/rk/tts.py \
     /opt/speech/third_party/rkvoice-stream/rkvoice_stream/backends/tts/kokoro_rknn.py"
 # Expected: 4961497d910cac5531ceafe35e4f1713 / ccc43371ee16465899f57e1ee4ed5a5f
 
@@ -670,7 +670,7 @@ the others.
 | bucket-8 router | drop the four `KOKORO_RKNN_BUCKET8_*` env vars + bucket-8 bind-mount, recreate container | bucket-32 4-stage only |
 | 4-stage bucket-32 → 3-stage | drop `KOKORO_RKNN_VOCODER_FRONT_PATH` + `KOKORO_RKNN_TAIL_REST_PATH` env vars, recreate container | shipped 17 % decoder-front INT8 only |
 
-All rollbacks preserve `app/backends/rk/tts.py` integrity (md5
+All rollbacks preserve `server/backends/rk/tts.py` integrity (md5
 `4961497d910cac5531ceafe35e4f1713`) — that fix is independent.
 
 ---
@@ -679,7 +679,7 @@ All rollbacks preserve `app/backends/rk/tts.py` integrity (md5
 
 | File | Purpose |
 | --- | --- |
-| `app/backends/rk/tts.py` | RK TTS wrapper (speaker-id kwarg fix lives here) |
+| `server/backends/rk/tts.py` | RK TTS wrapper (speaker-id kwarg fix lives here) |
 | `third_party/rkvoice-stream/rkvoice_stream/backends/tts/kokoro_rknn.py` | 4-stage runtime + 3-bucket router + misaki wire (submodule) |
 | `configs/profiles/rk3588-kokoro-rknn.json` | Default profile (now points at 34 % 4-stage env per `c7302f9`) |
 | `configs/profiles/rk3588-kokoro-rknn-34pct.json` | Explicit 34 % profile (additive; was the M4 opt-in) |

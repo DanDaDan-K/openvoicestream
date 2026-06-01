@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-from app.core import logging_config as lc
+from server.core import logging_config as lc
 
 
 @pytest.fixture(autouse=True)

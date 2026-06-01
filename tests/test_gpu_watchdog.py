@@ -1,6 +1,6 @@
-"""Unit tests for app.core.gpu_watchdog (Week 1 stub)."""
+"""Unit tests for server.core.gpu_watchdog (Week 1 stub)."""
 
-from app.core import gpu_watchdog
+from server.core import gpu_watchdog
 
 
 def test_is_ok_returns_true():

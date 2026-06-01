@@ -73,7 +73,7 @@ that builds on this work.
 ## 3. Current architecture (read these before designing)
 
 ### 3.1 Python side
-`app/backends/jetson/trt_edge_llm_tts.py`:
+`server/backends/jetson/trt_edge_llm_tts.py`:
 - `_WorkerIO.request(payload)` (line ~519) — generator that writes one
   JSON per call to worker stdin, then yields stdout events demuxed by
   `request_id`. Cleanup on exit (the `finally` block at ~554) pops the
@@ -83,7 +83,7 @@ that builds on this work.
   caller (the executor's `_run` callable) abandons the generator, the
   `finally` runs but doesn't notify the worker to stop.
 
-`app/main.py`:
+`server/main.py`:
 - `@app.post("/tts/stream")` (line ~741) — the SSE-style endpoint.
 - The async `stream()` generator (line ~785) submits `_run` to
   `_get_tts_stream_executor()` (currently max_workers=1) and awaits
@@ -209,7 +209,7 @@ worst-case cancel latency = one chunk-emit duration (~30–100 ms).
 
 ### 4.3 Python side — `_WorkerIO.cancel(req_id)`
 
-`app/backends/jetson/trt_edge_llm_tts.py`:
+`server/backends/jetson/trt_edge_llm_tts.py`:
 
 ```python
 def cancel(self, req_id: str) -> None:
@@ -237,10 +237,10 @@ def cancel(self, req_id: str) -> None:
 
 ### 4.4 Python side — `_generate_streaming_single` cleanup
 
-In `app/backends/jetson/trt_edge_llm_tts.py` around line 1149:
+In `server/backends/jetson/trt_edge_llm_tts.py` around line 1149:
 
 The streaming generator currently iterates `worker_io.request(req)`.
-If the consumer (the executor's `_run` callable in `app/main.py`)
+If the consumer (the executor's `_run` callable in `server/main.py`)
 breaks out of the for loop early, Python's generator-cleanup invokes
 `__del__` / `.close()` → `GeneratorExit` is raised at the next `yield`
 point.
@@ -255,9 +255,9 @@ worker."
 Mirror the LLM SSE fix at `tensorrt-edge-llm/experimental/server/api_server.py:_generate_stream_sse`.
 
 **First (codex round-1 must-fix)**: add `Request` import and parameter:
-- `app/main.py:10` — add `from fastapi import Request` (Request is
+- `server/main.py:10` — add `from fastapi import Request` (Request is
   NOT currently imported in this module)
-- `app/main.py:751` — change `async def tts_stream(req: TTSRequest):`
+- `server/main.py:751` — change `async def tts_stream(req: TTSRequest):`
   to `async def tts_stream(req: TTSRequest, request: Request):`. The
   parameter must be named `request` AND must NOT be shadowed inside
   the function body (this was the bug codex round-3 caught in the
@@ -266,7 +266,7 @@ Mirror the LLM SSE fix at `tensorrt-edge-llm/experimental/server/api_server.py:_
   watcher).
 
 The endpoint has TWO code paths (manager-acquired backend and legacy
-direct-backend at `app/main.py:822-870`). BOTH must get the disconnect
+direct-backend at `server/main.py:822-870`). BOTH must get the disconnect
 watcher — they have nearly-identical executor+queue patterns and
 share the same disconnect-poisoning risk.
 
@@ -337,7 +337,7 @@ Three additional targeted gates:
   before its first chunk emit. Next request after this must still
   produce baseline audio.
 - **Cancel after SR header but before backend iteration starts**:
-  `app/main.py:797` yields the SR header BEFORE the backend's
+  `server/main.py:797` yields the SR header BEFORE the backend's
   generator starts. The disconnect watcher must fire even if the
   client breaks at this exact moment.
 - **Cancel racing the final chunk**: client breaks just as the worker
@@ -346,7 +346,7 @@ Three additional targeted gates:
   silently drop the other.
 
 ### 5.7 Worker-protocol unit test
-Add a unit test in `app/tests/` that asserts:
+Add a unit test in `server/tests/` that asserts:
 - `_WorkerIO.request()` treats `"cancelled"` as terminal non-error
   (no raise)
 - `_generate_streaming_single` returns cleanly on a `"cancelled"`
