@@ -465,6 +465,9 @@ class V2VStreamASRResult:
     endpoint_latency_ms: float = 0.0           # EOS → asr_endpoint (VAD front-end)
     asr_finalize_ms: float = 0.0               # asr_endpoint → asr_final (ASR compute)
     total_latency_ms: float = 0.0              # EOS → asr_final (sum of above)
+    partial_before_client_eos: bool = False
+    endpoint_before_client_eos: bool = False
+    final_before_client_eos: bool = False
     error: str | None = None
 
     @property
@@ -481,6 +484,10 @@ def run_v2v_stream_asr(
     vad_silence_ms: int = 400,
     realtime: bool = True,
     timeout: int = 120,
+    eos_mode: str = "client",
+    asr_endpoint_min_speech_s: float | None = None,
+    asr_endpoint_min_audio_s: float | None = None,
+    vad_tail_max_ms: int | None = None,
 ) -> V2VStreamASRResult:
     """Drive /v2v/stream in ASR-only mode and measure split timings.
 
@@ -496,66 +503,129 @@ def run_v2v_stream_asr(
     dur = wav_duration_s(wav_bytes)
     chunk_dur = chunk_ms / 1000.0
 
-    ws = websocket.create_connection(
-        f"{ws_url}/v2v/stream", timeout=timeout,
-    )
+    assert eos_mode in ("client", "vad")
+
+    def _open_ws(retries: int = 25, backoff_s: float = 0.6):
+        last_exc: Exception | None = None
+        for _ in range(retries):
+            sock = websocket.create_connection(
+                f"{ws_url}/v2v/stream", timeout=timeout,
+            )
+            sock.settimeout(0.3)
+            try:
+                msg = sock.recv()
+            except websocket.WebSocketTimeoutException:
+                sock.settimeout(timeout)
+                return sock
+            except (websocket.WebSocketConnectionClosedException, OSError) as exc:
+                last_exc = exc
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                time.sleep(backoff_s)
+                continue
+            if not msg:
+                last_exc = RuntimeError("session_limiter rejected WS")
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                time.sleep(backoff_s)
+                continue
+            sock.settimeout(timeout)
+            return sock
+        raise RuntimeError(f"could not acquire /v2v/stream session: {last_exc}")
+
+    ws = _open_ws()
     # Stage 1: config frame
     config = {
         "type": "config",
         "asr_language": language,
-        "vad": vad_backend,
+        "vad": vad_backend if eos_mode == "vad" else "none",
         "vad_silence_ms": vad_silence_ms,
         "sample_rate": sr,
     }
+    if asr_endpoint_min_speech_s is not None:
+        config["asr_endpoint_min_speech_s"] = asr_endpoint_min_speech_s
+    if asr_endpoint_min_audio_s is not None:
+        config["asr_endpoint_min_audio_s"] = asr_endpoint_min_audio_s
     ws.send(json.dumps(config))
 
     t_first_send = time.monotonic()
     t_first_partial: float | None = None
+    t_endpoint: float | None = None
+    t_final: float | None = None
+    final_text = ""
+    partial_before_client_eos = False
+    endpoint_before_client_eos = False
+    final_before_client_eos = False
+    done = False
+
+    def _consume_available(*, before_client_eos: bool) -> bool:
+        nonlocal t_first_partial, t_endpoint, t_final, final_text
+        nonlocal partial_before_client_eos, endpoint_before_client_eos
+        nonlocal final_before_client_eos, done
+        try:
+            msg = ws.recv()
+        except websocket.WebSocketTimeoutException:
+            return False
+        if not msg:
+            return False
+        data = json.loads(msg)
+        text_str = _coerce_text(data.get("text", ""))
+        if data.get("type") == "asr_partial" and text_str:
+            if t_first_partial is None:
+                t_first_partial = time.monotonic()
+            if before_client_eos:
+                partial_before_client_eos = True
+        elif data.get("type") == "asr_endpoint":
+            t_endpoint = time.monotonic()
+            if before_client_eos:
+                endpoint_before_client_eos = True
+        elif data.get("type") == "asr_final":
+            t_final = time.monotonic()
+            final_text = text_str
+            if before_client_eos:
+                final_before_client_eos = True
+            done = True
+        return True
+
+    def _drain_available(*, before_client_eos: bool) -> None:
+        while not done:
+            if not _consume_available(before_client_eos=before_client_eos):
+                break
 
     # Stage 2: pump audio chunks
     ws.settimeout(0.001)
     for c in chunks:
         ws.send_binary(c)
-        if t_first_partial is None:
-            try:
-                msg = ws.recv()
-                data = json.loads(msg)
-                if data.get("type") == "asr_partial" and data.get("text"):
-                    t_first_partial = time.monotonic()
-            except websocket.WebSocketTimeoutException:
-                pass
+        _drain_available(before_client_eos=True)
+        if done:
+            break
         if realtime:
             time.sleep(chunk_dur)
 
     t_eos = time.monotonic()
+    if eos_mode == "client" and not done:
+        ws.send(json.dumps({"type": "asr_eos"}))
 
     # Stage 3: trailing silence for VAD
     silence_ms = max(vad_silence_ms + chunk_ms, chunk_ms)
+    if vad_tail_max_ms is not None:
+        silence_ms = min(silence_ms, max(chunk_ms, vad_tail_max_ms))
     silence_chunks = int(np.ceil(silence_ms / chunk_ms))
     frames_per_chunk = int(sr * chunk_ms / 1000)
     silence = np.zeros(frames_per_chunk, dtype=np.int16).tobytes()
 
-    t_endpoint: float | None = None
-    t_final: float | None = None
-    final_text = ""
-    done = False
-
-    for _ in range(silence_chunks):
-        ws.send_binary(silence)
-        try:
-            msg = ws.recv()
-            data = json.loads(msg)
-            if data.get("type") == "asr_endpoint":
-                t_endpoint = time.monotonic()
-            elif data.get("type") == "asr_final":
-                t_final = time.monotonic()
-                final_text = _coerce_text(data.get("text", ""))
-                done = True
+    if eos_mode == "vad" and not done:
+        for _ in range(silence_chunks):
+            ws.send_binary(silence)
+            _drain_available(before_client_eos=False)
+            if done:
                 break
-        except websocket.WebSocketTimeoutException:
-            pass
-        if realtime:
-            time.sleep(chunk_dur)
+            if realtime:
+                time.sleep(chunk_dur)
 
     # Stage 4: drain remaining messages
     ws.settimeout(timeout)
@@ -580,23 +650,33 @@ def run_v2v_stream_asr(
                 error="server closed without asr_final",
             )
         data = json.loads(raw)
+        text_str = _coerce_text(data.get("text", ""))
         if data.get("type") == "asr_endpoint":
             t_endpoint = time.monotonic()
         elif data.get("type") == "asr_final":
             t_final = time.monotonic()
-            final_text = _coerce_text(data.get("text", ""))
+            final_text = text_str
             done = True
             break
 
     ws.close()
 
-    endpoint_latency = (t_endpoint - t_eos) * 1000 if t_endpoint else 0.0
-    asr_finalize = (t_final - t_endpoint) * 1000 if (t_final and t_endpoint) else 0.0
+    if final_before_client_eos:
+        endpoint_latency = 0.0
+        asr_finalize = 0.0
+        total_latency = 0.0
+    else:
+        endpoint_latency = max(0.0, (t_endpoint - t_eos) * 1000) if t_endpoint else 0.0
+        asr_finalize = max(0.0, (t_final - t_endpoint) * 1000) if (t_final and t_endpoint) else 0.0
+        total_latency = max(0.0, (t_final - t_eos) * 1000) if t_final else 0.0
     return V2VStreamASRResult(
         text=final_text,
         audio_dur_s=dur,
         tfd_ms=((t_first_partial - t_first_send) * 1000) if t_first_partial else None,
         endpoint_latency_ms=endpoint_latency,
         asr_finalize_ms=asr_finalize,
-        total_latency_ms=(t_final - t_eos) * 1000 if t_final else 0.0,
+        total_latency_ms=total_latency,
+        partial_before_client_eos=partial_before_client_eos,
+        endpoint_before_client_eos=endpoint_before_client_eos,
+        final_before_client_eos=final_before_client_eos,
     )

@@ -73,6 +73,8 @@ def cmd_asr(args):
                        mode=args.mode, eos_mode=args.eos)
     summary = summarize(rows, group_by=("category", "lang"),
                         metrics=("rtf", "finalize_rtf", "tfd_ms", "error_rate",
+                                 "strict_error_rate", "coverage_rate",
+                                 "short_output_rate",
                                  "eos_to_final_ms", "vad_silence_ms",
                                  "asr_finalize_compute_ms", "processing_ms"))
     meta = {**_common_meta(args, "asr"), "mode": args.mode, "eos": args.eos,
@@ -137,12 +139,22 @@ def cmd_v2v_stream(args):
             args.base_url, corpus, warmup=args.warmup, runs=args.runs,
             chunk_ms=args.chunk_ms, vad_backend=args.vad_backend,
             vad_silence_ms=args.vad_silence_ms, realtime=args.realtime,
+            eos_mode=args.eos,
+            asr_endpoint_min_speech_s=args.asr_endpoint_min_speech_s,
+            asr_endpoint_min_audio_s=args.asr_endpoint_min_audio_s,
+            vad_tail_max_ms=args.vad_tail_max_ms,
         )
     summary = summarize(rows, group_by=("category", "lang"),
                         metrics=("endpoint_latency_ms", "asr_finalize_ms",
-                                 "total_latency_ms", "tfd_ms"))
-    meta = {**_common_meta(args, "v2v-stream"), "vad_backend": args.vad_backend,
-            "vad_silence_ms": args.vad_silence_ms}
+                                 "total_latency_ms", "tfd_ms", "error_rate",
+                                 "strict_error_rate", "coverage_rate",
+                                 "short_output_rate", "tail_truncation_rate"))
+    meta = {**_common_meta(args, "v2v-stream"), "eos": args.eos,
+            "vad_backend": args.vad_backend,
+            "vad_silence_ms": args.vad_silence_ms,
+            "asr_endpoint_min_speech_s": args.asr_endpoint_min_speech_s,
+            "asr_endpoint_min_audio_s": args.asr_endpoint_min_audio_s,
+            "vad_tail_max_ms": args.vad_tail_max_ms}
     jp, mp = save_results(RESULTS_DIR, _scenario_tag(args, "v2v_stream"),
                           rows, summary, mem.summary(), meta)
     print(f"\nSaved: {jp}\n       {mp}")
@@ -186,7 +198,7 @@ def cmd_noise(args):
                              warmup=args.warmup, runs=args.runs)
         all_rows.extend(rows)
     summary = summarize(all_rows, group_by=("snr_db", "category", "lang"),
-                        metrics=("rtf", "error_rate", "tfd_ms"))
+                        metrics=("rtf", "error_rate", "strict_error_rate", "tfd_ms"))
     meta = {**_common_meta(args, "noise"),
             "noise_type": args.noise_type, "snr_list": args.snr}
     jp, mp = save_results(RESULTS_DIR, _scenario_tag(args, f"noise_{args.noise_type}"),
@@ -392,8 +404,12 @@ def main():
 
     sp_v2v_stream = sub.add_parser("v2v-stream"); add_common(sp_v2v_stream)
     sp_v2v_stream.add_argument("--chunk-ms", type=int, default=250)
+    sp_v2v_stream.add_argument("--eos", choices=["client", "vad"], default="client")
     sp_v2v_stream.add_argument("--vad-backend", choices=["silero", "webrtcvad"], default="silero")
     sp_v2v_stream.add_argument("--vad-silence-ms", type=int, default=400)
+    sp_v2v_stream.add_argument("--asr-endpoint-min-speech-s", type=float, default=None)
+    sp_v2v_stream.add_argument("--asr-endpoint-min-audio-s", type=float, default=None)
+    sp_v2v_stream.add_argument("--vad-tail-max-ms", type=int, default=None)
     sp_v2v_stream.add_argument("--realtime", action="store_true", default=True)
     sp_v2v_stream.add_argument("--no-realtime", dest="realtime", action="store_false")
     sp_v2v_stream.set_defaults(func=cmd_v2v_stream)

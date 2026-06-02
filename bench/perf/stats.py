@@ -6,8 +6,10 @@ grouped by (lang, category) where applicable.
 from __future__ import annotations
 from datetime import datetime
 import json
+import os
 import statistics as st
 import time
+import uuid
 from pathlib import Path
 
 
@@ -28,8 +30,12 @@ METRIC_LABELS = {
     "tts_total_ms": "TTS total (ms)",
     "wall_ms": "Wall (ms)",
     "error_rate": "CER/WER",
+    "strict_error_rate": "Strict CER/WER",
     "wer": "WER",
     "cer": "CER",
+    "coverage_rate": "Coverage",
+    "short_output_rate": "Short output",
+    "tail_truncation_rate": "Tail truncation",
     "similarity": "Speaker sim",
 }
 
@@ -83,6 +89,9 @@ def render_markdown(scenario: str, summary: dict, raw: list[dict],
         lines.append(f"- {k}: `{v}`")
     if memory:
         lines.append(f"- Memory peak: **{memory.get('peak_mib', 'n/a')} MiB** (mean {memory.get('mean_mib', 'n/a')}, n={memory.get('samples', 0)})")
+    errors = [r for r in raw if "error" in r]
+    if errors:
+        lines.append(f"- Errors: **{len(errors)}**")
     lines.append("")
 
     for group, stats in summary.items():
@@ -91,7 +100,10 @@ def render_markdown(scenario: str, summary: dict, raw: list[dict],
         lines.append("")
         lines.append("| Metric | Mean | P50 | P95 | Min | Max | N |")
         lines.append("|--------|-----:|----:|----:|----:|----:|--:|")
-        for metric_key in ["rtf", "finalize_rtf", "tfd_ms", "error_rate", "similarity",
+        for metric_key in ["rtf", "finalize_rtf", "tfd_ms", "error_rate",
+                           "strict_error_rate", "coverage_rate",
+                           "short_output_rate", "tail_truncation_rate",
+                           "similarity",
                            "eos_to_final_ms", "eos_to_first_audio_ms",
                            "vad_silence_ms", "asr_finalize_compute_ms",
                            "endpoint_latency_ms", "asr_finalize_ms",
@@ -103,7 +115,9 @@ def render_markdown(scenario: str, summary: dict, raw: list[dict],
             label = METRIC_LABELS.get(metric_key, metric_key)
             if metric_key in ("rtf", "finalize_rtf", "similarity"):
                 fmt = lambda v: f"{v:.3f}"
-            elif metric_key == "error_rate":
+            elif metric_key in ("error_rate", "strict_error_rate",
+                                "coverage_rate", "short_output_rate",
+                                "tail_truncation_rate"):
                 fmt = lambda v: f"{v*100:.2f}%"
             else:
                 fmt = lambda v: f"{v:.0f}"
@@ -119,8 +133,15 @@ def render_markdown(scenario: str, summary: dict, raw: list[dict],
         keys = sorted({k for r in steady for k in r.keys()}
                       - {"audio_bytes", "label"})
         header_keys = [k for k in ["id", "lang", "category", "rtf", "tfd_ms",
-                                   "eos_to_first_audio_ms", "asr_finalize_ms",
-                                   "tts_tfd_ms", "text", "asr_text"] if k in keys]
+                                   "endpoint_latency_ms", "asr_finalize_ms",
+                                   "total_latency_ms", "partial_before_client_eos",
+                                   "endpoint_before_client_eos",
+                                   "final_before_client_eos",
+                                   "error_rate", "strict_error_rate",
+                                   "coverage_rate", "short_output_rate",
+                                   "tail_truncated", "tail_missing_units",
+                                   "eos_to_first_audio_ms", "tts_tfd_ms",
+                                   "text", "asr_text"] if k in keys]
         if not header_keys:
             header_keys = list(keys)[:6]
         lines.append("| " + " | ".join(header_keys) + " |")
@@ -130,18 +151,38 @@ def render_markdown(scenario: str, summary: dict, raw: list[dict],
             for k in header_keys:
                 v = r.get(k, "")
                 if isinstance(v, float):
-                    v = f"{v:.3f}" if k == "rtf" else f"{v:.0f}"
+                    if k in ("error_rate", "strict_error_rate",
+                             "coverage_rate", "short_output_rate",
+                             "tail_truncation_rate"):
+                        v = f"{v * 100:.1f}%"
+                    else:
+                        v = f"{v:.3f}" if k == "rtf" else f"{v:.0f}"
                 if isinstance(v, str):
                     v = v.replace("|", "/")[:30]
                 row.append(str(v))
             lines.append("| " + " | ".join(row) + " |")
+    if errors:
+        lines.append("")
+        lines.append("## Errors (first 20)")
+        lines.append("")
+        lines.append("| id | lang | category | error |")
+        lines.append("| --- | --- | --- | --- |")
+        for r in errors[:20]:
+            err = str(r.get("error", "")).replace("|", "/")[:120]
+            lines.append(
+                f"| {r.get('id', '')} | {r.get('lang', '')} | "
+                f"{r.get('category', '')} | {err} |"
+            )
     return "\n".join(lines) + "\n"
 
 
 def save_results(out_dir: Path, scenario: str, raw: list[dict],
     summary: dict, memory: dict | None, meta: dict) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    stamp = (
+        datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        + f"-p{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    )
     base = out_dir / f"{scenario}_{stamp}"
     json_path = base.with_suffix(".json")
     md_path = base.with_suffix(".md")

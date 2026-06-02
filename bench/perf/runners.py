@@ -90,6 +90,57 @@ def compute_error_rate(reference: str, hypothesis: str, lang: str) -> float:
     return jiwer.wer(ref, hyp)
 
 
+def metric_transcript(entry: dict) -> str:
+    return entry.get("eval_transcript") or entry.get("transcript", "")
+
+
+def strict_transcript(entry: dict) -> str:
+    return entry.get("transcript", "")
+
+
+def detect_tail_truncation(
+    reference: str,
+    hypothesis: str,
+    lang: str,
+    *,
+    min_missing_units: int = 4,
+    min_hyp_units: int = 4,
+) -> tuple[bool, int]:
+    ref = _normalize_for_match(reference or "", lang)
+    hyp = _normalize_for_match(hypothesis or "", lang)
+    if not ref or not hyp:
+        return False, 0
+    ref_units = list(ref.replace(" ", "")) if lang == "zh" else ref.split()
+    hyp_units = list(hyp.replace(" ", "")) if lang == "zh" else hyp.split()
+    if len(hyp_units) < min_hyp_units or len(hyp_units) >= len(ref_units):
+        return False, 0
+    if ref_units[:len(hyp_units)] != hyp_units:
+        return False, 0
+    missing = len(ref_units) - len(hyp_units)
+    return missing >= min_missing_units, missing
+
+
+def compute_coverage_rate(reference: str, hypothesis: str, lang: str) -> float:
+    ref = _normalize_for_match(reference or "", lang)
+    hyp = _normalize_for_match(hypothesis or "", lang)
+    if not ref or not hyp:
+        return 0.0
+    ref_units = list(ref.replace(" ", "")) if lang == "zh" else ref.split()
+    hyp_units = list(hyp.replace(" ", "")) if lang == "zh" else hyp.split()
+    if not ref_units:
+        return 0.0
+    prev = [0] * (len(hyp_units) + 1)
+    for ref_unit in ref_units:
+        cur = [0]
+        for j, hyp_unit in enumerate(hyp_units, start=1):
+            if ref_unit == hyp_unit:
+                cur.append(prev[j - 1] + 1)
+            else:
+                cur.append(max(prev[j], cur[-1]))
+        prev = cur
+    return prev[-1] / len(ref_units)
+
+
 # ---------------------------------------------------------------------------
 # Corpus / prompt loaders
 # ---------------------------------------------------------------------------
@@ -174,7 +225,8 @@ def run_asr(asr: ASRClient, corpus: list[dict],
             print(f"  [{label:6s} {k+1:02d}] {entry['id']:14s}  ERROR: {type(e).__name__}: {str(e)[:120]}")
             records.append({"label": label, "id": entry["id"], "error": f"{type(e).__name__}: {e}"})
             continue
-        err_rate = compute_error_rate(entry.get("transcript", ""), r.text, entry["lang"])
+        strict_error_rate = compute_error_rate(strict_transcript(entry), r.text, entry["lang"])
+        err_rate = compute_error_rate(metric_transcript(entry), r.text, entry["lang"])
         err_label = "cer" if entry["lang"] == "zh" else "wer"
         records.append({
             "label": label, "id": entry["id"], "lang": entry["lang"],
@@ -182,6 +234,7 @@ def run_asr(asr: ASRClient, corpus: list[dict],
             **r.as_dict,
             err_label: err_rate,
             "error_rate": err_rate,  # uniform key for summarize()
+            "strict_error_rate": strict_error_rate,
         })
         frtf = f"  fRTF={r.finalize_rtf:.3f}" if r.finalize_rtf is not None else ""
         print(f"  [{label:6s} {k+1:02d}] {entry['id']:14s}  "
@@ -243,6 +296,10 @@ def run_v2v_stream_bench(
     warmup: int = 3, runs: int = 10,
     chunk_ms: int = 250, vad_backend: str = "silero",
     vad_silence_ms: int = 400, realtime: bool = True,
+    eos_mode: str = "client",
+    asr_endpoint_min_speech_s: float | None = None,
+    asr_endpoint_min_audio_s: float | None = None,
+    vad_tail_max_ms: int | None = None,
 ) -> list[dict]:
     """Benchmark ASR-only via the real /v2v/stream protocol.
 
@@ -259,21 +316,51 @@ def run_v2v_stream_bench(
                 base_url, entry["bytes"],
                 language=language, chunk_ms=chunk_ms,
                 vad_backend=vad_backend, vad_silence_ms=vad_silence_ms,
-                realtime=realtime,
+                realtime=realtime, eos_mode=eos_mode,
+                asr_endpoint_min_speech_s=asr_endpoint_min_speech_s,
+                asr_endpoint_min_audio_s=asr_endpoint_min_audio_s,
+                vad_tail_max_ms=vad_tail_max_ms,
             )
         except Exception as e:
-            records.append({"label": label, "id": entry["id"], "error": str(e)})
+            err = f"{type(e).__name__}: {e}"
+            records.append({
+                "label": label, "id": entry["id"], "lang": entry["lang"],
+                "category": entry["category"], "error": err,
+            })
+            print(f"  [{label:6s} {k+1:02d}] {entry['id']:14s}  ERROR: {err[:120]}")
             continue
+        if r.error:
+            records.append({
+                "label": label, "id": entry["id"], "lang": entry["lang"],
+                "category": entry["category"], "error": r.error,
+            })
+            print(f"  [{label:6s} {k+1:02d}] {entry['id']:14s}  ERROR: {r.error}")
+            continue
+        error_rate = compute_error_rate(metric_transcript(entry), r.text, entry["lang"])
+        strict_error_rate = compute_error_rate(strict_transcript(entry), r.text, entry["lang"])
+        tail_truncated, tail_missing_units = detect_tail_truncation(
+            metric_transcript(entry), r.text, entry["lang"])
+        coverage_rate = compute_coverage_rate(metric_transcript(entry), r.text, entry["lang"])
         records.append({
             "label": label, "id": entry["id"], "lang": entry["lang"],
             "category": entry["category"],
             **r.as_dict,
+            "error_rate": error_rate,
+            "strict_error_rate": strict_error_rate,
+            "coverage_rate": coverage_rate,
+            "short_output_rate": 1.0 if coverage_rate < 0.5 else 0.0,
+            "tail_truncated": tail_truncated,
+            "tail_missing_units": tail_missing_units,
+            "tail_truncation_rate": 1.0 if tail_truncated else 0.0,
         })
+        err_label = "CER" if entry["lang"] == "zh" else "WER"
+        tail = " TAIL_TRUNC" if tail_truncated else ""
         print(f"  [{label:6s} {k+1:02d}] {entry['id']:14s}  "
               f"endpoint={r.endpoint_latency_ms:.0f}ms  "
               f"asr_finalize={r.asr_finalize_ms:.0f}ms  "
               f"total={r.total_latency_ms:.0f}ms  "
-              f"text='{r.text[:25]}...'")
+              f"{err_label}={error_rate*100:.1f}%  "
+              f"text='{r.text[:25]}...'{tail}")
     return records
 
 
@@ -298,13 +385,15 @@ def run_asr_noisy(asr: ASRClient, corpus: list[dict],
         except Exception as e:
             records.append({"label": label, "id": entry["id"], "error": str(e)})
             continue
-        err_rate = compute_error_rate(entry.get("transcript", ""), r.text, entry["lang"])
+        strict_error_rate = compute_error_rate(strict_transcript(entry), r.text, entry["lang"])
+        err_rate = compute_error_rate(metric_transcript(entry), r.text, entry["lang"])
         records.append({
             "label": label, "id": entry["id"], "lang": entry["lang"],
             "category": entry["category"],
             "snr_db": snr_db, "noise_type": noise_type,
             **r.as_dict,
             "error_rate": err_rate,
+            "strict_error_rate": strict_error_rate,
         })
         print(f"  [{label:6s} {k+1:02d}] {entry['id']:14s}  "
               f"SNR={snr_db}dB {noise_type:6s}  "
