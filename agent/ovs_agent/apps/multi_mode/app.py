@@ -117,6 +117,18 @@ class MultiModeApp(BaseApp):
     async def on_user_utterance(
         self, text: str, detected_language: str | None = None
     ) -> None:
+        # Suppress / strip a leaked wake phrase before it reaches a mode.
+        # "Hey Jarvis." (bare) → drop (no greeting reply); "Hey Jarvis 挥手"
+        # → dispatch only "挥手". See BaseApp._strip_wake_prefix.
+        stripped = self._strip_wake_prefix(text)
+        if stripped is None:
+            logger.info("dropping bare wake-phrase utterance: %r", text)
+            self._restore_idle_after_silent_turn()
+            return
+        if stripped != text:
+            logger.info("stripped wake prefix: %r → %r", text, stripped)
+        text = stripped
+
         mode = self.modes.current
         try:
             preprocessed = mode.preprocess_user_text(text)

@@ -117,6 +117,21 @@ class Config:
     # region lets the command be a clean first segment. Tune down if it clips
     # commands spoken continuously right after the wake word. 0 disables.
     wake_mic_skip_ms: float = 500.0
+    # Wake-word leak suppression. The local wake-word detector fires only
+    # AFTER it has heard the full phrase, by which point that audio has
+    # already been streamed to the server ASR — so the wake word itself gets
+    # transcribed as a user utterance ("Hey Jarvis." → the LLM replies a bare
+    # greeting), and in the continuous case it prefixes the real command
+    # ("Hey Jarvis 挥手"). Audio-level skipping can't catch this (the leak is
+    # BEFORE the fire). Instead we match these phrase forms against the ASR
+    # final TEXT: a bare match is dropped (no LLM turn); a prefix match is
+    # stripped so only the command dispatches. Normalised (lowercased, trailing
+    # punctuation removed) before comparison. NB: only catches CLEAN wake-word
+    # transcriptions — mis-hearings ("só", "乔治") slip through (acoustic issue).
+    wake_phrases: list[str] = field(default_factory=lambda: [
+        "hey jarvis", "hi jarvis", "hello jarvis",
+        "嘿 jarvis", "嗨 jarvis", "你好 jarvis", "嘿,jarvis", "嘿，jarvis",
+    ])
     # force a fresh SLV session (new ASR worker) on EVERY wake, not just on
     # long idle. A single streaming-ASR worker can degrade after several
     # utterances on one persistent multi_utterance session (returns empty

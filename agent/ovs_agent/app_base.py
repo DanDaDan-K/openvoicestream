@@ -398,6 +398,45 @@ class BaseApp:
             s = s[:-1]
         return s.strip().lower()
 
+    # Separators that can sit between a leaked wake phrase and the command.
+    _WAKE_SEPARATORS = " ,，.。!！?？:：;、"
+
+    def _strip_wake_prefix(self, text: str) -> str | None:
+        """Suppress / strip a leaked wake phrase from an ASR final.
+
+        The local wake-word detector fires only after hearing the full
+        phrase, so that audio is already in the server ASR stream — the
+        wake word comes back transcribed as (or prefixing) the utterance.
+
+        Returns:
+          * ``None``  — the whole utterance IS the wake phrase → drop it
+            (no LLM turn; saying the wake word while awake isn't a command).
+          * stripped remainder — the utterance STARTS with the wake phrase
+            (e.g. "Hey Jarvis 挥手") → dispatch only the command part.
+          * ``text`` unchanged — no wake phrase at the front.
+
+        Only matches CLEAN transcriptions (config ``wake_phrases``); a
+        mis-heard wake word ("só", "乔治") is an acoustic issue, not caught here.
+        """
+        phrases = getattr(self.config, "wake_phrases", None) or []
+        if not text or not phrases:
+            return text
+        stripped = text.strip()
+        low = stripped.lower()
+        norm = self._normalise_for_stop(stripped)  # trailing punct removed
+        for raw in phrases:
+            p = (raw or "").strip().lower()
+            if not p:
+                continue
+            if norm == p:
+                return None  # bare wake word
+            if low.startswith(p):
+                rest = stripped[len(p):]  # lower() preserves length
+                if rest[:1] in self._WAKE_SEPARATORS:
+                    remainder = rest.lstrip(self._WAKE_SEPARATORS).strip()
+                    return remainder or None
+        return stripped
+
     def _is_stop_intent(self, text: str) -> bool:
         """Match per spec: Chinese -> exact full-string; English -> case-
         insensitive whole-utterance OR word-boundary prefix (>= 2 chars).
