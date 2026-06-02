@@ -25,6 +25,14 @@ from ovs_agent.slv_client import ServerToolCall
 from ovs_agent.tools import ToolRegistry
 
 
+async def _drain_tool_tasks(app) -> None:
+    """#F4: SERVER_TOOL_CALL now dispatches in a background task, so
+    ``_dispatch_one`` returns before the CLIENT_TOOL_RESULT is sent. Await the
+    tracked tool tasks so assertions observe the completed result."""
+    while app._pending_tool_tasks:
+        await asyncio.gather(*list(app._pending_tool_tasks), return_exceptions=True)
+
+
 # ── fakes ────────────────────────────────────────────────────────────
 
 
@@ -168,6 +176,7 @@ async def test_server_tool_call_dispatches_local_handler_and_returns_result():
     evt = ServerToolCall(id="call_x", name="wave", arguments={"side": "right"})
     # Route through the real dispatch entry point.
     await app._dispatch_one(evt)
+    await _drain_tool_tasks(app)  # #F4: tool now dispatched in a background task
 
     # Local handler actually ran with the server-supplied args.
     assert calls == [{"side": "right"}]
@@ -187,6 +196,7 @@ async def test_server_tool_call_unknown_tool_returns_error_result():
 
     evt = ServerToolCall(id="c2", name="does_not_exist", arguments={})
     await app._dispatch_one(evt)
+    await _drain_tool_tasks(app)  # #F4
 
     assert len(app.slv.tool_results) == 1
     res = app.slv.tool_results[0]
@@ -207,10 +217,44 @@ async def test_server_tool_call_handler_failure_returns_error_result():
 
     evt = ServerToolCall(id="c3", name="grip", arguments={})
     await app._dispatch_one(evt)
+    await _drain_tool_tasks(app)  # #F4
 
     res = app.slv.tool_results[0]
     assert res["ok"] is False
     assert res["error"] == "serial bus unavailable"
+
+
+@pytest.mark.asyncio
+async def test_server_tool_call_is_dispatched_in_background_non_blocking():
+    """#F4: _dispatch_one must NOT block on the tool's execution — it schedules
+    a tracked background task and returns immediately, so the dispatch loop keeps
+    draining events (TTS audio / partials / control frames) while the tool runs."""
+    reg = ToolRegistry()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @reg.tool(name="slow")
+    async def slow() -> dict:
+        started.set()
+        await release.wait()
+        return {"started": True}
+
+    app = _make_app(server_loop=True, registry=reg)
+    evt = ServerToolCall(id="cb", name="slow", arguments={})
+
+    await app._dispatch_one(evt)  # must return before the tool finishes
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    # Handler is running but the dispatch entry already returned: the result is
+    # NOT sent yet, and the task is tracked (strong ref → no GC).
+    assert app.slv.tool_results == [], "dispatch blocked on the tool (not backgrounded)"
+    assert len(app._pending_tool_tasks) == 1
+
+    release.set()
+    await _drain_tool_tasks(app)
+    assert len(app.slv.tool_results) == 1
+    assert app.slv.tool_results[0]["id"] == "cb"
+    assert app.slv.tool_results[0]["ok"] is True
+    assert not app._pending_tool_tasks  # done-callback pruned the set
 
 
 # ── 3. off mode: local LLM loop still runs (zero behaviour change) ────

@@ -222,6 +222,12 @@ class BaseApp:
         else:
             self._state = ConvState.SLEEPING
         self._slv_reconnect_count: int = 0
+        # #F4: in-flight SERVER_TOOL_CALL handler tasks. Dispatching a remote
+        # tool in a background task keeps the dispatch loop draining events
+        # (TTS audio / partials / control frames) instead of blocking on the
+        # tool's execution. The set holds a strong reference (a bare
+        # create_task can be GC'd mid-flight); the done callback prunes it.
+        self._pending_tool_tasks: set[asyncio.Task] = set()
         # Auto-sleep timer (only armed when pipeline_mode != always_on).
         self._sleep_task: asyncio.Task | None = None
         # Push-to-talk: when True, the next asr_final is the explicit
@@ -709,6 +715,19 @@ class BaseApp:
                 await self._llm_turn_task
             except (asyncio.CancelledError, Exception):
                 pass
+        # 0a'. cancel any in-flight server tool-call tasks (#F4). The arm motion
+        # itself runs on its own detached worker (parallel mode), so cancelling
+        # the handler only stops a pending CLIENT_TOOL_RESULT send — fine during
+        # shutdown (the server is going away too).
+        for _t in list(getattr(self, "_pending_tool_tasks", ()) or ()):
+            if not _t.done():
+                _t.cancel()
+                try:
+                    await _t
+                except (asyncio.CancelledError, Exception):
+                    pass
+        if getattr(self, "_pending_tool_tasks", None) is not None:
+            self._pending_tool_tasks.clear()
         # 0a. cancel auto-sleep timer too — otherwise a pending
         # _sleep_after coroutine can fire mid-shutdown, racing with
         # the rest of the cleanup (and emitting on_sleep after plugins
@@ -1385,6 +1404,34 @@ class BaseApp:
             )
             await self._readvertise_after_reconnect()
 
+    def _spawn_tool_task(self, evt: "ServerToolCall") -> None:
+        """Schedule a SERVER_TOOL_CALL handler as a tracked background task
+        (#F4). Keeps a strong reference in ``_pending_tool_tasks`` so the task
+        can't be garbage-collected mid-flight, and prunes it on completion."""
+        # Lazy-init so this is robust when the app is built via
+        # ``BaseApp.__new__`` (tests / hot-swap paths that bypass __init__).
+        tasks = getattr(self, "_pending_tool_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._pending_tool_tasks = tasks
+        task = asyncio.create_task(self._run_tool_task(evt))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    async def _run_tool_task(self, evt: "ServerToolCall") -> None:
+        """Background wrapper around :meth:`_handle_server_tool_call`.
+
+        ``_handle_server_tool_call`` already converts handler errors into an
+        ``ok=False`` CLIENT_TOOL_RESULT, so the server loop self-recovers; this
+        wrapper only guards the send path itself so a background task never dies
+        with an unretrieved exception (which asyncio would log noisily)."""
+        try:
+            await self._handle_server_tool_call(evt)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("server tool_call background task crashed (id=%s)", evt.id)
+
     async def _handle_server_tool_call(self, evt: "ServerToolCall") -> None:
         """Execute a remote SERVER_TOOL_CALL against the local registry and
         reply with CLIENT_TOOL_RESULT.
@@ -1755,7 +1802,12 @@ class BaseApp:
         # timeout. Only emitted in server-loop mode; the legacy
         # client-loop path never sees this event.
         if isinstance(evt, ServerToolCall):
-            await self._handle_server_tool_call(evt)
+            # #F4: run the tool handler in a background task so the dispatch
+            # loop keeps draining events while the tool executes, instead of
+            # blocking the consumer for the tool's duration. The server issues
+            # tool calls one at a time (it awaits each CLIENT_TOOL_RESULT before
+            # the next), so these tasks don't overlap in practice.
+            self._spawn_tool_task(evt)
             return
 
         # ── pipeline_mode SLEEPING gate ─────────────────────────────
