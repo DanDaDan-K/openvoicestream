@@ -72,6 +72,16 @@ class ScriptedAudioIO:
         self.chunk_ms = chunk_ms
         self.output_sr = output_sr
         self._is_playing = False
+        # Startup-race gate (#38): the agent mic pump DROPS chunks until
+        # ``app._advertise_ready`` is set (boot connect + tool advertise).
+        # If the first scripted WAV streams during that window it is
+        # silently discarded → no asr_final → test hangs. The harness
+        # (run_agent) wires this event to ``app._advertise_ready`` so the
+        # first real utterance only starts once the pump will actually
+        # forward it. Until set, start_capture yields silence (keeping the
+        # pump fed so VAD framing stays stable).
+        self.ready_event: asyncio.Event | None = None
+        self._ready_gated = False
         self.captured_tts = bytearray()
         self.tts_first_frame_ts_ms: int | None = None
         self.tts_sr: int | None = None
@@ -106,6 +116,18 @@ class ScriptedAudioIO:
                     return
                 yield silence
                 await asyncio.sleep(self.chunk_ms / 1000)
+            # Gate the FIRST real utterance on the agent's advertise-ready
+            # signal. Keep feeding silence chunks (don't asyncio.sleep-block)
+            # so the mic pump stays alive and VAD framing is undisturbed.
+            if not self._ready_gated:
+                self._ready_gated = True
+                ev = self.ready_event
+                if ev is not None:
+                    while not ev.is_set():
+                        if self._closed:
+                            return
+                        yield silence
+                        await asyncio.sleep(self.chunk_ms / 1000)
             if isinstance(source, (bytes, bytearray)):
                 pcm = bytes(source)
             else:

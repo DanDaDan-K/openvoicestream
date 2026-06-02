@@ -22,17 +22,20 @@ async def test_prompt_editor_runtime_override(test_config):
         port = test_config.metadata["dashboard_port"]
         base = f"http://127.0.0.1:{port}"
 
-        # Capture every (messages, kw) pair the LLM is called with so we
-        # can assert on the system prompt actually sent.
+        # Capture every messages-list the LLM is called with so we can
+        # assert on the system prompt actually sent. The EdgeLLM path the
+        # runner uses is ``stream_events`` (tools/runner.py:74 prefers it
+        # over ``stream`` when present), so spy THAT — patching ``stream``
+        # would never be observed.
         captured: list[list[dict]] = []
-        real_stream = app.llm.stream
+        real_stream_events = app.llm.stream_events
 
-        async def spy_stream(messages, **kw):
+        async def spy_stream_events(messages, **kw):
             captured.append(list(messages))
-            async for tok in real_stream(messages, **kw):
-                yield tok
+            async for ev in real_stream_events(messages, **kw):
+                yield ev
 
-        app.llm.stream = spy_stream
+        app.llm.stream_events = spy_stream_events
 
         # Push a new system_prompt before the first user utterance.
         new_prompt = "TEST_OVERRIDE_PROMPT_FOR_E2E_CHECK"

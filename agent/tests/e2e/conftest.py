@@ -141,12 +141,35 @@ async def run_agent(config, audio: ScriptedAudioIO):
 
     app = MultiModeApp(config)
     app.audio = audio
+    # Startup-race gate (#38): the mic pump drops audio until
+    # ``app._advertise_ready`` is set. Wire a ready event into the scripted
+    # audio so the first WAV only streams once the pump will forward it.
+    ready = asyncio.Event()
+    audio.ready_event = ready
+
+    async def _wait_advertise_ready() -> None:
+        # ``_advertise_ready`` is created inside app.run(); poll until it
+        # exists and is set, then release the scripted audio.
+        while True:
+            ev = getattr(app, "_advertise_ready", None)
+            if ev is not None:
+                await ev.wait()
+                break
+            await asyncio.sleep(0.02)
+        ready.set()
+
     run_task = asyncio.create_task(app.run(), name="multi-mode-run")
+    ready_task = asyncio.create_task(_wait_advertise_ready(), name="advertise-ready-gate")
     probe = AgentProbe(port=config.metadata["dashboard_port"])
     try:
         await probe.connect()
         yield app, probe
     finally:
+        ready_task.cancel()
+        try:
+            await ready_task
+        except (asyncio.CancelledError, Exception):
+            pass
         try:
             app.request_shutdown()
         except Exception:

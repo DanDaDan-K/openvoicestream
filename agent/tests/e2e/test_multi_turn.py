@@ -1,4 +1,18 @@
-"""Multi-turn: 3 utterances → session history preserved + reconnects happen."""
+"""Multi-turn: 3 utterances → session history preserved + WS stays alive.
+
+NOTE (reconnect semantics changed — commit 07c6466 "revert proactive
+reconnect on tts_done"): proactive reconnect on TTSDone (and on wake) was
+INTENTIONALLY removed. SLV server v1.15+ added an ASR-turn wall-clock
+timeout that force-releases the SessionLimiter slot, so the old client-side
+proactive reconnect is no longer needed and was actively causing 4429
+too_many_sessions. The WS now PERSISTS across turns (correct per the SLV
+multi_utterance protocol where session_complete=False means the dialog
+continues); reconnect fires only on a session_complete final or genuine WS
+death. The old "≥2 reconnects per multi-turn session" assertion asserted the
+removed behavior, so this test now asserts HEALTHY multi-turn instead:
+3 turns each yielding user+assistant, full history preserved, WS still
+healthy at the end, and NO per-turn reconnect storm.
+"""
 import pytest
 
 from .conftest import run_agent, WAV_DIR
@@ -21,14 +35,26 @@ async def test_multi_turn(test_config):
             # Track via assistant_done events.
             await _wait_assistant_done_count(probe, i + 1, timeout=30)
 
-        # History: 3 user + 3 assistant = 6 messages.
+        # History: 3 user + 3 assistant = 6 messages (each turn ran asr_final
+        # → LLM → tts and was appended to the session history).
         assert len(app.session.history) == 6, (
             f"expected 6 messages, got {len(app.session.history)}: "
             f"{[(m['role'], m['content'][:20]) for m in app.session.history]}"
         )
-        # At least 2 reconnects observed via the slv_reconnect event.
+        # Each turn produced an assistant_done (tts finished) — 3 of them.
+        done = sum(1 for e in probe.events if e.get("event") == "on_assistant_done")
+        assert done >= 3, f"expected ≥3 assistant_done, saw {done}"
+
+        # Healthy multi-turn: the WS PERSISTS across turns (no proactive
+        # reconnect on tts_done since 07c6466). It must still be healthy at
+        # the end, and there must be NO per-turn reconnect storm — a single
+        # persistent session should see well under one reconnect per turn.
+        assert app.slv.is_healthy(), "SLV WS should still be healthy after 3 turns"
         reconnects = [e for e in probe.events if e.get("event") == "on_slv_reconnect"]
-        assert len(reconnects) >= 2, f"expected ≥2 reconnects, saw {len(reconnects)}"
+        assert len(reconnects) < 3, (
+            f"expected the WS to persist across turns (no per-turn reconnect "
+            f"storm), but saw {len(reconnects)} reconnects"
+        )
 
 
 async def _wait_assistant_done_count(probe, n: int, timeout: float = 30) -> None:
