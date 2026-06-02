@@ -555,6 +555,10 @@ class SLVClient:
         """
         payload: dict[str, Any] = {
             "type": CLIENT_TOOL_RESULT,
+            # Send BOTH keys: the server correlates on `call_id or id`
+            # (voxedge conversation.py). Belt-and-suspenders so a frame is
+            # never un-correlatable regardless of which key the server reads.
+            "call_id": call_id,
             "id": call_id,
             "name": name,
             "ok": bool(ok),
@@ -563,7 +567,9 @@ class SLVClient:
             payload["result"] = result if isinstance(result, dict) else {}
         else:
             payload["error"] = error or "tool execution failed"
-        logger.info("SLV tool_result id=%s name=%s ok=%s", call_id, name, ok)
+        # %r (not %s) so an empty correlation id shows as '' and a None as
+        # None — they diagnose different upstream bugs (see #B1 round2-stall).
+        logger.info("SLV tool_result call_id=%r name=%r ok=%s", call_id, name, ok)
         # A tool_result is bound to the session that issued the SERVER_TOOL_CALL.
         # If that WS died mid-dispatch, do NOT auto-connect — the call_id is
         # meaningless to a fresh session (#6). Drop it; the live session (if any)

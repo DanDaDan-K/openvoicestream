@@ -1619,6 +1619,15 @@ class BaseApp:
         converted to ``ok=False`` results so the server-side LLM loop can
         self-recover instead of stalling.
         """
+        # #B1 diagnostic: log the correlation id AS RECEIVED by the handler.
+        # In-container repro proved the parse→dispatch→send chain preserves
+        # evt.id, yet live tool_result frames went out with an empty id and
+        # the server's resolve_remote never matched (round2 stall). This pins
+        # whether evt.id is already empty here (parse/transport) or only at
+        # the send call — %r so '' vs None vs a real hex id are distinguishable.
+        logger.info(
+            "server tool_call recv: id=%r name=%r", evt.id, evt.name
+        )
         registry = getattr(self, "tool_registry", None)
         if registry is None:
             from .tools import default_registry as registry  # type: ignore
