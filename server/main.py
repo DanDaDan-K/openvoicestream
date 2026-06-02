@@ -2507,10 +2507,27 @@ async def _asr_stream_backend(
                             payload["language"] = detected_language
                         await ws.send_json(payload)
                     except Exception:
-                        # Client may have disconnected during a slow finalize
-                        # (e.g. TRT-EdgeLLM on Jetson). Nothing to send to.
-                        pass
-                    break
+                        # Client gone during a slow finalize (e.g. TRT-EdgeLLM
+                        # on Jetson) — nothing to send to, close out.
+                        break
+                    # Multi-utterance: reset the ASR stream + VAD and KEEP the
+                    # socket open for the next utterance. Previously this path
+                    # `break`'d — closing after every server-VAD endpoint — which
+                    # forced clients (e.g. the live-caption page) to reconnect per
+                    # sentence. The finalize above uses prepare_finalize+finalize
+                    # (complete text), unlike the end_utterance force_endpoint path.
+                    try:
+                        _old_close = getattr(stream, "close", None)
+                        if _old_close is not None:
+                            _old_close()
+                    except Exception:
+                        logger.exception("ASR VAD endpoint: stream close raised")
+                    stream = asr_be.create_stream(language=language)
+                    try:
+                        vad_session.reset()
+                    except Exception:
+                        logger.debug("VAD reset after endpoint raised", exc_info=True)
+                    continue
 
             # Check for partial results
             partial_text, is_endpoint = stream.get_partial()
@@ -3224,6 +3241,8 @@ async def v2v_stream(ws: WebSocket):
             "asr_active_gen":   0,       # generation tagged onto asr_active so a
                                          # stale finalize doesn't clear a fresh
                                          # utterance's asr_active flag (BUG 2)
+            "asr_started_once": False,  # single-turn backend endpoint streams
+                                         # must not reopen on trailing silence
             "endpoint_finalize_pending": False,  # set when dispatcher already
                                          # accepted the speech-end chunk and the
                                          # asr_out_task should finalize next tick
@@ -3256,6 +3275,24 @@ async def v2v_stream(ws: WebSocket):
     
         async def send_error(msg):
             await send_json({"type": v2v_proto.SERVER_ERROR, "error": msg})
+
+        def _asr_stream_prefers_backend_endpoint_vad() -> bool:
+            """Return True only for streams that explicitly own endpoint VAD.
+
+            Some ASR streams, notably RK Qwen3 true-streaming, run their own
+            endpoint detector over the exact encoder buffer they need for final
+            decode. For those streams an outer VAD SPEECH_START during an
+            active turn is still a client/TTS barge-in signal, but it must not
+            preempt and recreate the ASR stream. Legacy backends do not expose
+            this opt-in flag and keep the old preempt behavior.
+            """
+            if asr_manager is None:
+                return False
+            stream = getattr(asr_manager, "stream", None)
+            return bool(getattr(stream, "prefer_backend_endpoint_vad", False))
+
+        def _asr_backend_prefers_backend_endpoint_vad() -> bool:
+            return bool(getattr(asr_be, "prefer_backend_endpoint_vad", False))
     
         # ── Stage 4: tasks ──────────────────────────────────────────────
     
@@ -3264,6 +3301,8 @@ async def v2v_stream(ws: WebSocket):
             try:
                 while not state["client_closed"]:
                     msg = await ws.receive()
+                    if state["client_closed"]:
+                        break
                     if msg.get("type") == "websocket.disconnect":
                         state["client_closed"] = True
                         # Fast slot release: cancel the (possibly worker-blocked)
@@ -3285,6 +3324,12 @@ async def v2v_stream(ws: WebSocket):
                         # must open a new WebSocket to start another session.
                         if state["asr_session_closed"]:
                             continue
+                        if (
+                            not multi_utterance
+                            and state["asr_started_once"]
+                            and not state["asr_active"]
+                        ):
+                            continue
                         samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                         speech_started_now = False
                         speech_ended_now = False
@@ -3298,6 +3343,13 @@ async def v2v_stream(ws: WebSocket):
                                     "type": v2v_proto.SERVER_VAD_EVENT,
                                     "event": v2v_proto.VAD_EVENT_SPEECH_START,
                                 })
+                                if not multi_utterance and state["asr_started_once"]:
+                                    if (
+                                        state["asr_active"]
+                                        and _asr_stream_prefers_backend_endpoint_vad()
+                                    ):
+                                        speech_started_now = True
+                                    continue
                                 # Auto barge-in: cancel any in-flight TTS, then
                                 # open a fresh ASR utterance (pre-empts any
                                 # still-active session per spec).
@@ -3307,38 +3359,49 @@ async def v2v_stream(ws: WebSocket):
                                 stop = state["current_tts_stop"]
                                 if stop is not None:
                                     stop.set()
-                                try:
-                                    async with coord.acquire("asr"):
-                                        new_gen = await asr_manager.on_speech_start()
-                                except ASRSessionUnavailable as e:
-                                    # Race #1: ASR worker rebuild ladder
-                                    # exhausted — surface to client + skip
-                                    # this turn rather than silently
-                                    # accepting audio with no transcript.
-                                    logger.warning(
-                                        "v2v: on_speech_start failed (VAD): %s", e
-                                    )
-                                    await send_json({
-                                        "type": v2v_proto.SERVER_ERROR,
-                                        "error": "asr_unavailable",
-                                    })
-                                    state["asr_active"] = False
+                                if (
+                                    state["asr_active"]
+                                    and _asr_stream_prefers_backend_endpoint_vad()
+                                ):
+                                    # Backend-owned endpoint streams keep
+                                    # accumulating audio across outer VAD
+                                    # speech blips. Treat this event as
+                                    # barge-in for TTS/client only.
+                                    speech_started_now = True
+                                else:
+                                    try:
+                                        async with coord.acquire("asr"):
+                                            new_gen = await asr_manager.on_speech_start()
+                                    except ASRSessionUnavailable as e:
+                                        # Race #1: ASR worker rebuild ladder
+                                        # exhausted — surface to client + skip
+                                        # this turn rather than silently
+                                        # accepting audio with no transcript.
+                                        logger.warning(
+                                            "v2v: on_speech_start failed (VAD): %s", e
+                                        )
+                                        await send_json({
+                                            "type": v2v_proto.SERVER_ERROR,
+                                            "error": "asr_unavailable",
+                                        })
+                                        state["asr_active"] = False
+                                        state["endpoint_pending"] = None
+                                        state["endpoint_pending_gen"] = None
+                                        continue
+                                    # Clear any stale endpoint from the previous
+                                    # utterance — a VAD speech-end that was pending
+                                    # finalize while this new speech-start preempted
+                                    # it must NOT cause asr_out_task to call
+                                    # finalize() against the fresh generation
+                                    # (codex root-cause 2026-05-19: stale endpoint
+                                    # firing on the wrong generation).
                                     state["endpoint_pending"] = None
                                     state["endpoint_pending_gen"] = None
-                                    continue
-                                # Clear any stale endpoint from the previous
-                                # utterance — a VAD speech-end that was pending
-                                # finalize while this new speech-start preempted
-                                # it must NOT cause asr_out_task to call
-                                # finalize() against the fresh generation
-                                # (codex root-cause 2026-05-19: stale endpoint
-                                # firing on the wrong generation).
-                                state["endpoint_pending"] = None
-                                state["endpoint_pending_gen"] = None
-                                state["asr_active"] = True
-                                state["asr_active_gen"] = new_gen
-                                state["asr_turn_started_at"] = loop.time()
-                                speech_started_now = True
+                                    state["asr_active"] = True
+                                    state["asr_active_gen"] = new_gen
+                                    state["asr_turn_started_at"] = loop.time()
+                                    state["asr_started_once"] = True
+                                    speech_started_now = True
                             elif event == vad_mod.VADSession.SPEECH_END:
                                 # Defer setting endpoint_pending until AFTER we
                                 # accept this final chunk below — otherwise the
@@ -3346,8 +3409,16 @@ async def v2v_stream(ws: WebSocket):
                                 # finalize() while the tail audio is still
                                 # in-flight, silently dropping it (BUG 3).
                                 speech_ended_now = True
-                        # No-VAD mode: open the session lazily on first audio.
-                        if vad is None and not state["asr_active"]:
+                        # No-VAD mode opens lazily on first audio. Backends
+                        # that own endpoint VAD need the same first-frame
+                        # behavior even when frontend VAD is enabled; otherwise
+                        # the frontend VAD speech_start gate drops leading
+                        # context and shifts the final encoder buffer.
+                        if (
+                            (vad is None or _asr_backend_prefers_backend_endpoint_vad())
+                            and not state["asr_active"]
+                            and state["endpoint_pending"] is None
+                        ):
                             try:
                                 async with coord.acquire("asr"):
                                     new_gen = await asr_manager.on_speech_start()
@@ -3367,6 +3438,7 @@ async def v2v_stream(ws: WebSocket):
                             state["asr_active"] = True
                             state["asr_active_gen"] = new_gen
                             state["asr_turn_started_at"] = loop.time()
+                            state["asr_started_once"] = True
                         if state["asr_active"]:
                             async with coord.acquire("asr"):
                                 await asr_manager.accept_audio(samples)
@@ -3375,9 +3447,18 @@ async def v2v_stream(ws: WebSocket):
                         # stream. asr_out_task will pick this up on the next
                         # poll and call finalize().
                         if speech_ended_now:
-                            state["endpoint_pending"] = "vad"
-                            state["endpoint_pending_gen"] = state["asr_active_gen"]
-                            if not multi_utterance:
+                            backend_owns_endpoint = _asr_stream_prefers_backend_endpoint_vad()
+                            if not backend_owns_endpoint:
+                                state["endpoint_pending"] = "vad"
+                                state["endpoint_pending_gen"] = state["asr_active_gen"]
+                                if not multi_utterance:
+                                    state["asr_session_closed"] = True
+                            elif not multi_utterance:
+                                # The tail chunk that made frontend VAD fire
+                                # has already been accepted above. Keep waiting
+                                # for the backend/model endpoint, but close the
+                                # input side now so later trailing silence
+                                # cannot open a fresh ASR stream.
                                 state["asr_session_closed"] = True
                             # Notify client of VAD speech_end so it can update
                             # its state machine (e.g. show "thinking" indicator,
@@ -3567,6 +3648,17 @@ async def v2v_stream(ws: WebSocket):
                 )
     
                 if endpoint_fired:
+                    if (
+                        is_endpoint
+                        and not endpoint_reason
+                        and not multi_utterance
+                    ):
+                        # Backend-owned endpointing has already observed
+                        # enough tail inside the stream. Close the input side
+                        # before finalize so queued trailing silence cannot
+                        # lazily open a second ASR stream in this single-turn
+                        # session.
+                        state["asr_session_closed"] = True
                     # Drain pending flag now to avoid double-firing.
                     state["endpoint_pending"] = None
                     state["endpoint_pending_gen"] = None
@@ -3642,6 +3734,7 @@ async def v2v_stream(ws: WebSocket):
                         if detected_language:
                             final_payload["language"] = detected_language
                         await send_json(final_payload)
+                        state["client_closed"] = True
                         return
     
                 # Exit only when the session is closed and there's nothing
@@ -4010,7 +4103,7 @@ async def v2v_stream(ws: WebSocket):
             # turn-timeout path above) so a wedged worker cannot stall this
             # teardown. Admission is already released above, so a slow cancel
             # here no longer blocks the next connection's slot.
-            if asr_manager is not None:
+            if asr_manager is not None and state.get("asr_active"):
                 try:
                     await asyncio.wait_for(
                         asr_manager.cancel("ws_close"),

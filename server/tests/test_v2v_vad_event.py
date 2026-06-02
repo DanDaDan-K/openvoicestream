@@ -150,7 +150,14 @@ def _silence_pcm16(ms=50, sr=16000):
 def fake_asr_backend(monkeypatch):
     import server.main as main_mod
     from server.core.coordinator import init_coordinator
+    from server.core import session_limiter
     init_coordinator({"mode": "concurrent"})
+    # The /v2v/stream handler admits the WS through the global session limiter;
+    # TestClient(app) doesn't run the startup lifespan that calls init_limiter,
+    # so without this the connection is rejected with 1011
+    # session_limiter_unavailable (seen=[]). Mirror the other limiter tests.
+    session_limiter._reset_for_tests()
+    session_limiter.init_limiter({})
 
     be = _FakeASRBackend(finals=["hello world", "next utterance", "more"])
     monkeypatch.setattr(main_mod, "_asr_backend", be, raising=False)
