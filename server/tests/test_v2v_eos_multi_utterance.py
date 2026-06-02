@@ -460,5 +460,241 @@ def test_asr_eos_branch_has_multi_utterance_guard():
     )
 
 
+def test_backend_owned_endpoint_vad_speech_start_does_not_preempt_active_stream():
+    """Pin the opt-in no-preempt branch for backend-owned endpoint streams.
+
+    Outer VAD SPEECH_START is still a client/TTS barge-in signal, but if the
+    active stream explicitly exposes ``prefer_backend_endpoint_vad=True`` the
+    handler must not call ``on_speech_start()`` again and discard the rolling
+    encoder buffer.
+    """
+    import re
+
+    here = os.path.dirname(__file__)
+    main_path = os.path.abspath(os.path.join(here, "..", "main.py"))
+    with open(main_path, "r", encoding="utf-8") as f:
+        src = f.read()
+
+    helper = re.compile(
+        r"def _asr_stream_prefers_backend_endpoint_vad\(\).*?"
+        r"prefer_backend_endpoint_vad",
+        re.S,
+    )
+    branch = re.compile(
+        r"state\[\"asr_active\"\]\s*\n"
+        r"\s*and _asr_stream_prefers_backend_endpoint_vad\(\).*?"
+        r"Backend-owned endpoint streams keep.*?"
+        r"else:\s*\n"
+        r"\s*try:\s*\n"
+        r"\s*async with coord\.acquire\(\"asr\"\):\s*\n"
+        r"\s*new_gen = await asr_manager\.on_speech_start\(\)",
+        re.S,
+    )
+    assert helper.search(src), "missing backend-owned endpoint VAD helper"
+    assert branch.search(src), (
+        "outer VAD speech_start appears to preempt backend-owned endpoint "
+        "streams again"
+    )
+
+
+def test_backend_owned_endpoint_vad_gets_audio_from_first_frame_and_hybrid_eou():
+    """Pin first-frame feed + opt-in frontend EOU finalize for backend VAD."""
+    import re
+
+    here = os.path.dirname(__file__)
+    main_path = os.path.abspath(os.path.join(here, "..", "main.py"))
+    with open(main_path, "r", encoding="utf-8") as f:
+        src = f.read()
+
+    backend_helper = re.compile(
+        r"def _asr_backend_prefers_backend_endpoint_vad\(\).*?"
+        r"prefer_backend_endpoint_vad",
+        re.S,
+    )
+    frontend_eou_helper = re.compile(
+        r"def _asr_stream_allows_frontend_eou_finalize\(\).*?"
+        r"allow_frontend_eou_finalize",
+        re.S,
+    )
+    frontend_eou_min_helper = re.compile(
+        r"def _asr_stream_frontend_eou_min_audio_s\(\).*?"
+        r"frontend_eou_min_audio_s",
+        re.S,
+    )
+    accepted_audio_counter = re.compile(
+        r"asr_audio_samples_accepted.*?"
+        r"await asr_manager\.accept_audio\(samples\).*?"
+        r"asr_audio_samples_accepted.*?len\(samples\)",
+        re.S,
+    )
+    first_frame_open = re.compile(
+        r"\(vad is None or _asr_backend_prefers_backend_endpoint_vad\(\)\)"
+        r".*?not state\[\"asr_active\"\].*?"
+        r"new_gen = await asr_manager\.on_speech_start\(\)",
+        re.S,
+    )
+    speech_end_hybrid = re.compile(
+        r"if speech_ended_now:\s*\n"
+        r"\s*backend_owns_endpoint = _asr_stream_prefers_backend_endpoint_vad\(\)\s*\n"
+        r"\s*accepted_audio_s = \(.*?"
+        r"\s*frontend_eou_may_finalize = \(.*?"
+        r"not backend_owns_endpoint.*?"
+        r"_asr_stream_allows_frontend_eou_finalize\(\).*?"
+        r"accepted_audio_s >= _asr_stream_frontend_eou_min_audio_s\(\).*?"
+        r"if frontend_eou_may_finalize:\s*\n"
+        r"\s*state\[\"endpoint_pending\"\] = \"vad\"",
+        re.S,
+    )
+    backend_owned_fallback = re.compile(
+        r"elif not multi_utterance:\s*\n"
+        r".*?Keep accepting trailing silence.*?"
+        r"active backend-owned stream.*?"
+        r"pass",
+        re.S,
+    )
+
+    assert backend_helper.search(src), "missing backend-level endpoint-VAD helper"
+    assert frontend_eou_helper.search(src), "missing frontend-EOU opt-in helper"
+    assert frontend_eou_min_helper.search(src), "missing frontend-EOU min-audio helper"
+    assert accepted_audio_counter.search(src), (
+        "frontend-EOU gate is not based on audio actually accepted by ASR"
+    )
+    assert first_frame_open.search(src), (
+        "backend-owned endpoint VAD no longer opens ASR from the first audio frame"
+    )
+    assert speech_end_hybrid.search(src), (
+        "frontend VAD speech_end no longer supports opt-in hybrid finalize"
+    )
+    assert backend_owned_fallback.search(src), (
+        "frontend VAD speech_end fallback no longer keeps backend-owned "
+        "single-utterance streams open for backend endpointing"
+    )
+
+
+def test_backend_endpoint_single_utterance_closes_input_before_finalize():
+    """Backend endpoint must prevent trailing silence from reopening ASR."""
+    import re
+
+    here = os.path.dirname(__file__)
+    main_path = os.path.abspath(os.path.join(here, "..", "main.py"))
+    with open(main_path, "r", encoding="utf-8") as f:
+        src = f.read()
+
+    backend_endpoint_close = re.compile(
+        r"if endpoint_fired:\s*\n"
+        r"\s*if not multi_utterance:\s*\n"
+        r".*?state\[\"asr_session_closed\"\] = True.*?"
+        r"if \(\s*\n"
+        r"\s*is_endpoint\s*\n"
+        r"\s*and not endpoint_reason\s*\n"
+        r"\s*and not multi_utterance\s*\n"
+        r"\s*\):\s*\n"
+        r".*?queued trailing silence cannot\s*\n"
+        r".*?open a second ASR stream.*?\n"
+        r"\s*state\[\"asr_session_closed\"\] = True",
+        re.S,
+    )
+    first_frame_guard = re.compile(
+        r"\(vad is None or _asr_backend_prefers_backend_endpoint_vad\(\)\)"
+        r".*?not state\[\"asr_active\"\]"
+        r".*?state\[\"endpoint_pending\"\] is None"
+        r".*?new_gen = await asr_manager\.on_speech_start\(\)",
+        re.S,
+    )
+
+    assert backend_endpoint_close.search(src), (
+        "backend endpoint in single-utterance mode no longer closes the input "
+        "side before finalize"
+    )
+    assert first_frame_guard.search(src), (
+        "first-frame ASR open can run while another endpoint is already pending"
+    )
+
+
+def test_backend_endpoint_single_utterance_stream_opens_once():
+    """Single-turn backend endpoint streams must not reopen on trailing audio."""
+    import re
+
+    here = os.path.dirname(__file__)
+    main_path = os.path.abspath(os.path.join(here, "..", "main.py"))
+    with open(main_path, "r", encoding="utf-8") as f:
+        src = f.read()
+
+    state_flag = re.compile(r'"asr_started_once": False')
+    drop_guard = re.compile(
+        r"not multi_utterance\s*\n"
+        r"\s*and state\[\"asr_started_once\"\]\s*\n"
+        r"\s*and not state\[\"asr_active\"\].*?continue",
+        re.S,
+    )
+    mark_started = re.compile(
+        r"state\[\"asr_active\"\] = True\s*\n"
+        r"\s*state\[\"asr_active_gen\"\] = new_gen\s*\n"
+        r"\s*state\[\"asr_audio_samples_accepted\"\] = 0\s*\n"
+        r"\s*state\[\"asr_turn_started_at\"\] = loop\.time\(\)\s*\n"
+        r"\s*state\[\"asr_started_once\"\] = True",
+        re.S,
+    )
+    speech_start_gate = re.compile(
+        r"if not multi_utterance and state\[\"asr_started_once\"\]:\s*\n"
+        r"\s*if \(\s*\n"
+        r"\s*state\[\"asr_active\"\]\s*\n"
+        r"\s*and _asr_stream_prefers_backend_endpoint_vad\(\)\s*\n"
+        r"\s*\):\s*\n"
+        r"\s*speech_started_now = True\s*\n"
+        r"\s*continue",
+        re.S,
+    )
+
+    assert state_flag.search(src), "missing asr_started_once state flag"
+    assert drop_guard.search(src), (
+        "single-turn backend endpoint streams can reopen after becoming inactive"
+    )
+    assert mark_started.search(src), "ASR stream start does not mark asr_started_once"
+    assert speech_start_gate.search(src), (
+        "single-turn VAD speech_start can create a second ASR stream"
+    )
+
+
+def test_single_utterance_final_stops_dispatcher_and_skips_cleanup_cancel():
+    """Normal single-turn final should not leave dispatcher/cancel racing."""
+    import re
+
+    here = os.path.dirname(__file__)
+    main_path = os.path.abspath(os.path.join(here, "..", "main.py"))
+    with open(main_path, "r", encoding="utf-8") as f:
+        src = f.read()
+
+    final_closes_client = re.compile(
+        r"await send_json\(final_payload\)\s*\n"
+        r"\s*state\[\"client_closed\"\] = True\s*\n"
+        r"\s*return",
+        re.S,
+    )
+    receive_gate = re.compile(
+        r"msg = await ws\.receive\(\)\s*\n"
+        r"\s*if state\[\"client_closed\"\]:\s*\n"
+        r"\s*break",
+        re.S,
+    )
+    cleanup_cancel_guard = re.compile(
+        r"if asr_manager is not None and state\.get\(\"asr_active\"\):\s*\n"
+        r"\s*try:\s*\n"
+        r"\s*await asyncio\.wait_for\(\s*\n"
+        r"\s*asr_manager\.cancel\(\"ws_close\"\),",
+        re.S,
+    )
+
+    assert final_closes_client.search(src), (
+        "single-utterance asr_final no longer stops the dispatcher promptly"
+    )
+    assert receive_gate.search(src), (
+        "dispatcher can process an already-received audio frame after final"
+    )
+    assert cleanup_cancel_guard.search(src), (
+        "cleanup can call asr_manager.cancel('ws_close') after a normal final"
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

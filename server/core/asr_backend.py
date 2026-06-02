@@ -36,6 +36,23 @@ class TranscriptionResult:
 class ASRStream(ABC):
     """A streaming ASR session that accumulates audio and produces text."""
 
+    prefer_backend_endpoint_vad: bool = False
+    """Whether this stream owns endpoint VAD and should not be finalized by
+    frontend VAD speech_end events."""
+
+    allow_frontend_eou_finalize: bool = False
+    """Whether frontend VAD speech_end may finalize this stream even when the
+    backend owns endpoint VAD. Default False preserves backend-owned endpoint
+    semantics for opt-in streams until a backend explicitly accepts hybrid
+    frontend/backend endpointing."""
+
+    frontend_eou_min_audio_s: float = 0.0
+    """Minimum accepted audio duration before frontend VAD speech_end may
+    finalize a backend-owned endpoint stream."""
+
+    immediate_client_eos_cancel_safe: bool = False
+    """Whether partial abort can run outside normal ASR serialization."""
+
     @abstractmethod
     def accept_waveform(self, sample_rate: int, samples: np.ndarray) -> None:
         """Feed audio samples (float32, [-1,1]) into the stream."""
@@ -96,6 +113,17 @@ class ASRBackend(ABC):
     # PR5 / FIX_A: see TTSBackend.supports_hot_reload. Default False; backends
     # whose unload() actually releases GPU/NPU resources should set True.
     supports_hot_reload: bool = False
+    prefer_backend_endpoint_vad: bool = False
+    """Whether streams from this backend should receive audio from the first
+    frame even when frontend VAD is enabled, then let backend endpointing own
+    finalization. Default False preserves legacy frontend-VAD semantics."""
+
+    allow_frontend_eou_finalize: bool = False
+    """Whether frontend VAD speech_end may finalize streams from this backend
+    even when ``prefer_backend_endpoint_vad`` is true."""
+
+    frontend_eou_min_audio_s: float = 0.0
+    """Minimum accepted audio duration before frontend EOU can finalize."""
 
     @property
     @abstractmethod

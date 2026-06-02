@@ -704,9 +704,12 @@ def _unpack_finalize_result(raw):
     """Normalise ``ASRStream.finalize()`` return to ``(text, language)``.
 
     Per the ASRStream ABC contract, backends MUST return ``(text, language)``.
-    Missed migrations fail loudly here (TypeError at unpack) rather than
-    silently degrading to ``language=None``.
+    Some migrated or third-party backends historically returned a
+    StreamSession-style dict; accept that shape here to avoid silently
+    unpacking dict keys as transcript/language.
     """
+    if isinstance(raw, dict):
+        return raw.get("text") or "", raw.get("language")
     text, lang = raw
     return text or "", lang
 
@@ -3243,6 +3246,8 @@ async def v2v_stream(ws: WebSocket):
                                          # utterance's asr_active flag (BUG 2)
             "asr_started_once": False,  # single-turn backend endpoint streams
                                          # must not reopen on trailing silence
+            "asr_audio_samples_accepted": 0,  # accepted audio duration for
+                                         # per-stream frontend EOU safety gate
             "endpoint_finalize_pending": False,  # set when dispatcher already
                                          # accepted the speech-end chunk and the
                                          # asr_out_task should finalize next tick
@@ -3293,6 +3298,24 @@ async def v2v_stream(ws: WebSocket):
 
         def _asr_backend_prefers_backend_endpoint_vad() -> bool:
             return bool(getattr(asr_be, "prefer_backend_endpoint_vad", False))
+
+        def _asr_stream_allows_frontend_eou_finalize() -> bool:
+            if asr_manager is None:
+                return False
+            stream = getattr(asr_manager, "stream", None)
+            return bool(getattr(stream, "allow_frontend_eou_finalize", False))
+
+        def _asr_stream_frontend_eou_min_audio_s() -> float:
+            if asr_manager is None:
+                return 0.0
+            stream = getattr(asr_manager, "stream", None)
+            try:
+                return max(
+                    0.0,
+                    float(getattr(stream, "frontend_eou_min_audio_s", 0.0) or 0.0),
+                )
+            except (TypeError, ValueError):
+                return 0.0
     
         # ── Stage 4: tasks ──────────────────────────────────────────────
     
@@ -3399,6 +3422,7 @@ async def v2v_stream(ws: WebSocket):
                                     state["endpoint_pending_gen"] = None
                                     state["asr_active"] = True
                                     state["asr_active_gen"] = new_gen
+                                    state["asr_audio_samples_accepted"] = 0
                                     state["asr_turn_started_at"] = loop.time()
                                     state["asr_started_once"] = True
                                     speech_started_now = True
@@ -3418,6 +3442,7 @@ async def v2v_stream(ws: WebSocket):
                             (vad is None or _asr_backend_prefers_backend_endpoint_vad())
                             and not state["asr_active"]
                             and state["endpoint_pending"] is None
+                            and not state["asr_started_once"]
                         ):
                             try:
                                 async with coord.acquire("asr"):
@@ -3437,29 +3462,42 @@ async def v2v_stream(ws: WebSocket):
                             state["endpoint_pending_gen"] = None
                             state["asr_active"] = True
                             state["asr_active_gen"] = new_gen
+                            state["asr_audio_samples_accepted"] = 0
                             state["asr_turn_started_at"] = loop.time()
                             state["asr_started_once"] = True
                         if state["asr_active"]:
                             async with coord.acquire("asr"):
                                 await asr_manager.accept_audio(samples)
+                            state["asr_audio_samples_accepted"] += int(len(samples))
                         # Now safe to flag the endpoint — audio chunk that
                         # carried the speech-end has been delivered to the
                         # stream. asr_out_task will pick this up on the next
                         # poll and call finalize().
                         if speech_ended_now:
                             backend_owns_endpoint = _asr_stream_prefers_backend_endpoint_vad()
-                            if not backend_owns_endpoint:
+                            accepted_audio_s = (
+                                state.get("asr_audio_samples_accepted", 0)
+                                / max(float(sample_rate), 1.0)
+                            )
+                            frontend_eou_may_finalize = (
+                                not backend_owns_endpoint
+                                or (
+                                    _asr_stream_allows_frontend_eou_finalize()
+                                    and accepted_audio_s >= _asr_stream_frontend_eou_min_audio_s()
+                                )
+                            )
+                            if frontend_eou_may_finalize:
                                 state["endpoint_pending"] = "vad"
                                 state["endpoint_pending_gen"] = state["asr_active_gen"]
                                 if not multi_utterance:
                                     state["asr_session_closed"] = True
                             elif not multi_utterance:
-                                # The tail chunk that made frontend VAD fire
-                                # has already been accepted above. Keep waiting
-                                # for the backend/model endpoint, but close the
-                                # input side now so later trailing silence
-                                # cannot open a fresh ASR stream.
-                                state["asr_session_closed"] = True
+                                # Keep accepting trailing silence into the
+                                # active backend-owned stream so its endpoint
+                                # detector can fire. Reopen is already blocked
+                                # by asr_started_once once the stream becomes
+                                # inactive.
+                                pass
                             # Notify client of VAD speech_end so it can update
                             # its state machine (e.g. show "thinking" indicator,
                             # await asr_final). Sent AFTER endpoint_pending is
@@ -3509,6 +3547,7 @@ async def v2v_stream(ws: WebSocket):
                             async with coord.acquire("asr"):
                                 await asr_manager.cancel("bargein")
                             state["asr_active"] = False
+                            state["asr_audio_samples_accepted"] = 0
                             state["asr_turn_started_at"] = None
             except WebSocketDisconnect:
                 state["client_closed"] = True
@@ -3585,6 +3624,7 @@ async def v2v_stream(ws: WebSocket):
                     # cancels its turn promptly (instead of waiting for
                     # its own thinking watchdog). Treat as empty final.
                     state["asr_active"] = False
+                    state["asr_audio_samples_accepted"] = 0
                     state["asr_turn_started_at"] = None
                     state["endpoint_pending"] = None
                     state["endpoint_pending_gen"] = None
@@ -3648,6 +3688,12 @@ async def v2v_stream(ws: WebSocket):
                 )
     
                 if endpoint_fired:
+                    if not multi_utterance:
+                        # Single-turn sessions must close the input side as
+                        # soon as any endpoint wins. Otherwise queued trailing
+                        # silence can arrive after asr_active is cleared and
+                        # lazily open a second backend stream.
+                        state["asr_session_closed"] = True
                     if (
                         is_endpoint
                         and not endpoint_reason
@@ -3682,6 +3728,7 @@ async def v2v_stream(ws: WebSocket):
                         # new utterance must continue to flow (BUG 2).
                         if finalize_accepted and state["asr_active_gen"] == finalize_gen:
                             state["asr_active"] = False
+                            state["asr_audio_samples_accepted"] = 0
                             state["asr_turn_started_at"] = None
                     else:
                         final_text = ""
