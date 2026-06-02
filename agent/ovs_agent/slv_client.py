@@ -718,7 +718,14 @@ class SLVClient:
             args = evt.get("arguments")
             await self._queue.put(
                 ServerToolCall(
-                    id=str(evt.get("id", "")),
+                    # The server (voxedge tool_registry) emits the correlation
+                    # id in field "call_id"; older/other frames may use "id".
+                    # Read call_id FIRST — reading only "id" yielded an empty
+                    # string, so send_tool_result echoed back no call_id, the
+                    # server's resolve_remote never matched, and every remote
+                    # tool dispatch blocked the full 15s timeout (the "挥手 →
+                    # 已挥手 several seconds" round2 stall).
+                    id=str(evt.get("call_id") or evt.get("id", "")),
                     name=str(evt.get("name", "")),
                     arguments=args if isinstance(args, dict) else {},
                     timeout_s=float(evt.get("timeout_s", 15.0)),
