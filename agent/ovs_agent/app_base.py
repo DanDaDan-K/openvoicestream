@@ -1619,13 +1619,11 @@ class BaseApp:
         converted to ``ok=False`` results so the server-side LLM loop can
         self-recover instead of stalling.
         """
-        # #B1 diagnostic: log the correlation id AS RECEIVED by the handler.
-        # In-container repro proved the parse→dispatch→send chain preserves
-        # evt.id, yet live tool_result frames went out with an empty id and
-        # the server's resolve_remote never matched (round2 stall). This pins
-        # whether evt.id is already empty here (parse/transport) or only at
-        # the send call — %r so '' vs None vs a real hex id are distinguishable.
-        logger.info(
+        # Correlation-id trace (debug only). Kept from the round2-stall
+        # investigation: pairs with the info-level "SLV tool_result" line so a
+        # DEBUG run shows recv-id vs sent-id. The tool_result line at info is
+        # enough for production (it shows the id + ok status per tool call).
+        logger.debug(
             "server tool_call recv: id=%r name=%r", evt.id, evt.name
         )
         registry = getattr(self, "tool_registry", None)
@@ -2178,7 +2176,10 @@ class BaseApp:
                 or len(stripped_for_signal) <= 1
                 or stripped_for_signal in _INTERJECTIONS
             ):
-                logger.info(
+                # Debug only: an open mic emits empty/low-signal finals every
+                # 1-4s while idle — at info this floods the log. The state-
+                # transition lines (kept at info) still show any FSM effect.
+                logger.debug(
                     "low-signal asr_final ignored (text=%r, signal=%r, state=%s)",
                     (evt.text or "")[:30], stripped_for_signal,
                     getattr(self, "_state", ConvState.IDLE).name,

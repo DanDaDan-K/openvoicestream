@@ -690,9 +690,10 @@ class SLVClient:
             await self._queue.put(SLVError(f"bad json: {e}"))
             return
         t = evt.get("type")
-        # TEMP DEBUG: log every event type so we can see what SLV emits
-        # between turns. Cheap because events are sparse compared to PCM.
-        logger.info("SLV evt: %s", {k: v for k, v in evt.items() if k != "text" or len(str(v)) < 100})
+        # Per-event trace (every partial/final/tts/tool frame) — debug only;
+        # too chatty for production (fires several times per second on an
+        # open mic). Enable with OVS log level DEBUG when investigating.
+        logger.debug("SLV evt: %s", {k: v for k, v in evt.items() if k != "text" or len(str(v)) < 100})
         if t == SERVER_ASR_PARTIAL:
             await self._queue.put(
                 ASRPartial(text=evt.get("text", ""), is_stable=bool(evt.get("is_stable", False)))
@@ -709,7 +710,7 @@ class SLVClient:
                 )
             )
         elif t == SERVER_TTS_STARTED:
-            logger.info("SLV tts_started sentence=%r", evt.get("sentence", "")[:80])
+            logger.debug("SLV tts_started sentence=%r", evt.get("sentence", "")[:80])
             await self._queue.put(TTSStarted(sentence=evt.get("sentence", "")))
         elif t == SERVER_TTS_SENTENCE_DONE:
             await self._queue.put(TTSSentenceDone(sentence=evt.get("sentence", "")))
