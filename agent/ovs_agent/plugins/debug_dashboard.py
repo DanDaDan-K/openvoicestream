@@ -96,7 +96,6 @@ class DebugDashboardPlugin(Plugin):
 
         web_app = web.Application()
         web_app.router.add_get("/", self._handle_index)
-        web_app.router.add_get("/caption", self._handle_caption)
         web_app.router.add_get("/ws", self._handle_ws)
 
         # Control endpoints (POST).
@@ -251,15 +250,6 @@ class DebugDashboardPlugin(Plugin):
             text = _INDEX_HTML.read_text(encoding="utf-8")
         except FileNotFoundError:
             return web.Response(status=500, text="dashboard.html not found")
-        return web.Response(text=text, content_type="text/html")
-
-    async def _handle_caption(self, request):  # noqa: ANN001
-        # Real-time bilingual caption view (live_caption / simul_interpret).
-        from aiohttp import web
-        try:
-            text = (_STATIC_DIR / "live_caption.html").read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return web.Response(status=500, text="live_caption.html not found")
         return web.Response(text=text, content_type="text/html")
 
     async def _handle_ws(self, request):  # noqa: ANN001
