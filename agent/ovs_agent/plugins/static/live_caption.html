@@ -144,7 +144,7 @@
         counts=$("counts"), recBtn=$("rec"), recLabel=$("recLabel"), lvl=$("lvl");
 
   let ws=null, recording=false, micStream=null, audioCtx=null, sourceNode=null, procNode=null;
-  let reconnectTimer=null, wsOpenTs=0, lineCount=0;
+  let reconnectTimer=null, wsOpenTs=0, lineCount=0, gotData=false, failCount=0;
   let curOriginal="", debounceTimer=null, lastTranslatedSrc="";
 
   function setStatus(s, t){ dot.className="dot"+(s?" "+s:""); statusText.textContent=t; }
@@ -256,19 +256,27 @@
     let url=$("slvUrl").value.trim();
     if(!url){ const p=location.protocol==="https:"?"wss":"ws";
       url=p+"://"+location.host+"/asr?language=auto&sample_rate=16000"; }
+    gotData=false;
     try{ ws=new WebSocket(url); ws.binaryType="arraybuffer"; }
     catch(e){ setStatus("off","地址无效"); stop(); return; }
     ws.onopen=()=>{ setStatus("on","录音中"); wsOpenTs=performance.now(); };
     ws.onmessage=(ev)=>{ let m; try{m=JSON.parse(ev.data);}catch{return;}
+      gotData=true; failCount=0;                         // this connection is healthy
       const t=m.type||"";
       if(t==="partial") onPartial(m.text||"");
       else if(t==="final") onFinal(m.text||"", m.language||"");
       else if(t==="reset") resetCurrent();
     };
-    ws.onclose=(ev)=>{ const live=wsOpenTs?(performance.now()-wsOpenTs):0; ws=null;
+    // /asr/stream is an open-mic, multi-utterance session, but the server may
+    // close the socket between utterances (idle / per-turn timeout). While the
+    // user is still recording we just reconnect and keep going — clicking 开始录音
+    // once should cover a whole conversation. Only a run of connects that yield
+    // NO data (real rejection / wrong address) hard-stops, to avoid a storm.
+    ws.onclose=(ev)=>{ ws=null;
       if(!recording){ setStatus("off","已停止"); return; }
-      if(live<5000){ setStatus("off","连接被拒/异常，已停止（检查 SLV 地址）"); stop(); return; }
-      setStatus("wait","掉线重连…"); reconnectTimer=setTimeout(connectWs,600); };
+      if(!gotData) failCount++;
+      if(failCount>=6){ setStatus("off","多次连接无响应，已停止（检查 SLV 地址）"); stop(); return; }
+      setStatus("wait","重连中…"); reconnectTimer=setTimeout(connectWs, gotData?250:800); };
     ws.onerror=()=>{ try{ws&&ws.close();}catch{} };
   }
   function closeWs(){
