@@ -20,10 +20,10 @@ Routes:
 
 Usage:
   uv run --project <repo>/agent python serve_caption.py
-  uv run python serve_caption.py --port 8080 \
+  uv run python serve_caption.py --port 18790 \
       --slv ws://100.82.225.102:8621/asr/stream \
       --nllb http://100.82.225.102:9001
-Then open http://localhost:8080 and click 开始录音.
+Then open http://localhost:18790 and click 开始录音.
 
 Requires aiohttp (already a dependency of the agent — run via `uv run`).
 """
@@ -117,7 +117,7 @@ async def _on_cleanup(app: web.Application) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="live-caption gateway")
-    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--port", type=int, default=18790)
     ap.add_argument("--slv", default="ws://100.82.225.102:8621/asr/stream",
                     help="SLV ASR WebSocket upstream")
     ap.add_argument("--nllb", default="http://100.82.225.102:9001",
