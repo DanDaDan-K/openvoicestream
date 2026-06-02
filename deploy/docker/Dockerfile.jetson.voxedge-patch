@@ -18,9 +18,12 @@ FROM ${BASE}
 
 # Force-reinstall just the voxedge package; --no-deps because every dependency
 # already exists in the base layer (this is a pure-Python source refresh).
-COPY deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl /tmp/voxedge-patch.whl
-RUN pip3 install --no-cache-dir --no-deps --force-reinstall /tmp/voxedge-patch.whl \
-    && rm -f /tmp/voxedge-patch.whl
+# Keep the PEP 427 wheel filename intact — pip rejects a renamed wheel
+# ("not a valid wheel filename"), so COPY into a dir, don't rename.
+COPY deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl /tmp/voxedge-patch/
+RUN pip3 install --no-cache-dir --no-deps --force-reinstall \
+        /tmp/voxedge-patch/voxedge-0.0.1a0-py3-none-any.whl \
+    && rm -rf /tmp/voxedge-patch
 
 LABEL build.diff-type="voxedge-wheel-only"
 LABEL build.diff-base="${BASE}"
