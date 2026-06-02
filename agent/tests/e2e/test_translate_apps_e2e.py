@@ -164,3 +164,45 @@ async def test_simul_interpret_produces_tts():
         assert len(audio.captured_tts) > 1000, (
             f"expected TTS PCM bytes > 1000, got {len(audio.captured_tts)}"
         )
+
+
+@pytest.mark.asyncio
+async def test_simul_interpret_overlap_speaks_per_clause():
+    """overlap_mode=on: clauses are spoken DURING partials (is_final=False
+    on_translation events), not buffered to a single final flush — and SLV
+    actually produces TTS from those mid-utterance send_text calls."""
+    from ovs_agent.apps.simul_interpret.app import SimulInterpretApp
+
+    cfg = _app_config({"overlap_mode": "on"})
+    # Longer utterance → more partials → committer commits clauses mid-stream.
+    audio = ScriptedAudioIO([(800, WAV_DIR / "story_request.wav")])
+    async with _run(SimulInterpretApp(cfg), audio) as (app, probe):
+        await probe.wait_event("on_user_utterance", timeout=30)
+        # Give the overlap speaks + TTS a moment to flush through SLV.
+        for _ in range(80):
+            if len(audio.captured_tts) > 1000:
+                break
+            await asyncio.sleep(0.25)
+        # Overlap path emits per-clause is_final=False on_translation events.
+        evs = probe.events
+        final_idx = next(
+            (i for i, e in enumerate(evs) if e.get("event") == "on_user_utterance"),
+            len(evs),
+        )
+        previews = [
+            i for i, e in enumerate(evs)
+            if e.get("event") == "on_translation"
+            and isinstance(e.get("data"), dict)
+            and e["data"].get("is_final") is False
+        ]
+        assert previews, "expected per-clause (is_final=False) overlap speaks"
+        # At least one clause must be spoken DURING partials, i.e. before the
+        # ASRFinal/on_user_utterance — that's what distinguishes overlap from
+        # the off-mode single final flush.
+        assert previews[0] < final_idx, (
+            "expected a clause spoken before ASRFinal (during partials); "
+            f"first preview idx={previews[0]} not before final idx={final_idx}"
+        )
+        assert len(audio.captured_tts) > 1000, (
+            f"expected TTS PCM bytes > 1000 from overlap speaks, got {len(audio.captured_tts)}"
+        )
