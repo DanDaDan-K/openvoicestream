@@ -59,4 +59,5 @@ dev = [
     # via starlette's TestClient (needs httpx).
     "fastapi>=0.110",
     "httpx>=0.27",
+    "pytest-rerunfailures>=16.3",
 ]
