@@ -23,12 +23,25 @@
 ARG BASE
 FROM ${BASE}
 
-# Default to the site-packages import location (see header — verify per image).
-ARG OVS_DIR=/usr/local/lib/python3.11/site-packages
-COPY agent/ovs_agent/config.py             ${OVS_DIR}/ovs_agent/config.py
-COPY agent/ovs_agent/app_base.py           ${OVS_DIR}/ovs_agent/app_base.py
-COPY agent/ovs_agent/slv_client.py         ${OVS_DIR}/ovs_agent/slv_client.py
+# CRITICAL — the prod entrypoint exports
+#   PYTHONPATH="/app:/opt/openvoicestream/agent:${PYTHONPATH}"
+# and a copy of the package lives at BOTH /opt/openvoicestream/agent/ovs_agent
+# AND /usr/local/lib/python3.11/site-packages/ovs_agent. PYTHONPATH wins, so
+# the daemon imports the /opt/openvoicestream/agent copy — patching only
+# site-packages (what `docker run --entrypoint python3 -c import` resolves to,
+# because that invocation lacks the daemon's PYTHONPATH) is a silent no-op that
+# verifies green via getsource yet never executes. Overlay BOTH locations so
+# whichever path wins, the daemon runs the new code. Primary = the daemon path.
+ARG OVS_DIR=/opt/openvoicestream/agent
+ARG OVS_DIR_ALT=/usr/local/lib/python3.11/site-packages
+COPY agent/ovs_agent/config.py              ${OVS_DIR}/ovs_agent/config.py
+COPY agent/ovs_agent/app_base.py            ${OVS_DIR}/ovs_agent/app_base.py
+COPY agent/ovs_agent/slv_client.py          ${OVS_DIR}/ovs_agent/slv_client.py
 COPY agent/ovs_agent/apps/multi_mode/app.py ${OVS_DIR}/ovs_agent/apps/multi_mode/app.py
+COPY agent/ovs_agent/config.py              ${OVS_DIR_ALT}/ovs_agent/config.py
+COPY agent/ovs_agent/app_base.py            ${OVS_DIR_ALT}/ovs_agent/app_base.py
+COPY agent/ovs_agent/slv_client.py          ${OVS_DIR_ALT}/ovs_agent/slv_client.py
+COPY agent/ovs_agent/apps/multi_mode/app.py ${OVS_DIR_ALT}/ovs_agent/apps/multi_mode/app.py
 
 LABEL build.diff-type="ovs_agent-wakeskip+wakephrase+callid"
 LABEL build.diff-base="${BASE}"
