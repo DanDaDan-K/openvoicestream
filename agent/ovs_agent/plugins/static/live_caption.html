@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Seeed Local Voice · 实时字幕 / 同传</title>
+<style>
+  :root {
+    --bg: #f3f7ec; --panel: #ffffff; --line: #e3ead4; --line-soft: #eef2e3;
+    --ink: #1f2a17; --ink-soft: #6b7560; --ink-faint: #99a08e;
+    --accent: #6fa83a; --accent-soft: #d9e9c2; --accent-ink: #355013;
+    --partial: #9aa692; --bad: #c0392b; --warn: #b8861f;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+                 "Microsoft YaHei", "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--ink); display: flex; flex-direction: column;
+    height: 100vh; font-size: 15px; line-height: 1.55;
+  }
+  header.bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 28px; border-bottom: 1px solid var(--line); background: var(--bg);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand .logo {
+    width: 40px; height: 40px; background: var(--accent); color: #fff; font-weight: 700;
+    border-radius: 8px; display: flex; align-items: center; justify-content: center;
+    font-size: 14px; letter-spacing: 0.5px;
+  }
+  .brand h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  .brand .sub { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-soft); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-faint); }
+  .dot.on { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .dot.off { background: var(--bad); }
+
+  main { flex: 1; overflow-y: auto; padding: 22px 28px 40px; }
+  .line {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 18px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(31,42,23,.03);
+  }
+  .line .src { font-size: 17px; color: var(--ink); }
+  .line .tgt { font-size: 17px; color: var(--accent-ink); margin-top: 6px; font-weight: 500; }
+  .line .meta { font-size: 11px; color: var(--ink-faint); margin-top: 8px; letter-spacing: .3px; }
+  .tail { color: var(--partial); font-style: italic; }
+  .same .tgt { display: none; }  /* transcription-only: hide duplicate row */
+
+  #current {
+    border: 1px dashed var(--accent); background: #fbfdf6; position: sticky; bottom: 0;
+  }
+  #current.idle { opacity: .55; }
+  #partialAsr { font-size: 12px; color: var(--ink-faint); padding: 0 4px 10px; min-height: 16px; }
+  .empty { color: var(--ink-faint); text-align: center; margin-top: 18%; font-size: 15px; }
+</style>
+</head>
+<body>
+  <header class="bar">
+    <div class="brand">
+      <div class="logo">SLV</div>
+      <div>
+        <h1>实时字幕 / 同传</h1>
+        <div class="sub">Live Caption &amp; Interpretation · dashboard event stream</div>
+      </div>
+    </div>
+    <div class="status">
+      <span id="dot" class="dot"></span>
+      <span id="statusText">未连接</span>
+      <span id="counts" style="color:var(--ink-faint)"></span>
+    </div>
+  </header>
+
+  <main id="main">
+    <div id="history"></div>
+    <div id="partialAsr"></div>
+    <div id="current" class="line idle">
+      <div class="src" id="curSrc"></div>
+      <div class="tgt" id="curTgt"></div>
+      <div class="meta" id="curMeta"></div>
+    </div>
+    <div id="empty" class="empty">等待语音输入…</div>
+  </main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const historyEl = $("history"), curEl = $("current"), curSrc = $("curSrc"),
+        curTgt = $("curTgt"), curMeta = $("curMeta"), partialAsr = $("partialAsr"),
+        emptyEl = $("empty"), dot = $("dot"), statusText = $("statusText"), counts = $("counts");
+
+  let ws = null, retry = 0, lineCount = 0;
+
+  function setStatus(state, text) {
+    dot.className = "dot" + (state === "on" ? " on" : state === "off" ? " off" : "");
+    statusText.textContent = text;
+  }
+  function esc(s) { const d = document.createElement("div"); d.textContent = s || ""; return d.innerHTML; }
+  function scrollDown() { $("main").scrollTop = $("main").scrollHeight; }
+
+  // Render the live (in-progress) line: committed solid + volatile tail faded.
+  function renderCurrent(d) {
+    emptyEl.style.display = "none";
+    curEl.classList.remove("idle");
+    const src = esc(d.original) + (d.tail_original ? ` <span class="tail">${esc(d.tail_original)}</span>` : "");
+    const tgt = esc(d.translated) + (d.tail_translated ? ` <span class="tail">${esc(d.tail_translated)}</span>` : "");
+    curSrc.innerHTML = src;
+    // Transcription-only (noop translator): original === translated → hide tgt row.
+    const sameLang = (d.translated || "") === (d.original || "") && !d.tail_translated;
+    curEl.classList.toggle("same", sameLang);
+    curTgt.innerHTML = sameLang ? "" : tgt;
+    curMeta.textContent = [d.detected_language || d.src_lang, "→", d.tgt_lang].join(" ");
+  }
+
+  function commitLine(d) {
+    const sameLang = (d.translated || "") === (d.original || "");
+    const div = document.createElement("div");
+    div.className = "line" + (sameLang ? " same" : "");
+    div.innerHTML =
+      `<div class="src">${esc(d.original)}</div>` +
+      `<div class="tgt">${esc(d.translated)}</div>` +
+      `<div class="meta">${esc((d.detected_language || d.src_lang || "") + " → " + (d.tgt_lang || ""))}</div>`;
+    historyEl.appendChild(div);
+    lineCount++;
+    counts.textContent = lineCount + " 句";
+    // reset current
+    curSrc.innerHTML = ""; curTgt.innerHTML = ""; curMeta.textContent = "";
+    curEl.classList.add("idle"); curEl.classList.remove("same");
+    partialAsr.textContent = "";
+    scrollDown();
+  }
+
+  function handle(msg) {
+    const ev = msg.event, d = msg.data;
+    if (ev === "on_translation") {
+      if (d && d.is_final) commitLine(d); else if (d) { renderCurrent(d); scrollDown(); }
+    } else if (ev === "on_user_partial") {
+      partialAsr.textContent = d ? ("🎤 " + d) : "";
+    } else if (ev === "on_user_speech_start") {
+      partialAsr.textContent = "🎤 …";
+    }
+  }
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    setStatus(null, "连接中…");
+    try { ws = new WebSocket(proto + "://" + location.host + "/ws"); }
+    catch (e) { scheduleReconnect(); return; }
+    ws.onopen = () => { setStatus("on", "已连接"); retry = 0; };
+    ws.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch (_) {} };
+    ws.onclose = () => { setStatus("off", "断开，重连中…"); ws = null; scheduleReconnect(); };
+    ws.onerror = () => { try { ws && ws.close(); } catch (_) {} };
+  }
+  function scheduleReconnect() {
+    retry = Math.min(retry + 1, 10);
+    setTimeout(connect, Math.min(500 * retry, 5000));
+  }
+  connect();
+</script>
+</body>
+</html>
