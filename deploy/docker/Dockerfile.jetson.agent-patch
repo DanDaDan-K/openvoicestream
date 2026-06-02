@@ -1,0 +1,29 @@
+# Thin "diff" Dockerfile for the voice-arm AGENT — overlays ONLY changed
+# ovs_agent Python files onto a previous production agent image. The
+# production agent image carries openwakeword deps + /app/entrypoint.sh
+# (mic/arm hardware bring-up) + the /opt/openvoicestream layout that the
+# standalone agent/Dockerfile lacks, so a wake-skip-only change MUST be
+# layered on the real production base, not rebuilt from agent/Dockerfile.
+#
+# Build (BASE = current running voice-arm image; OVS_DIR = where ovs_agent
+# lives in that image — verify with:
+#   docker run --rm --entrypoint python3 <BASE> -c "import ovs_agent; print(ovs_agent.__path__)"
+# ):
+#   docker build -f deploy/docker/Dockerfile.jetson.agent-patch \
+#       --build-arg BASE=<current-image:tag> \
+#       --build-arg OVS_DIR=/opt/openvoicestream \
+#       -t <current-image>:<new-tag> .
+#
+# Build context root must contain agent/ovs_agent/{config.py,app_base.py}.
+# COPY only the two wake-skip files — NOT the whole tree — to avoid dragging
+# in unrelated uncommitted WIP that may sit in the working copy.
+
+ARG BASE
+FROM ${BASE}
+
+ARG OVS_DIR=/opt/openvoicestream
+COPY agent/ovs_agent/config.py   ${OVS_DIR}/ovs_agent/config.py
+COPY agent/ovs_agent/app_base.py ${OVS_DIR}/ovs_agent/app_base.py
+
+LABEL build.diff-type="ovs_agent-wakeskip-only"
+LABEL build.diff-base="${BASE}"
