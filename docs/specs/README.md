@@ -31,23 +31,3 @@ RK3588 NPU. Final shipped state (2026-05-23): 34 % NPU residency
 | [kokoro-rk-zh-fix-misaki.md](kokoro-rk-zh-fix-misaki.md) | 2026-05-23 | misaki v1.1 ZH G2P wired at the tokenizer front-end |
 | [kokoro-rk-bucket8-ttfa.md](kokoro-rk-bucket8-ttfa.md) | 2026-05-23 | Bucket-8 router shipped — short EN TTFA 0.79 s |
 | [kokoro-rk-bucket16-mid-ttfa.md](kokoro-rk-bucket16-mid-ttfa.md) | 2026-05-23 | Bucket-16 router shipped — mid TTFA 1.5-1.6 s; misaki baked into Dockerfile.rk |
-
-## ASR / TTS worker concurrency (Jetson)
-
-| Spec | One-liner |
-| --- | --- |
-| [voice-pipeline-concurrency-plan.md](voice-pipeline-concurrency-plan.md) | Overall multi-client concurrency plan for the voice pipeline |
-| [asr-worker-concurrency.md](asr-worker-concurrency.md) | ASR worker concurrency design |
-| [asr-n2-phase-b-patches.md](asr-n2-phase-b-patches.md) | ASR N=2 Phase B patches |
-| [tts-worker-concurrency.md](tts-worker-concurrency.md) | TTS worker concurrency design |
-| [tts-worker-cancel-protocol.md](tts-worker-cancel-protocol.md) | Cooperative cancel protocol A-at-N=1 (landed 2026-05-22) |
-| [tts-n2-throughput.md](tts-n2-throughput.md) | TTS N=2 throughput investigation |
-| [tts-n2-shared-tensor-audit.md](tts-n2-shared-tensor-audit.md) | Shared-tensor audit for N=2 |
-| [tts-n2-phase-b-patches.md](tts-n2-phase-b-patches.md) | TTS N=2 Phase B stability patches (landed 2026-05-22) |
-
-## MOSS-TTS-Nano port (in progress)
-
-| Spec | One-liner |
-| --- | --- |
-| [moss-tts-nano-kv-adapter.md](moss-tts-nano-kv-adapter.md) | KV adapter design (flat FP32 → paged FP16) |
-| [moss-tts-nano-paged-kv-cpp.md](moss-tts-nano-paged-kv-cpp.md) | Paged KV C++ implementation notes |

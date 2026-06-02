@@ -57,3 +57,24 @@ docs/specs/voxedge-engine-overlay-and-artifacts.md
 docs/specs/voxedge-engine-extraction-inventory.md
 docs/specs/tool-calling-engine-migration.md
 docs/specs/cutover-dockerfile-draft.md
+
+# Engine-concurrency (slot-pool / batch / cohort) IP + private fork-internal
+# implementation specs — the edge-performance moat. Kept private; NOT public.
+docs/specs/asr-n2-phase-b-patches.md
+docs/specs/asr-n4-concurrency-c-optimized.md
+docs/specs/asr-slotpool-d1-impl.md
+docs/specs/asr-worker-concurrency.md
+docs/specs/customvoice-tts-fork-port-handoff.md
+docs/specs/cute-dsl-medium-gemm-bug-investigation.md
+docs/specs/moss-tts-nano-kv-adapter.md
+docs/specs/moss-tts-nano-kv-dtype-abi-fix.md
+docs/specs/moss-tts-nano-paged-kv-cpp.md
+docs/specs/qwen3-asr-tts-batch-concurrency.md
+docs/specs/qwen3-concurrency-architecture.md
+docs/specs/tts-cohort-batch-d2-impl.md
+docs/specs/tts-n2-phase-b-patches.md
+docs/specs/tts-n2-shared-tensor-audit.md
+docs/specs/tts-n2-throughput.md
+docs/specs/tts-worker-cancel-protocol.md
+docs/specs/tts-worker-concurrency.md
+docs/specs/voice-pipeline-concurrency-plan.md

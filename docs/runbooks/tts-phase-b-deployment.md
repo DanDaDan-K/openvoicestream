@@ -245,7 +245,7 @@ These are the same engines that were running pre-Phase-B. Phase B only changed t
 
 ## §7 What's NOT shipped (deferred work)
 
-1. **ASR concurrency** — Strategy B (multi-runtime) deferred to AGX upgrade. Today's behavior: second concurrent ASR client queues at Python `_get_asr_executor max_workers=1`. See `docs/specs/asr-n2-phase-b-patches.md`.
+1. **ASR concurrency** — Strategy B (multi-runtime) deferred to AGX upgrade. Today's behavior: second concurrent ASR client queues at Python `_get_asr_executor max_workers=1`. See `an internal engineering spec (not in the public mirror)`.
 
 2. **TTS N=2 slow-client TTFA optimization** — Reaching the ≤1.5× spec gate for the slow client at N=2 requires either pipeline overlap between Code2Wav and next-talker, or AGX hardware. Phase B fast-client achieves 1.4× (within gate); slow-client at ~5× is hardware-bound.
 
@@ -254,7 +254,7 @@ These are the same engines that were running pre-Phase-B. Phase B only changed t
 ## §8 Cross-reference
 
 - TTS Phase B detailed memory: `~/.claude/projects/-Users-harvest-project-seeed-local-voice/memory/tts_n2_phase_b_stability_landed.md`
-- TTS Phase B audit spec: `docs/specs/tts-n2-throughput.md`
-- TTS Phase B patch spec: `docs/specs/tts-n2-phase-b-patches.md`
-- ASR audit spec: `docs/specs/asr-n2-phase-b-patches.md`
-- Shared tensor audit: `docs/specs/tts-n2-shared-tensor-audit.md`
+- TTS Phase B audit spec: `an internal engineering spec (not in the public mirror)`
+- TTS Phase B patch spec: `an internal engineering spec (not in the public mirror)`
+- ASR audit spec: `an internal engineering spec (not in the public mirror)`
+- Shared tensor audit: `an internal engineering spec (not in the public mirror)`

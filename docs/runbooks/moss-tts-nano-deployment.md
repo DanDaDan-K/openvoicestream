@@ -14,7 +14,7 @@
 | C++ TRT (default) | `jetson-moss-tts-nano-trt` | **~157 ms** | Production. Native binary, FP32/FP16 KV via TensorRT. |
 | ORT Python (fallback) | `jetson-moss-tts-nano` | ~3000 ms | Fallback if the C++ binary fails to load or you need CPU-only deterministic path. |
 
-The C++ TRT path was unblocked on 2026-05-24 by a KV-buffer dtype ABI fix — see `docs/specs/moss-tts-nano-kv-dtype-abi-fix.md`.
+The C++ TRT path was unblocked on 2026-05-24 by a KV-buffer dtype ABI fix — see `an internal engineering spec (not in the public mirror)`.
 
 ## Quick start (C++ TRT, default)
 
@@ -215,7 +215,7 @@ Worker dynamically links `libsentencepiece.so.0`. Install on Jetson:
 
 ### 5. (HISTORICAL, FIXED 2026-05-24) KV buffer dtype hardcoded as `sizeof(half)`
 
-`mossTtsNanoRuntime.cpp` previously hardcoded `sizeof(half)` (2 bytes) in 8 KV-buffer sizing call-sites. When engines were rebuilt with FP32 KV IO (v16 rebuild), buffers were half-size → per-layer KV overlap → frame≥1 corruption → trailing-token hallucination on ASR. **Fixed** by probing `mDecodeEngine->getTensorDataType("past_key_0")` and computing element size dynamically. Full bug report + diagnostic trail: `docs/specs/moss-tts-nano-kv-dtype-abi-fix.md`.
+`mossTtsNanoRuntime.cpp` previously hardcoded `sizeof(half)` (2 bytes) in 8 KV-buffer sizing call-sites. When engines were rebuilt with FP32 KV IO (v16 rebuild), buffers were half-size → per-layer KV overlap → frame≥1 corruption → trailing-token hallucination on ASR. **Fixed** by probing `mDecodeEngine->getTensorDataType("past_key_0")` and computing element size dynamically. Full bug report + diagnostic trail: `an internal engineering spec (not in the public mirror)`.
 
 If you rebuild the worker from a fork commit older than `3c6c263`, you will hit this regression again. Pull the fix or apply the equivalent dtype-probe patch.
 
@@ -266,6 +266,6 @@ unless reclaiming the 1.42 GB.
 ## References
 
 - ONNX patch & codec fix landing: [[moss_tts_nano_smoke_e2e_done]]
-- C++ runtime: [[moss_tts_nano_worker_p1_done]] + `docs/specs/moss-tts-nano-paged-kv-cpp.md`
+- C++ runtime: [[moss_tts_nano_worker_p1_done]] + `an internal engineering spec (not in the public mirror)`
 - Edge port playbook: `docs/playbooks/tts-model-edge-port-playbook.md`
 - Backend pattern: `app/backends/jetson/qwen3_trt.py` (mirror template)

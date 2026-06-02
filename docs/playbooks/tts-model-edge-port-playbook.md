@@ -463,7 +463,7 @@ RK 比 Jetson 多 ~3 PD，主要在 T2 + T3。
 - 全文 grep 把所有 `sizeof(half)` 等硬编码替换成 member。
 - 打 log，回归测：frame-0 byte-equal、frame ≥1 ASR CER 应同时通过。
 
-**详细 case study + 6 轮 diagnostic trail**：`docs/specs/moss-tts-nano-kv-dtype-abi-fix.md`。
+**详细 case study + 6 轮 diagnostic trail**：`an internal engineering spec (not in the public mirror)`。
 
 ---
 
