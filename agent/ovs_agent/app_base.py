@@ -603,6 +603,41 @@ class BaseApp:
         """
         raise NotImplementedError("Subclass BaseApp and implement on_user_utterance")
 
+    async def on_user_partial(
+        self, text: str, detected_language: str | None = None
+    ) -> None:
+        """ASR partial transcript update. Default: no-op.
+
+        Apps that consume the streaming partial flow (live-caption,
+        simultaneous-interpret) override this to drive a
+        ``SegmentCommitter``. Plain apps ignore it. Called from the
+        ASRPartial dispatch alongside the ``on_user_partial`` plugin
+        broadcast (see ``_dispatch_one``).
+        """
+        return None
+
+    def _active_mode_barge_in_override(self) -> bool | None:
+        """Per-mode barge-in override, or ``None`` if not mode-driven.
+
+        BaseApp has no mode concept; returns ``None`` so resolution falls
+        back to config. ``MultiModeApp`` may override to surface the active
+        mode's ``barge_in_enabled`` (mode override → mode class default).
+        """
+        return None
+
+    def _barge_in_enabled(self) -> bool:
+        """Resolve whether barge-in may interrupt the assistant.
+
+        Order: active-mode override → ``config.barge_in_enabled`` →
+        default ``True`` (unconfigured keeps the legacy always-on
+        behaviour, so existing apps are unaffected).
+        """
+        override = self._active_mode_barge_in_override()
+        if override is not None:
+            return override
+        cfg = getattr(self.config, "barge_in_enabled", None)
+        return True if cfg is None else bool(cfg)
+
     # ── boot-time connect retry budget (#38) ─────────────────────────
     # The very first connect() races the SLV session-limiter (limit=1):
     # after an abrupt kill the previous slot can take ~60s to release.
@@ -1889,7 +1924,11 @@ class BaseApp:
                     elapsed_ms, barge_min_speaking_ms, partial_text,
                 )
                 return
-            if self._state in (ConvState.SPEAKING, ConvState.BARGED_IN) and self.audio.is_playing:
+            if (
+                self._state in (ConvState.SPEAKING, ConvState.BARGED_IN)
+                and self.audio.is_playing
+                and self._barge_in_enabled()
+            ):
                 logger.info(
                     "BARGE-IN fired (state=%s, partial=%r)",
                     self._state.value, evt.text[:40]
@@ -1906,7 +1945,16 @@ class BaseApp:
                     except (asyncio.CancelledError, Exception):
                         pass
                 await self._interrupt_current_turn_for_barge_in()
+            elif self._state in (ConvState.SPEAKING, ConvState.BARGED_IN) and self.audio.is_playing:
+                # barge-in disabled (e.g. translation/transcription apps): keep
+                # playing the current reply, just surface the partial below.
+                logger.debug(
+                    "barge-in suppressed (disabled): partial %r during %s",
+                    partial_text, self._state.value,
+                )
+            # Surface the partial to both plugins and the app subclass hook.
             await self._broadcast("on_user_partial", evt.text)
+            await self.on_user_partial(evt.text, getattr(evt, "language", None))
             return
 
         if isinstance(evt, ASREndpoint):

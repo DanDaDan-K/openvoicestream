@@ -216,6 +216,25 @@ class Config:
     translator_tgt_lang: str = "eng_Latn"
     # Request timeout for translator service (seconds).
     translator_timeout_s: float = 5.0
+    # Barge-in master switch. None = legacy always-on (resolved to True in
+    # BaseApp._barge_in_enabled); set False for translation/transcription
+    # apps where the assistant must keep playing while the user speaks.
+    barge_in_enabled: bool | None = None
+    # ── Streaming translation (live_caption / simul_interpret apps) ──
+    # SegmentCommitter: commit a partial prefix once the last N partials
+    # agree on it; clause punctuation commits immediately.
+    committer_agreement_n: int = 2
+    committer_min_commit_chars: int = 1
+    # Debounce (ms) for re-translating the volatile tail; committed clauses
+    # translate immediately. 0 disables debounce.
+    translate_debounce_ms: int = 250
+    # simul_interpret: "off" = clause-lag (speak at pauses), "on" = full-duplex
+    # overlap (needs AEC device / headphones; relies on echo_filter backstop).
+    overlap_mode: str = "off"
+    # Software self-echo backstop for overlap mode.
+    echo_filter_enabled: bool = True
+    echo_similarity_threshold: float = 0.82
+    echo_window_s: float = 4.0
     # ── Tool calling (see docs/agent/tool-usage.md) ────────────────
     # Master switch. When False, app_mode bypasses the tool runner
     # entirely and behaves identically to the pre-tool implementation
