@@ -10,7 +10,7 @@ before backends are imported. Resolution order:
 Engines are resolved from baked/local ``engine_path`` or a prebuilt HF bundle
 only. The product is a pure runtime: it never compiles engines locally. Engine
 build tooling lives in the jetson-voice-engine repo
-(``third_party/qwen3-edgellm-jetson/models/``), not here. ONNX artifacts are
+(``third_party/jetson-voice-engine/models/``), not here. ONNX artifacts are
 rebuild inputs, not TensorRT runtime dependencies, and a compatible prebuilt
 engine must not trigger ONNX downloads.
 

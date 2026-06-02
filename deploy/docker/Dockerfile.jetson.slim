@@ -119,7 +119,7 @@ COPY --chmod=0755 \
 # server/core/qwen3_artifact_downloader.py). The rest of the engine repo
 # (engine-overlay/, models/, native/, scripts/, tests/, docs/) is build-time
 # tooling for jetson-voice-engine — excluded to keep the runtime image slim.
-COPY third_party/qwen3-edgellm-jetson/deploy/ /opt/qwen3-edgellm-jetson/deploy/
+COPY third_party/jetson-voice-engine/deploy/ /opt/qwen3-edgellm-jetson/deploy/
 
 # Replace 4x cp (~280MB duplicated bytes in this layer) with symlinks
 # pointing back to /opt/jv-workers. dlopen / LD_LIBRARY_PATH transparently

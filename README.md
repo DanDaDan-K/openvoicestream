@@ -296,12 +296,12 @@ GET /health  →  {"asr": bool, "tts": bool, "streaming_asr": bool}
 
 ## Qwen3 Multilingual Path
 
-`OVS_PROFILE=jetson-multilang-highperf*` enables Qwen3-ASR + Qwen3-TTS — 52 languages plus voice cloning. The integration code lives in this repo; Qwen-specific export, engine builds, and worker glue are maintained in the standalone companion repo [`suharvest/qwen3-edgellm-jetson`](https://github.com/suharvest/qwen3-edgellm-jetson) (pinned here as a submodule at `third_party/qwen3-edgellm-jetson/`). Large model artifacts live in [`harvestsu/qwen3-edgellm-jetson-artifacts`](https://huggingface.co/harvestsu/qwen3-edgellm-jetson-artifacts) on Hugging Face.
+`OVS_PROFILE=jetson-multilang-highperf*` enables Qwen3-ASR + Qwen3-TTS — 52 languages plus voice cloning. The integration code lives in this repo; Qwen-specific export, engine builds, and worker glue are maintained in the standalone companion repo [`suharvest/jetson-voice-engine`](https://github.com/suharvest/jetson-voice-engine) (pinned here as a submodule at `third_party/jetson-voice-engine/`). Large model artifacts live in [`harvestsu/qwen3-edgellm-jetson-artifacts`](https://huggingface.co/harvestsu/qwen3-edgellm-jetson-artifacts) on Hugging Face.
 
 **Quickest path on a fresh Orin NX:**
 
 ```bash
-git clone https://github.com/suharvest/qwen3-edgellm-jetson.git
+git clone https://github.com/suharvest/jetson-voice-engine.git
 bash qwen3-edgellm-jetson/scripts/reproduce_qwen3_highperf.sh \
   --reference /path/to/24kHz_mono.wav   # optional: gates the voice-clone path
 ```
@@ -588,7 +588,7 @@ Issues and PRs are welcome. The most useful contributions:
 - Bug reports with reproducible audio samples and `LANGUAGE_MODE` / profile info
 - Documentation improvements, especially deployment recipes for new devices
 
-If you're working on a larger change, open an issue first to align on the approach. Sub-project changes (Qwen3 export, Rockchip runtime) belong in their own repos: [`qwen3-edgellm-jetson`](https://github.com/suharvest/qwen3-edgellm-jetson), [`rkvoice-stream`](https://github.com/suharvest/rkvoice-stream).
+If you're working on a larger change, open an issue first to align on the approach. Sub-project changes (Qwen3 export, Rockchip runtime) belong in their own repos: [`jetson-voice-engine`](https://github.com/suharvest/jetson-voice-engine), [`rkvoice-stream`](https://github.com/suharvest/rkvoice-stream).
 
 ## Acknowledgements
 
