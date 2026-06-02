@@ -1,6 +1,6 @@
 {
   "name": "jetson-moss-tts-nano-trt",
-  "description": "MOSS-TTS-Nano 0.1B TTS backend (C++ TRT path) for Jetson Orin (NX/Nano/AGX). 48kHz stereo output via TensorRT FP16/FP32 engines (5 TTS + 1 codec) + SentencePiece tokenizer. C++ worker subprocess (moss_tts_nano_worker, native binary) handles inference; Python backend wraps stdin/stdout JSON-line protocol. TTFA ~157ms on Orin NX (19x faster than ORT CPU fallback). See docs/specs/moss-tts-nano-kv-dtype-abi-fix.md for prerequisite KV dtype fix. Fall back to jetson-moss-tts-nano (ORT) if the C++ binary fails to load or you need a deterministic CPU-only path.",
+  "description": "MOSS-TTS-Nano 0.1B TTS backend (C++ TRT path) for Jetson Orin (NX/Nano/AGX). 48kHz stereo output via TensorRT FP16/FP32 engines (5 TTS + 1 codec) + SentencePiece tokenizer. C++ worker subprocess (moss_tts_nano_worker, native binary) handles inference; Python backend wraps stdin/stdout JSON-line protocol. TTFA ~157ms on Orin NX (19x faster than ORT CPU fallback). Fall back to jetson-moss-tts-nano (ORT) if the C++ binary fails to load or you need a deterministic CPU-only path.",
   "asr_backend": null,
   "tts_backend": "jetson.moss_tts_nano",
   "tts_model_id": "moss-tts-nano-v1",

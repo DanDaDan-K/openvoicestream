@@ -68,7 +68,7 @@ class WorkerIO:
     """
 
     # Class-level temporary instrumentation for Part D disconnect-watcher
-    # validation (spec docs/specs/tts-n2-throughput.md §3). Counts every
+    # validation (internal throughput spec §3). Counts every
     # cancel() invocation across all WorkerIO instances since process
     # start. Surfaced via the /health endpoint and via debug log. Remove
     # once Part D is validated and stable.
