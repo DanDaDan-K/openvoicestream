@@ -119,7 +119,7 @@
     <summary class="cfg" style="background:var(--bg);border:none">⚙ 服务地址</summary>
     <div class="cfg">
       <label>SLV ASR
-        <input class="url" id="slvUrl" value="ws://100.82.225.102:8621/asr/stream?language=auto&amp;sample_rate=16000" /></label>
+        <input class="url" id="slvUrl" value="" placeholder="留空 = 经本机网关 /asr（绕过系统代理）" /></label>
       <label>翻译网关
         <input class="url" id="trUrl" value="" placeholder="留空 = 经本机网关 /translate" /></label>
       <span>音量</span><span class="lvl"><i id="lvl"></i></span>
@@ -250,7 +250,13 @@
     if(!recording) return;
     closeWs();
     setStatus("wait","连接中…"); wsOpenTs=0;
-    try{ ws=new WebSocket($("slvUrl").value.trim()); ws.binaryType="arraybuffer"; }
+    // Empty = same-origin gateway /asr (gateway forwards to SLV). Going through
+    // localhost sidesteps the macOS system proxy, which corrupts WS upgrades to
+    // Tailscale IPs (100.64/10 is not in the proxy bypass list).
+    let url=$("slvUrl").value.trim();
+    if(!url){ const p=location.protocol==="https:"?"wss":"ws";
+      url=p+"://"+location.host+"/asr?language=auto&sample_rate=16000"; }
+    try{ ws=new WebSocket(url); ws.binaryType="arraybuffer"; }
     catch(e){ setStatus("off","地址无效"); stop(); return; }
     ws.onopen=()=>{ setStatus("on","录音中"); wsOpenTs=performance.now(); };
     ws.onmessage=(ev)=>{ let m; try{m=JSON.parse(ev.data);}catch{return;}
