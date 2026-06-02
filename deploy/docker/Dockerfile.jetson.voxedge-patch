@@ -1,0 +1,26 @@
+# Thin "diff" Dockerfile — reinstalls ONLY the voxedge wheel on top of a
+# previous baseline image. Use when the change set is voxedge-Python-only
+# (no new pip / apt deps, no new TRT engines). Builds in seconds because all
+# big layers (CUDA, TRT, engines, app tree) are inherited.
+#
+# Build (BASE = the currently-running seeed-voice image — inspect it first):
+#   docker build -f deploy/docker/Dockerfile.jetson.voxedge-patch \
+#       --build-arg BASE=<current-image:tag> \
+#       -t <current-image>:<new-tag> .
+#
+# The build context must contain deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl.
+#
+# If voxedge gained a new pip dependency, do NOT use this — fall back to the
+# full Dockerfile.jetson rebuild path.
+
+ARG BASE
+FROM ${BASE}
+
+# Force-reinstall just the voxedge package; --no-deps because every dependency
+# already exists in the base layer (this is a pure-Python source refresh).
+COPY deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl /tmp/voxedge-patch.whl
+RUN pip3 install --no-cache-dir --no-deps --force-reinstall /tmp/voxedge-patch.whl \
+    && rm -f /tmp/voxedge-patch.whl
+
+LABEL build.diff-type="voxedge-wheel-only"
+LABEL build.diff-base="${BASE}"
