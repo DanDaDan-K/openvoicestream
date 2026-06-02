@@ -6,24 +6,29 @@
 # layered on the real production base, not rebuilt from agent/Dockerfile.
 #
 # Build (BASE = current running voice-arm image; OVS_DIR = where ovs_agent
-# lives in that image — verify with:
+# is IMPORTED from in that image — NOT necessarily PYTHONPATH. On the prod
+# image PYTHONPATH=/opt/openvoicestream has no ovs_agent; the imported copy
+# lives in site-packages. ALWAYS verify:
 #   docker run --rm --entrypoint python3 <BASE> -c "import ovs_agent; print(ovs_agent.__path__)"
 # ):
 #   docker build -f deploy/docker/Dockerfile.jetson.agent-patch \
 #       --build-arg BASE=<current-image:tag> \
-#       --build-arg OVS_DIR=/opt/openvoicestream \
+#       --build-arg OVS_DIR=/usr/local/lib/python3.11/site-packages \
 #       -t <current-image>:<new-tag> .
 #
-# Build context root must contain agent/ovs_agent/{config.py,app_base.py}.
-# COPY only the two wake-skip files — NOT the whole tree — to avoid dragging
-# in unrelated uncommitted WIP that may sit in the working copy.
+# Build context root must contain the listed agent/ovs_agent/*.py files.
+# COPY only the specific changed files — NOT the whole tree — to avoid
+# dragging in unrelated uncommitted WIP that may sit in the working copy.
 
 ARG BASE
 FROM ${BASE}
 
-ARG OVS_DIR=/opt/openvoicestream
-COPY agent/ovs_agent/config.py   ${OVS_DIR}/ovs_agent/config.py
-COPY agent/ovs_agent/app_base.py ${OVS_DIR}/ovs_agent/app_base.py
+# Default to the site-packages import location (see header — verify per image).
+ARG OVS_DIR=/usr/local/lib/python3.11/site-packages
+COPY agent/ovs_agent/config.py             ${OVS_DIR}/ovs_agent/config.py
+COPY agent/ovs_agent/app_base.py           ${OVS_DIR}/ovs_agent/app_base.py
+COPY agent/ovs_agent/slv_client.py         ${OVS_DIR}/ovs_agent/slv_client.py
+COPY agent/ovs_agent/apps/multi_mode/app.py ${OVS_DIR}/ovs_agent/apps/multi_mode/app.py
 
-LABEL build.diff-type="ovs_agent-wakeskip-only"
+LABEL build.diff-type="ovs_agent-wakeskip+wakephrase+callid"
 LABEL build.diff-base="${BASE}"
