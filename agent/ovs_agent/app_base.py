@@ -231,6 +231,10 @@ class BaseApp:
         else:
             self._state = ConvState.SLEEPING
         self._slv_reconnect_count: int = 0
+        # Monotonic deadline: drop (don't forward) mic audio until this time
+        # after a wake-word fires, so the wake-word tail doesn't leak into the
+        # command ASR. Set in wake() for audio wake sources; checked in _mic_pump.
+        self._wake_mic_skip_until: float = 0.0
         # #F4: in-flight SERVER_TOOL_CALL handler tasks. Dispatching a remote
         # tool in a background task keeps the dispatch loop draining events
         # (TTS audio / partials / control frames) instead of blocking on the
@@ -452,6 +456,16 @@ class BaseApp:
         than to pretend everything is fine and have the user repeat
         themselves into the void.
         """
+        # A local wake-word just fired — arm the mic-skip so the wake-word tail
+        # (and its reverb) isn't forwarded into the command ASR. Set BEFORE the
+        # SLEEPING gate so it also applies to a re-wake spoken mid-conversation
+        # (state already IDLE): otherwise that "Hey Jarvis" leaks into the next
+        # command and the server decodes them as one garbled segment. External
+        # (non-audio) wake sources have no wake word to skip.
+        if source == "openwakeword":
+            skip_ms = float(getattr(self.config, "wake_mic_skip_ms", 0.0) or 0.0)
+            if skip_ms > 0:
+                self._wake_mic_skip_until = time.monotonic() + skip_ms / 1000.0
         if getattr(self, "_state", ConvState.IDLE) != ConvState.SLEEPING:
             return
         logger.info("wake from %s", source)
@@ -1110,6 +1124,14 @@ class BaseApp:
                 # ASR sees one mashed utterance).
                 is_reconn = getattr(self.slv, "is_reconnecting", None)
                 if callable(is_reconn) and is_reconn():
+                    preroll.clear()
+                    continue
+                # Skip the wake-word tail: for a brief window after a wake-word
+                # fires, drop mic audio so the trailing "Hey Jarvis" + reverb
+                # isn't forwarded into the command utterance (else the server
+                # ASR decodes wake-word+command as one garbled segment). Clear
+                # preroll too so none of it is carried over.
+                if time.monotonic() < getattr(self, "_wake_mic_skip_until", 0.0):
                     preroll.clear()
                     continue
                 # (#38) Hold audio until boot-time tool advertise finished.

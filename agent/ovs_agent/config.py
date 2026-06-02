@@ -110,6 +110,13 @@ class Config:
     # drop mic audio while the agent is SPEAKING/THINKING (its own TTS echo)
     # so it can't open a server-VAD segment that never cleanly ends.
     mic_drop_while_speaking: bool = False
+    # After a local wake-word fires, skip forwarding this many ms of mic audio
+    # to the ASR — the tail of "Hey Jarvis" (+ reverb) otherwise leaks into the
+    # command utterance, so the server ASR decodes "wake word + command" as one
+    # garbled segment ("挥手"→"播一首"/"Hey Jarvis"). Skipping the wake-word
+    # region lets the command be a clean first segment. Tune down if it clips
+    # commands spoken continuously right after the wake word. 0 disables.
+    wake_mic_skip_ms: float = 500.0
     # force a fresh SLV session (new ASR worker) on EVERY wake, not just on
     # long idle. A single streaming-ASR worker can degrade after several
     # utterances on one persistent multi_utterance session (returns empty
