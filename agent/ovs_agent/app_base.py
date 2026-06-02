@@ -187,6 +187,15 @@ class BaseApp:
         self._mic_watchdog_task: asyncio.Task | None = None
         self._mic_restart_lock: asyncio.Lock | None = None
         self._last_mic_chunk_ts: float | None = None
+        # Wake-loop watchdog: catches a SILENTLY stalled wake source (its
+        # listen loop blocked on tap.get() — no exception for the source's own
+        # supervisor to see) while the mic capture is still healthy. Separate
+        # from the mic watchdog (different subject + recovery). _mic_restart_ts
+        # gives the wake loop a grace window to re-acquire after a mic restart.
+        self._wake_watchdog_task: asyncio.Task | None = None
+        self._wake_restart_lock: asyncio.Lock | None = None
+        self._mic_restart_ts: float = 0.0
+        self._boot_ts: float = 0.0
         self._dispatch_task: asyncio.Task | None = None
         self._llm_turn_task: asyncio.Task | None = None
         self._first_tts_seen = False
@@ -708,9 +717,14 @@ class BaseApp:
 
         await self._connect_with_boot_retry()
         self._mic_restart_lock = asyncio.Lock()
+        self._wake_restart_lock = asyncio.Lock()
+        self._boot_ts = time.monotonic()
         self._mic_task = asyncio.create_task(self._mic_pump(), name="mic-pump")
         self._mic_watchdog_task = asyncio.create_task(
             self._mic_watchdog(), name="mic-watchdog"
+        )
+        self._wake_watchdog_task = asyncio.create_task(
+            self._wake_watchdog(), name="wake-watchdog"
         )
         self._dispatch_task = asyncio.create_task(self._slv_dispatch(), name="slv-dispatch")
 
@@ -782,6 +796,14 @@ class BaseApp:
             except (asyncio.CancelledError, Exception):
                 pass
         self._mic_watchdog_task = None
+        wake_watchdog_task = getattr(self, "_wake_watchdog_task", None)
+        if wake_watchdog_task is not None and not wake_watchdog_task.done():
+            wake_watchdog_task.cancel()
+            try:
+                await wake_watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._wake_watchdog_task = None
         # 1. stop mic capture
         if self._mic_task is not None:
             self._mic_task.cancel()
@@ -872,6 +894,10 @@ class BaseApp:
             except Exception:
                 logger.debug("client VAD reset failed during mic restart", exc_info=True)
             self._last_mic_chunk_ts = time.monotonic()
+            # Grace window for the wake watchdog: a mic restart briefly stops
+            # the capture callback, so the wake loop won't get chunks for a
+            # moment — don't judge it stalled during/just after a mic restart.
+            self._mic_restart_ts = time.monotonic()
             self._mic_task = asyncio.create_task(self._mic_pump(), name="mic-pump")
 
     async def _mic_watchdog(self) -> None:
@@ -898,6 +924,60 @@ class BaseApp:
                 last = getattr(self, "_last_mic_chunk_ts", None)
                 if last is not None and (time.monotonic() - last) > stale_s:
                     await self.restart_mic_capture("watchdog:stale")
+        except asyncio.CancelledError:
+            raise
+
+    def _find_wake_source(self):
+        """Locate the wake source exposing the heartbeat/restart hooks
+        (duck-typed so app_base needn't import OpenWakeWordSource)."""
+        for p in self.plugins:
+            if callable(getattr(p, "last_chunk_ts", None)) and callable(
+                getattr(p, "request_restart", None)
+            ):
+                return p
+        return None
+
+    async def _wake_watchdog(self) -> None:
+        """Recover a silently-stalled wake source (its listen loop wedged on
+        ``tap.get()`` — no exception, so the source's own supervisor can't see
+        it) while the mic capture is still healthy. This is the ONLY recovery
+        for that case; crashes are handled by the supervisor itself."""
+        WAKE_STALE_S = 10.0
+        MIC_FRESH_S = 5.0
+        GRACE_S = 15.0
+        try:
+            while True:
+                await asyncio.sleep(2.0)
+                if getattr(self, "_shutdown_evt", None) is not None and self._shutdown_evt.is_set():
+                    return
+                ws = self._find_wake_source()
+                if ws is None:
+                    continue
+                now = time.monotonic()
+                # Boot + post-mic-restart grace: the loop needs time to
+                # (re)acquire its tap and start pulling chunks.
+                if now - self._boot_ts < GRACE_S:
+                    continue
+                if self._mic_restart_ts and (now - self._mic_restart_ts) < GRACE_S:
+                    continue
+                # Only act when the MIC is fresh. If the mic itself is stale
+                # that's the mic watchdog's job — restarting the wake loop
+                # wouldn't help and would thrash.
+                mic_last = getattr(self, "_last_mic_chunk_ts", None)
+                if mic_last is None or (now - mic_last) > MIC_FRESH_S:
+                    continue
+                wake_last = ws.last_chunk_ts()
+                if wake_last is None:
+                    continue  # no chunk processed yet → grace, not a stall
+                if (now - wake_last) > WAKE_STALE_S:
+                    logger.warning(
+                        "wake loop stale (%.0fs since last chunk; mic fresh %.1fs "
+                        "ago) — restarting wake source",
+                        now - wake_last, now - mic_last,
+                    )
+                    lock = self._wake_restart_lock or asyncio.Lock()
+                    async with lock:
+                        ws.request_restart()
         except asyncio.CancelledError:
             raise
 

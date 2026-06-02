@@ -51,10 +51,33 @@ class OpenWakeWordSource(WakeSource):
         self._threshold = float(threshold)
         self._cooldown_s = float(cooldown_s)
         self._vad_threshold = float(vad_threshold)
-        self._task: asyncio.Task | None = None
+        # Self-supervising loop: a long-lived supervisor restarts the inner
+        # listen loop (_run_once) on crash, so a transient predict/model error
+        # can't permanently kill wake detection. The heartbeat (_last_chunk_ts)
+        # lets an external watchdog catch a SILENT stall (tap.get() blocking)
+        # the supervisor can't see (no exception) — see app_base wake watchdog
+        # + request_restart.
+        self._supervisor_task: asyncio.Task | None = None
+        self._run_task: asyncio.Task | None = None
+        self._stopped: bool = False
+        self._last_chunk_ts: float | None = None  # heartbeat: last tap chunk seen
         self._last_wake_ts: float = 0.0
         self._buffer = np.zeros(0, dtype=np.int16)
         self._model = None  # lazily constructed in setup()
+
+    def last_chunk_ts(self) -> "float | None":
+        """Heartbeat for the wake watchdog: monotonic time of the last tap
+        chunk the listen loop pulled. ``None`` until the first chunk (grace)."""
+        return self._last_chunk_ts
+
+    def request_restart(self) -> None:
+        """Ask the supervisor to restart the inner listen loop (cancels the
+        current _run_once; the supervisor re-spawns it). Used by the wake
+        watchdog when the heartbeat goes stale while the mic is fresh — i.e.
+        tap.get() is wedged. Safe to call repeatedly."""
+        task = self._run_task
+        if task is not None and not task.done():
+            task.cancel()
 
     # ── plugin lifecycle ───────────────────────────────────────────
     def setup(self) -> bool:
@@ -94,36 +117,89 @@ class OpenWakeWordSource(WakeSource):
 
     async def start(self) -> None:
         await super().start()
-        self._task = asyncio.create_task(self._loop(), name="openwakeword")
+        self._stopped = False
+        self._supervisor_task = asyncio.create_task(
+            self._supervisor(), name="openwakeword-supervisor"
+        )
 
     async def stop(self) -> None:
         await super().stop()
-        if self._task is not None:
-            self._task.cancel()
+        # Set the stop flag FIRST so the supervisor doesn't re-spawn _run_once
+        # after we cancel it (race: cancel → supervisor's except → respawn).
+        self._stopped = True
+        for task in (self._run_task, self._supervisor_task):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
-            self._task = None
+        self._run_task = None
+        self._supervisor_task = None
+
+    # ── supervisor ─────────────────────────────────────────────────
+    async def _supervisor(self) -> None:
+        """Run the listen loop, restarting it on crash (exponential backoff,
+        reset after a clean run). Handles the CRASH case; a SILENT stall
+        (tap.get blocked) is recovered by the external wake watchdog calling
+        request_restart() → cancels _run_once → supervisor re-spawns it."""
+        backoff = 0.5
+        while not self._stopped:
+            started = time.monotonic()
+            self._run_task = asyncio.create_task(self._run_once(), name="openwakeword-run")
+            try:
+                await self._run_task
+            except asyncio.CancelledError:
+                # Distinguish a request_restart "kick" (cancels self._run_task,
+                # the awaited task → restart it) from the supervisor itself
+                # being torn down (external cancel / stop interrupts THIS await
+                # WITHOUT cancelling the run task). On teardown re-raise so we
+                # actually stop — and cancel the run task first so it can't leak
+                # and keep the loop alive ignoring cancellation.
+                if self._stopped or not self._run_task.cancelled():
+                    if not self._run_task.done():
+                        self._run_task.cancel()
+                    raise
+                logger.info("openwakeword: listen loop restarting (kicked)")
+                continue
+            except Exception:
+                logger.exception("openwakeword: _run_once crashed; restarting in %.1fs", backoff)
+                try:
+                    await asyncio.sleep(backoff)
+                except asyncio.CancelledError:
+                    raise
+                backoff = min(backoff * 2.0, 10.0)
+                continue
+            # _run_once returned normally (shouldn't — it loops). If it ran a
+            # while, reset backoff so the next genuine crash starts cheap.
+            if time.monotonic() - started > 30.0:
+                backoff = 0.5
 
     # ── inference loop ─────────────────────────────────────────────
-    async def _loop(self) -> None:
+    async def _run_once(self) -> None:
         # AudioIO opens its streams lazily; wait a beat so start_capture
         # has had a chance to allocate the queue + start the input stream.
         await asyncio.sleep(0.5)
-        try:
-            tap = await self.app.audio.start_capture_tap()
-        except AttributeError:
+        start_tap = getattr(self.app.audio, "start_capture_tap", None)
+        if not callable(start_tap):
             logger.error(
                 "audio object %r is not a TappedAudioIO; wake source idle",
                 type(self.app.audio).__name__,
             )
             return
+        tap = await start_tap()
+        # Fresh window state per run so a restart can't carry a half-filled
+        # buffer from the previous (crashed/stalled) session into predict().
+        self._buffer = np.zeros(0, dtype=np.int16)
 
         logger.info("OpenWakeWordSource: loop entered, waiting for audio")
         try:
-            while True:
+            while not self._stopped:
                 chunk = await tap.get()
+                # Heartbeat: stamp BEFORE processing so the wake watchdog sees
+                # the loop is alive even if a chunk takes a while to process.
+                self._last_chunk_ts = time.monotonic()
                 arr = np.frombuffer(chunk, dtype=np.int16)
                 if arr.size == 0:
                     continue
@@ -160,10 +236,18 @@ class OpenWakeWordSource(WakeSource):
                         except Exception:
                             logger.exception("app.wake() failed")
                         break
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("OpenWakeWordSource loop crashed")
+        finally:
+            # Always unregister the tap so a restart doesn't leak a dead queue
+            # in TappedAudioIO._taps (the sounddevice callback would keep
+            # fanning chunks into an orphaned queue forever).
+            stop_tap = getattr(self.app.audio, "stop_capture_tap", None)
+            if callable(stop_tap):
+                try:
+                    stop_tap(tap)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug("stop_capture_tap failed", exc_info=True)
+        # NOTE: no broad ``except Exception`` here — a crash propagates to
+        # _supervisor, which logs it and restarts the loop with backoff.
 
     def _cooldown_ok(self) -> bool:
         return (time.monotonic() - self._last_wake_ts) > self._cooldown_s

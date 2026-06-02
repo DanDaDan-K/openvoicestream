@@ -218,5 +218,19 @@ class TappedAudioIO(AudioIO):
         logger.info("capture tap registered (total=%d)", len(self._taps))
         return q
 
+    def stop_capture_tap(self, q: "asyncio.Queue[bytes]") -> None:
+        """Unregister a tap so the input callback stops fanning chunks into it.
+
+        Idempotent: a queue already removed (or never registered) is a no-op.
+        Used by consumers that re-acquire a fresh tap on restart (e.g.
+        OpenWakeWordSource) — without this their old queues accumulate in
+        ``_taps`` and the sounddevice callback keeps doing useless work feeding
+        orphaned queues (a slow leak)."""
+        try:
+            self._taps.remove(q)
+        except ValueError:
+            return
+        logger.info("capture tap unregistered (total=%d)", len(self._taps))
+
 
 __all__ = ["TappedAudioIO"]
