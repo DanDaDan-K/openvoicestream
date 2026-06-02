@@ -36,40 +36,87 @@ class EnergyVAD:
 
 
 class SileroVAD:
-    """silero-vad onnx via the silero_vad package. Accurate but heavier."""
+    """silero-vad onnx run directly through onnxruntime — TORCH-FREE.
+
+    The ``silero_vad`` Python package does ``import torch`` at module import
+    time (utils_vad.py), so it cannot be imported at all on a torch-purged
+    image. We therefore locate the bundled ``silero_vad.onnx`` file via the
+    package's resource path (without importing it) and drive the
+    ``onnxruntime.InferenceSession`` ourselves with numpy in/out.
+
+    Silero v5/v6 onnx I/O (16kHz):
+      inputs : ``input`` [1, 64+512], ``state`` [2,1,128], ``sr`` int64 scalar
+      outputs: ``output`` [1,1] speech prob, ``stateN`` [2,1,128] new state
+    Each 512-sample window must be prepended with the trailing 64 samples
+    (``context_size``) of the previous window; the recurrent ``state`` is
+    carried across calls. Skipping the context makes every prob ~0 (silent),
+    which is exactly the stall this class exists to avoid.
+    """
 
     name = "silero"
 
+    _CONTEXT = 64  # context_size for 16kHz (32 for 8kHz)
+
     def __init__(self, threshold: float = 0.5, sample_rate: int = 16000) -> None:
-        from silero_vad import load_silero_vad  # late import
+        import onnxruntime as ort  # late import; torch-free
 
         self.threshold = threshold
         self.sample_rate = sample_rate
-        self._model = load_silero_vad(onnx=True)
         # silero expects 32ms windows at 16kHz = 512 samples
         self._win = 512 if sample_rate == 16000 else 256
+        self._context_size = 64 if sample_rate == 16000 else 32
+
+        onnx_path = self._locate_onnx_model()
+        opts = ort.SessionOptions()
+        opts.inter_op_num_threads = 1
+        opts.intra_op_num_threads = 1
+        self._session = ort.InferenceSession(
+            onnx_path, providers=["CPUExecutionProvider"], sess_options=opts
+        )
+        self._sr = np.array(self.sample_rate, dtype=np.int64)
         self._buf = np.zeros(0, dtype=np.float32)
+        self.reset()
+
+    @staticmethod
+    def _locate_onnx_model() -> str:
+        """Find the bundled silero_vad.onnx WITHOUT importing the package
+        (its __init__ pulls in torch). Uses the module spec's file location.
+        """
+        import importlib.util
+        import os
+
+        spec = importlib.util.find_spec("silero_vad")
+        if spec is None or spec.origin is None:
+            raise ImportError("silero_vad package not installed")
+        pkg_dir = os.path.dirname(spec.origin)
+        onnx_path = os.path.join(pkg_dir, "data", "silero_vad.onnx")
+        if not os.path.exists(onnx_path):
+            raise FileNotFoundError(
+                f"silero_vad.onnx not found at {onnx_path}"
+            )
+        return onnx_path
 
     def is_speech(self, pcm: bytes) -> bool:
-        import torch
-
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
         self._buf = np.concatenate([self._buf, samples])
         any_speech = False
         while len(self._buf) >= self._win:
-            win = self._buf[: self._win]
+            win = self._buf[: self._win].reshape(1, -1).astype(np.float32)
             self._buf = self._buf[self._win :]
-            t = torch.from_numpy(win).float()
-            prob = float(self._model(t, self.sample_rate).item())
+            x = np.concatenate([self._ctx, win], axis=1)
+            out = self._session.run(
+                None, {"input": x, "state": self._state, "sr": self._sr}
+            )
+            prob = float(np.asarray(out[0]).reshape(-1)[0])
+            self._state = out[1]
+            self._ctx = x[:, -self._context_size :]
             if prob >= self.threshold:
                 any_speech = True
         return any_speech
 
     def reset(self) -> None:
-        try:
-            self._model.reset_states()
-        except Exception:  # pragma: no cover
-            pass
+        self._state = np.zeros((2, 1, 128), dtype=np.float32)
+        self._ctx = np.zeros((1, self._context_size), dtype=np.float32)
         self._buf = np.zeros(0, dtype=np.float32)
 
 

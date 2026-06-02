@@ -2,12 +2,45 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import os
+import subprocess
+import sys
+import wave
 from typing import Any
 
 import numpy as np
 import pytest
 
-from ovs_agent.vad import EnergyVAD, create_vad
+from ovs_agent.vad import EnergyVAD, SileroVAD, create_vad
+
+_HERE = os.path.dirname(__file__)
+_SPEECH_WAV = os.path.join(_HERE, "fixtures", "user_input.wav")
+
+
+def _silero_available() -> bool:
+    """True only if BOTH onnxruntime and the bundled silero onnx exist —
+    i.e. the torch-free path can actually run. The dev test env usually has
+    neither, so these tests skip there; the decisive proof is the on-device
+    boot log (client VAD=silero)."""
+    if importlib.util.find_spec("onnxruntime") is None:
+        return False
+    spec = importlib.util.find_spec("silero_vad")
+    if spec is None or spec.origin is None:
+        return False
+    onnx = os.path.join(os.path.dirname(spec.origin), "data", "silero_vad.onnx")
+    return os.path.exists(onnx)
+
+
+_silero_skip = pytest.mark.skipif(
+    not _silero_available(),
+    reason="onnxruntime + silero_vad.onnx not available in this env",
+)
+
+
+def _read_wav_bytes(path: str) -> bytes:
+    with wave.open(path) as w:
+        return w.readframes(w.getnframes())
 
 
 # ── EnergyVAD unit tests ────────────────────────────────────────────────
@@ -42,6 +75,96 @@ def test_create_vad_auto_falls_back() -> None:
     # not raise and must yield *some* VAD.
     v = create_vad("auto")
     assert v.name in ("silero", "energy")
+
+
+# ── SileroVAD (torch-free onnxruntime path) ─────────────────────────────
+
+
+@_silero_skip
+def test_silero_vad_speech_vs_silence() -> None:
+    """Real speech buffer → detected; silence → not detected."""
+    vad = SileroVAD()
+    speech = _read_wav_bytes(_SPEECH_WAV)
+    detected = any(
+        vad.is_speech(speech[i : i + 3200]) for i in range(0, len(speech), 3200)
+    )
+    assert detected is True
+
+    vad.reset()
+    silence = np.zeros(16000, dtype=np.int16).tobytes()
+    sil_detected = any(
+        vad.is_speech(silence[i : i + 3200]) for i in range(0, len(silence), 3200)
+    )
+    assert sil_detected is False
+
+
+@_silero_skip
+def test_silero_vad_reset_restores_state() -> None:
+    """reset() clears recurrent state/context/buffer so detection repeats."""
+    vad = SileroVAD()
+    speech = _read_wav_bytes(_SPEECH_WAV)
+
+    def run() -> bool:
+        vad.reset()
+        return any(
+            vad.is_speech(speech[i : i + 3200])
+            for i in range(0, len(speech), 3200)
+        )
+
+    assert run() is True
+    assert run() is True  # reset() must let it detect again
+
+
+@_silero_skip
+def test_create_vad_silero_explicit() -> None:
+    v = create_vad("silero")
+    assert v.name == "silero"
+
+
+def test_silero_vad_is_torch_free() -> None:
+    """The whole SileroVAD path (init + is_speech + reset) must NEVER import
+    torch. We prove this in a fresh subprocess that fakes-out torch: any
+    `import torch` raises, so if the path touched torch the run would crash.
+    The subprocess loads vad.py by file path (bypassing the package __init__,
+    which needs pyyaml) and uses a synthetic float buffer so the test runs
+    even without the silero onnx model present (it just exercises the import
+    boundary up to the onnxruntime InferenceSession)."""
+    code = r"""
+import sys, importlib.util, importlib.machinery
+# Poison torch: any attempt to import it must blow up loudly.
+class _Boom(importlib.machinery.PathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == 'torch' or name.startswith('torch.'):
+            raise AssertionError('TORCH WAS IMPORTED')
+        return None
+sys.meta_path.insert(0, _Boom())
+assert 'torch' not in sys.modules
+spec = importlib.util.spec_from_file_location('vadmod', %r)
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+# Importing the module must not pull torch.
+assert 'torch' not in sys.modules
+# Constructing + driving SileroVAD must not pull torch either. If the
+# onnx model / onnxruntime isn't installed this raises a non-torch error,
+# which still proves the torch-free boundary up to that point.
+try:
+    v = m.SileroVAD()
+    import numpy as np
+    pcm = (np.zeros(3200, dtype='int16')).tobytes()
+    v.is_speech(pcm); v.reset()
+except AssertionError:
+    raise  # torch import -> real failure
+except Exception:
+    pass  # missing onnxruntime/model is fine; not a torch import
+assert 'torch' not in sys.modules
+print('TORCH_FREE_OK')
+""" % (os.path.join(os.path.dirname(_HERE), "ovs_agent", "vad.py"),)
+    proc = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert "TORCH_FREE_OK" in proc.stdout, (
+        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 # ── BaseApp asr_eos integration ─────────────────────────────────────────
