@@ -291,6 +291,17 @@
   }
   recBtn.onclick=()=> recording ? stop() : start();
   setStatus(null,"未连接");
+
+  // Guard: this page must be served by serve_caption.py (the gateway provides a
+  // same-origin host for /asr + /translate). Opening the file directly (file://)
+  // has no host → ws:///asr is malformed and CORS/proxy break everything.
+  if(location.protocol==="file:"){
+    recBtn.disabled=true;
+    emptyEl.innerHTML="请勿直接双击打开此文件。<br>先在终端运行 "+
+      "<code>uv run python ovs_agent/plugins/static/serve_caption.py</code>，"+
+      "再用浏览器打开 <b>http://localhost:8080</b>。";
+    setStatus("off","请经网关打开");
+  }
 </script>
 </body>
 </html>
