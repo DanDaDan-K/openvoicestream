@@ -146,10 +146,6 @@
   let ws=null, recording=false, micStream=null, audioCtx=null, sourceNode=null, procNode=null;
   let reconnectTimer=null, wsOpenTs=0, lineCount=0, gotData=false, failCount=0;
   let curOriginal="", debounceTimer=null, lastTranslatedSrc="";
-  // Client-side VAD (drives end_utterance so one WS spans the conversation).
-  let vadSpeaking=false, vadSilenceMs=0, vadSpokeMs=0;
-  const VAD_TH=0.03, VAD_SILENCE_MS=700, VAD_MIN_SPEECH_MS=300;
-  function vadReset(){ vadSpeaking=false; vadSilenceMs=0; vadSpokeMs=0; }
 
   function setStatus(s, t){ dot.className="dot"+(s?" "+s:""); statusText.textContent=t; }
   function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
@@ -244,20 +240,8 @@
       lvl.style.width=Math.min(100,peak*140).toFixed(0)+"%";
       if(!recording||!ws||ws.readyState!==WebSocket.OPEN) return;
       ws.send(f32ToI16(resample(f32,audioCtx.sampleRate)).buffer);
-      // Client VAD: speech then >=VAD_SILENCE_MS quiet → finalize this utterance
-      // with end_utterance (server stays open for the next one).
-      const chunkMs=(f32.length/audioCtx.sampleRate)*1000;
-      if(peak>VAD_TH){ vadSpeaking=true; vadSilenceMs=0; vadSpokeMs+=chunkMs; }
-      else if(vadSpeaking){
-        vadSilenceMs+=chunkMs;
-        if(vadSilenceMs>=VAD_SILENCE_MS && vadSpokeMs>=VAD_MIN_SPEECH_MS){
-          try{ ws.send(JSON.stringify({command:"end_utterance"})); }catch{}
-          vadReset();
-        }
-      }
     };
     sourceNode.connect(procNode); procNode.connect(audioCtx.destination);
-    vadReset();
     recording=true; recBtn.classList.add("on"); recLabel.textContent="停止录音"; recBtn.disabled=false;
     connectWs();
   }
@@ -271,10 +255,12 @@
     // Tailscale IPs (100.64/10 is not in the proxy bypass list).
     let url=$("slvUrl").value.trim();
     if(!url){ const p=location.protocol==="https:"?"wss":"ws";
-      // vad=none → client drives endpointing via {command:end_utterance}, which
-      // keeps the SLV socket OPEN across utterances (server VAD would finalize+
-      // close after one). One connection for the whole conversation.
-      url=p+"://"+location.host+"/asr?language=auto&sample_rate=16000&vad=none"; }
+      // Gateway /asr → SLV /v2v/stream: ONE persistent multi-utterance socket.
+      // The gateway sends the config handshake and translates asr_partial/
+      // asr_final → partial/final; server VAD segments complete utterances and
+      // the socket stays open across the whole conversation (no per-sentence
+      // reconnect, no clipped starts). reconnect below is only a drop fallback.
+      url=p+"://"+location.host+"/asr?language=auto&sample_rate=16000"; }
     gotData=false;
     try{ ws=new WebSocket(url); ws.binaryType="arraybuffer"; }
     catch(e){ setStatus("off","地址无效"); stop(); return; }

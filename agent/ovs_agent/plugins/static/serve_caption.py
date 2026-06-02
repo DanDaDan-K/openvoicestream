@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from pathlib import Path
+from urllib.parse import urlencode
 
 from aiohttp import ClientSession, WSMsgType, web
 
@@ -69,20 +71,32 @@ async def handle_health(request: web.Request) -> web.Response:
 
 
 async def handle_asr_ws(request: web.Request) -> web.WebSocketResponse:
-    """Proxy the browser ASR WebSocket to the SLV /asr/stream upstream."""
+    """Proxy the browser ASR socket to the SLV **/asr/stream** upstream.
+
+    /asr/stream is the dedicated ASR-only endpoint — no TTS/LLM machinery (a
+    text-only caption doesn't need voice-out). Since the server-VAD
+    multi-utterance fix it stays open across utterances with COMPLETE finals
+    (prepare_finalize+finalize), so this is a plain passthrough: binary PCM up,
+    ``{type: partial|final}`` JSON down (already the right shape — no translation).
+    vad=silero so the server segments utterances.
+    """
     client = web.WebSocketResponse(max_msg_size=0)
     await client.prepare(request)
-    qs = request.query_string
-    upstream = request.app["slv"] + (("?" + qs) if qs else "")
+    q = request.query
+    params = {
+        "language": q.get("language", "auto"),
+        "sample_rate": q.get("sample_rate", "16000"),
+        "vad": q.get("vad", "silero"),
+        "vad_silence_ms": q.get("vad_silence_ms", "400"),
+    }
+    upstream = request.app["slv"] + "?" + urlencode(params)
     sess: ClientSession = request.app["sess"]
     try:
         async with sess.ws_connect(upstream, max_msg_size=0) as up:
             async def c2u() -> None:
                 async for m in client:
                     if m.type == WSMsgType.BINARY:
-                        await up.send_bytes(m.data)
-                    elif m.type == WSMsgType.TEXT:
-                        await up.send_str(m.data)
+                        await up.send_bytes(m.data)   # mic PCM
                     elif m.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                         break
                 await up.close()
@@ -90,9 +104,7 @@ async def handle_asr_ws(request: web.Request) -> web.WebSocketResponse:
             async def u2c() -> None:
                 async for m in up:
                     if m.type == WSMsgType.TEXT:
-                        await client.send_str(m.data)
-                    elif m.type == WSMsgType.BINARY:
-                        await client.send_bytes(m.data)
+                        await client.send_str(m.data)   # already {type:partial|final}
                     elif m.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                         break
                 if not client.closed:
