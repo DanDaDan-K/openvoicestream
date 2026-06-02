@@ -1101,12 +1101,17 @@ class BaseApp:
         triggering 1011 keepalive ping timeout. Dropping idle chunks keeps
         the connection mostly quiet between turns.
         """
-        from collections import deque
+        from ovs_agent.audio.vad_gate import PrerollRing
 
         try:
             chunk_ms = getattr(self.audio, "chunk_ms", 100)
             preroll_max = max(1, 400 // max(chunk_ms, 1))  # ~400ms
-            preroll: deque[bytes] = deque(maxlen=preroll_max)
+            # Pre-roll ring + speech-onset drain — extracted to the shared,
+            # robot-agnostic helper (ovs_agent.audio.vad_gate.PrerollRing).
+            # _update_vad still owns VAD state / EOS / barge-in; this ring
+            # only buffers idle chunks and replays them once at onset, which
+            # is exactly the prior inline `deque` behaviour.
+            preroll = PrerollRing(preroll_max)
             import numpy as _np
             # Rate-limit on_mic_rms broadcast: 10Hz is overkill for a
             # dashboard sparkline, and awaiting every plugin every 100ms
@@ -1260,12 +1265,11 @@ class BaseApp:
                     logger.exception("client VAD update failed")
 
                 if self._vad_state == "speech":
-                    # Drain the pre-roll buffer at speech onset, then stream
-                    # this chunk plus subsequent ones in real time.
-                    if preroll:
-                        for buffered in preroll:
-                            await self._send_audio_nonblocking(buffered)
-                        preroll.clear()
+                    # Drain the pre-roll buffer at speech onset (no-op on
+                    # subsequent chunks once drained), then stream this chunk
+                    # plus subsequent ones in real time.
+                    for buffered in preroll.drain():
+                        await self._send_audio_nonblocking(buffered)
                     await self._send_audio_nonblocking(chunk)
                 else:
                     # Idle: keep a short rolling buffer but don't transmit.
