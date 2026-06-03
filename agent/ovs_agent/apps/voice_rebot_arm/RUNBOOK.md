@@ -61,15 +61,16 @@
 
 感知链已真机验通（见 §0）。到“完整抓取”还差以下，全是纯工程、无新未知：
 
-### 3.1 重新导出 grasp 词表的 ONNX（离线，几分钟）
-验证用的 ONNX 只 bake 了 `["person","bus"]`。真抓取要 bake 抓取物体词表：
-```python
-from ultralytics import YOLOE
-m = YOLOE("yoloe-26s-seg.pt")
-m.set_classes(["cup","water bottle","banana","light blue coffee cup","tool","red object","green object"])
-m.export(format="onnx", opset=12, simplify=True, imgsz=640)   # 词表+NMS 烤进图
-```
-词表顺序要与 `YoloOnnxSegmenter` 的 `names` 一致。
+### 3.1 grasp 词表 ONNX —— ✅ 已完成（2026-06-04）
+已导出 7 类词表（与 reBot demo config 一致，顺序即 `names`）：
+`["yellow banana","water bottle","light blue coffee cup","cup","green object","red object","tool"]`
+- 设备上：`/home/seeed/perception_dryrun/yoloe-26s-seg-grasp7.onnx`（md5 `71d303c3...`）
+- **TRT engine 已预编译缓存**：`/home/seeed/perception_dryrun/trt_cache/`（45MB .engine + timing cache，sm87）。
+  编译是在停 edge-llm 腾出内存的窗口做的（冷编译 ~218s）；**缓存后即使内存紧（edge-llm 在跑）
+  也能直接加载推理，不再触发编译 OOM**。dry-run 脚本 providers 已带 TRT cache 选项。
+- 注意：一次性脚本里 TRT "warm" 跑 ~3.2s 是进程冷启（session 初始化+engine 反序列化）开销；
+  **常驻进程（grasp_service）里 session 只建一次，稳态单帧推理是几十 ms 级**，远快于 CPU 1.18s。
+  换词表需重导 ONNX + 重建 engine（再开一次腾内存窗口）。
 
 ### 3.2 手眼标定（eye-in-hand）→ `hand_eye.npz` ★硬门槛，必须到场
 当前**没有** `config/calibration/orbbec_gemini2/hand_eye.npz`，没它相机系位姿转不到机械臂基座系 → **无法抓**。
