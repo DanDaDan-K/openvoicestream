@@ -233,7 +233,9 @@ class YoloOnnxSegmenter:
         masks: list[np.ndarray] = []
         for row in det:
             c = float(row[4])
-            if c <= conf:
+            # Keep detections AT the threshold (conf is an inclusive floor);
+            # only drop strictly-below-threshold rows.
+            if c < conf:
                 continue
             box640 = row[:4].astype(np.float32)
             cls_id = int(round(float(row[5])))

@@ -257,6 +257,344 @@ def test_set_torque_raises_when_not_connected() -> None:
         act.set_torque(True)
 
 
+def test_torque_off_midsequence_aborts(monkeypatch) -> None:
+    # Emergency disable mid-sequence: after the first frame's move we flip
+    # torque off; the loop must abort before the next move and return False.
+    act, fake = _make_connected_actuator()
+
+    orig_move = fake.move_to
+
+    def _move(*a, **kw):
+        # After the first move, simulate an emergency set_torque(False).
+        act._torque_state = "off"  # noqa: SLF001
+        return orig_move(*a, **kw)
+
+    monkeypatch.setattr(fake, "move_to", _move)
+
+    ok = act.execute_sequence([_wp(y=0.1), _wp(y=-0.1), _wp(y=0.0)])
+    assert ok is False
+    # Only the first frame's move ran; the abort fired before frame 2.
+    assert len(fake.moves) == 1
+
+
+def test_set_torque_off_not_blocked_during_settle_sleep() -> None:
+    # The lock must NOT be held across the settle sleep, so an emergency
+    # set_torque(False) from another thread can proceed promptly while a
+    # long-delay sequence is mid-settle.
+    act, fake = _make_connected_actuator()
+    entered = threading.Event()
+    torque_done = threading.Event()
+
+    orig_move = fake.move_to
+
+    def _move(*a, **kw):
+        entered.set()
+        return orig_move(*a, **kw)
+
+    fake.move_to = _move  # type: ignore[assignment]
+
+    def _emergency() -> None:
+        entered.wait(2.0)
+        # If execute_sequence held the lock across the sleep, this set_torque
+        # (which also takes self._lock) would block until the 2s sleep ends.
+        t0 = time.monotonic()
+        act.set_torque(False)
+        torque_done.set()
+        assert time.monotonic() - t0 < 1.0, "set_torque blocked on the sleep lock"
+
+    t = threading.Thread(target=_emergency)
+    t.start()
+    # One frame with a long settle delay; set_torque off should land during it.
+    act.execute_sequence([_wp(y=0.1, delay=2.0)])
+    t.join()
+    assert torque_done.is_set()
+
+
+def test_move_failure_returns_false_and_stops_sequence() -> None:
+    # A move_to that raises must abort the sequence and return False (not
+    # silently swallow the error and report success).
+    act, fake = _make_connected_actuator()
+
+    def _boom(*a, **kw):
+        raise RuntimeError("bus error")
+
+    fake.move_to = _boom  # type: ignore[assignment]
+    ok = act.execute_sequence([_wp(y=0.1), _wp(y=-0.1)])
+    assert ok is False
+    # Second frame never ran.
+    assert fake.gripper_calls == []
+
+
+def test_gripper_failure_returns_false_and_stops_sequence() -> None:
+    act, fake = _make_connected_actuator()
+
+    def _boom(*a, **kw):
+        raise RuntimeError("gripper bus error")
+
+    fake.grasp = _boom  # type: ignore[assignment]
+    # gripper-only frames (no pose) so move never short-circuits first.
+    ok = act.execute_sequence([
+        {"joints": {"gripper": -0.2}, "delay": 0.01},
+        {"joints": {"gripper": 0.05}, "delay": 0.01},
+    ])
+    assert ok is False
+    # open (second frame) never ran because the grasp failure aborted.
+    assert fake.gripper_calls == []
+
+
+def test_acquire_motion_lock_is_same_lock() -> None:
+    # The public motion-lock contextmanager grabs the SAME actuator lock so
+    # the grasp pipeline stays mutually exclusive with execute_sequence.
+    act, _fake = _make_connected_actuator()
+    with act.acquire_motion_lock():
+        # RLock is reentrant from this thread; from another thread it would
+        # block. Assert acquire() fails non-blocking from a different thread.
+        held = []
+
+        def _try() -> None:
+            held.append(act._lock.acquire(blocking=False))  # noqa: SLF001
+            if held[-1]:
+                act._lock.release()  # noqa: SLF001
+
+        t = threading.Thread(target=_try)
+        t.start()
+        t.join()
+        assert held == [False]
+
+
+# ── amplitude-clamp validation (item 11) ────────────────────────────
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0])
+def test_invalid_open_distance_rejected(bad) -> None:
+    with pytest.raises(ValueError):
+        RebotArmActuator(channel="/dev/ttyACM1", open_distance_m=bad)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.5])
+def test_invalid_grasp_force_rejected(bad) -> None:
+    with pytest.raises(ValueError):
+        RebotArmActuator(channel="/dev/ttyACM1", grasp_force=bad)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), -2.0])
+def test_invalid_move_duration_rejected(bad) -> None:
+    with pytest.raises(ValueError):
+        RebotArmActuator(channel="/dev/ttyACM1", move_duration=bad)
+
+
+def test_grasp_force_none_allowed() -> None:
+    # None is the "rely on SDK clamp" sentinel and must pass validation.
+    act = RebotArmActuator(channel="/dev/ttyACM1", grasp_force=None)
+    assert act._grasp_force is None  # noqa: SLF001
+
+
+# ── RebotArm temp-cfg cleanup (item 5) — SDK-free ───────────────────
+
+
+def test_rebotarm_cleanup_unlinks_temp_cfgs(tmp_path) -> None:
+    # _cleanup_tmp_cfgs (called by disconnect() and on constructor failure)
+    # must unlink every channel-override temp file and tolerate missing ones.
+    from ovs_agent.apps.voice_rebot_arm.rebot_arm import RebotArm
+
+    # Build a bare RebotArm without touching the SDK constructor.
+    arm = RebotArm.__new__(RebotArm)
+    f1 = tmp_path / "rebot_chan_a.yaml"
+    f2 = tmp_path / "rebot_chan_b.yaml"
+    f1.write_text("channel: /dev/ttyACM1\n")
+    f2.write_text("channel: /dev/ttyACM1\n")
+    arm._tmp_cfg_paths = [str(f1), str(f2), str(tmp_path / "already_gone.yaml")]  # noqa: SLF001
+
+    arm._cleanup_tmp_cfgs()  # noqa: SLF001
+
+    assert not f1.exists()
+    assert not f2.exists()
+    # Cleared, and idempotent on a second call.
+    assert arm._tmp_cfg_paths == []  # noqa: SLF001
+    arm._cleanup_tmp_cfgs()  # noqa: SLF001
+
+
+def test_write_channel_override_creates_and_can_be_cleaned(tmp_path) -> None:
+    # The override writer produces a real temp file with the channel patched;
+    # cleanup removes it.
+    from ovs_agent.apps.voice_rebot_arm.rebot_arm import (
+        RebotArm,
+        _write_channel_override_yaml,
+    )
+
+    src = tmp_path / "arm.yaml"
+    src.write_text("channel: /dev/ttyACM0\nfoo: 1\n")
+    tmp = _write_channel_override_yaml(str(src), "/dev/ttyACM1")
+    import os as _os
+    import yaml as _yaml
+
+    assert _os.path.exists(tmp)
+    with open(tmp) as f:
+        data = _yaml.safe_load(f)
+    assert data["channel"] == "/dev/ttyACM1"
+    assert data["foo"] == 1  # other fields preserved
+
+    arm = RebotArm.__new__(RebotArm)
+    arm._tmp_cfg_paths = [tmp]  # noqa: SLF001
+    arm._cleanup_tmp_cfgs()  # noqa: SLF001
+    assert not _os.path.exists(tmp)
+
+
+# ── RebotArm connect/disconnect safety (item 1) — SDK-free ──────────
+
+
+class _FakeBareArm:
+    def __init__(self) -> None:
+        self.enabled = False
+        self.disabled = False
+        self.connected = False
+        self.disconnected = False
+
+    def connect(self) -> None:
+        self.connected = True
+
+    def enable(self) -> None:
+        self.enabled = True
+
+    def disable(self) -> None:
+        self.disabled = True
+        self.enabled = False
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+
+def _bare_rebotarm():
+    """A RebotArm with internals stubbed enough for connect/disconnect, no SDK."""
+    from ovs_agent.apps.voice_rebot_arm.rebot_arm import RebotArm
+
+    arm = RebotArm.__new__(RebotArm)
+    arm._arm = _FakeBareArm()  # noqa: SLF001
+    arm._endpos_ctrl = None  # noqa: SLF001
+    arm._connected = False  # noqa: SLF001
+    arm._tmp_cfg_paths = []  # noqa: SLF001
+    arm._gripper_mot = None  # noqa: SLF001
+    arm._g_loop_running = False  # noqa: SLF001
+    arm._g_loop_thread = None  # noqa: SLF001
+    arm._g_lock = threading.Lock()  # noqa: SLF001
+    arm._g_state = 0  # noqa: SLF001 (_GS.IDLE)
+    return arm
+
+
+def test_connect_disables_arm_if_post_enable_step_fails() -> None:
+    # connect(enable=True): if ArmEndPos.start() raises AFTER enable(), the arm
+    # must be best-effort disabled (no orphaned energised motors) and re-raise.
+    arm = _bare_rebotarm()
+
+    class _BoomEndPos:
+        def __init__(self, _arm) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("controller start failed")
+
+    arm._ArmEndPos = _BoomEndPos  # noqa: SLF001
+    with pytest.raises(RuntimeError):
+        arm.connect(enable=True)
+    assert arm._arm.enabled is False  # noqa: SLF001
+    assert arm._arm.disabled is True  # noqa: SLF001
+    assert arm._connected is False  # noqa: SLF001
+
+
+def test_disconnect_explicitly_disables_and_cleans(tmp_path) -> None:
+    arm = _bare_rebotarm()
+    tmpf = tmp_path / "rebot_chan_x.yaml"
+    tmpf.write_text("channel: /dev/ttyACM1\n")
+    arm._tmp_cfg_paths = [str(tmpf)]  # noqa: SLF001
+    arm.disconnect()
+    assert arm._arm.disabled is True  # noqa: SLF001 — explicit disable ran
+    assert arm._arm.disconnected is True  # noqa: SLF001
+    assert not tmpf.exists()  # temp cfg cleaned
+    assert arm._connected is False  # noqa: SLF001
+
+
+# ── RebotArm gripper stop / zero safety (items 4, 6) — SDK-free ─────
+
+
+class _FakeGripperMot:
+    def __init__(self) -> None:
+        self.zero_calls = 0
+        self.zero_raises: Exception | None = None
+
+    def send_mit(self, *a, **kw) -> None:
+        pass
+
+    def request_feedback(self) -> None:
+        pass
+
+    def set_zero_position(self) -> None:
+        self.zero_calls += 1
+        if self.zero_raises is not None:
+            raise self.zero_raises
+
+
+def _bare_gripper_arm():
+    arm = _bare_rebotarm()
+    arm._gripper_mot = _FakeGripperMot()  # noqa: SLF001
+    arm._gripper_ctrl = type("C", (), {"poll_feedback_once": lambda self: None})()  # noqa: SLF001
+    arm._g_pos = 0.0  # noqa: SLF001
+    return arm
+
+
+def test_g_stop_loop_skips_softstop_when_thread_wont_die() -> None:
+    # If the control thread does not stop within the join timeout, _g_stop_loop
+    # must NOT send a soft-stop frame (would race the live thread) and must mark
+    # the gripper unavailable.
+    arm = _bare_gripper_arm()
+
+    never_dies = threading.Event()
+
+    def _spin() -> None:
+        never_dies.wait(2.0)  # ignores the stop flag long enough to time out
+
+    t = threading.Thread(target=_spin, daemon=True)
+    t.start()
+    arm._g_loop_thread = t  # noqa: SLF001
+    arm._g_loop_running = True  # noqa: SLF001
+    arm._g_loop_stop = threading.Event()  # noqa: SLF001
+
+    mot = arm._gripper_mot  # noqa: SLF001
+    sent = []
+    mot.send_mit = lambda *a, **kw: sent.append(a)  # type: ignore[assignment]
+
+    arm._g_stop_loop()  # noqa: SLF001 — joins 1.0s, thread still alive
+
+    never_dies.set()
+    t.join()
+    assert sent == []                       # no soft-stop frame sent
+    assert arm._gripper_mot is None         # noqa: SLF001 — marked unavailable
+    assert arm._g_loop_running is False     # noqa: SLF001
+
+
+def test_set_gripper_zero_restarts_loop_even_on_unexpected_error(monkeypatch) -> None:
+    # set_zero_position raising a NON-CallError must still restart the control
+    # loop via the finally block (no permanently-stopped gripper).
+    arm = _bare_gripper_arm()
+    arm._g_loop_stop = threading.Event()  # noqa: SLF001
+
+    # Stub motorbridge.CallError import + the loop start/stop to be observable.
+    import sys
+    import types
+
+    fake_mb = types.ModuleType("motorbridge")
+    fake_mb.CallError = type("CallError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "motorbridge", fake_mb)
+
+    started = []
+    monkeypatch.setattr(arm, "_g_stop_loop", lambda: None)
+    monkeypatch.setattr(arm, "_g_start_loop", lambda: started.append(True))
+
+    arm._gripper_mot.zero_raises = RuntimeError("unexpected bus error")  # noqa: SLF001
+    with pytest.raises(RuntimeError):
+        arm.set_gripper_zero()
+    assert started == [True]  # loop restarted despite the raise
+
+
 # ── empty / disconnected ────────────────────────────────────────────
 
 

@@ -248,21 +248,27 @@ class RebotArm:
                 )
             cfg = _write_channel_override_yaml(src_cfg, self._channel)
             self._tmp_cfg_paths.append(cfg)
-        self._arm = RobotArm(cfg_path=cfg)
+        # From here on a failure must NOT leak the channel-override temp file:
+        # disconnect() won't run (no object is returned), so clean up inline.
+        try:
+            self._arm = RobotArm(cfg_path=cfg)
 
-        if urdf_path:
-            self._model = load_robot_model(urdf_path=str(urdf_path))
-        else:
-            self._model = load_robot_model()
+            if urdf_path:
+                self._model = load_robot_model(urdf_path=str(urdf_path))
+            else:
+                self._model = load_robot_model()
 
-        self._data = self._model.createData()
-        self._ee_frame_id = get_end_effector_frame_id(self._model)
-        self._compute_fk = compute_fk
-        self._pos_rot_to_se3 = pos_rot_to_se3
-        self._solve_ik = solve_ik
-        self._ik_check_params = IKSolverParams(
-            max_iter=200, tolerance=1e-4, step_size=0.5, damping=1e-6
-        )
+            self._data = self._model.createData()
+            self._ee_frame_id = get_end_effector_frame_id(self._model)
+            self._compute_fk = compute_fk
+            self._pos_rot_to_se3 = pos_rot_to_se3
+            self._solve_ik = solve_ik
+            self._ik_check_params = IKSolverParams(
+                max_iter=200, tolerance=1e-4, step_size=0.5, damping=1e-6
+            )
+        except Exception:
+            self._cleanup_tmp_cfgs()
+            raise
 
         self._endpos_ctrl = None
         self._ArmEndPos = ArmEndPos
@@ -301,9 +307,25 @@ class RebotArm:
         self._arm.connect()
         if enable:
             self._arm.enable()
-            time.sleep(0.5)
-            self._endpos_ctrl = self._ArmEndPos(self._arm)
-            self._endpos_ctrl.start()
+            # SAFETY: once enable() succeeds the motors are energised. If any
+            # subsequent step (settle / ArmEndPos start) raises, the outer
+            # caller will NOT call disconnect() (it never got a constructed
+            # object back from connect), so the arm would be left torqued with
+            # no controller. Best-effort disable() then re-raise so the arm
+            # ends in a safe, de-energised state.
+            try:
+                time.sleep(0.5)
+                self._endpos_ctrl = self._ArmEndPos(self._arm)
+                self._endpos_ctrl.start()
+            except Exception:
+                self._endpos_ctrl = None
+                disable_fn = getattr(self._arm, "disable", None)
+                if callable(disable_fn):
+                    try:
+                        disable_fn()
+                    except Exception:
+                        pass
+                raise
             print("[RebotArm] connected, motors enabled")
         else:
             self._arm._request_and_poll()
@@ -318,12 +340,32 @@ class RebotArm:
             except Exception:
                 pass
             self._endpos_ctrl = None
+        # SAFETY: explicitly de-energise the joints before tearing down the
+        # bus. The SDK's disconnect() may disable internally, but we add an
+        # explicit best-effort disable() so the motors are guaranteed to drop
+        # torque even if the SDK path changes.
+        disable_fn = getattr(self._arm, "disable", None)
+        if callable(disable_fn):
+            try:
+                disable_fn()
+            except Exception:
+                pass
         try:
             self._arm.disconnect()
         except Exception:
             pass
+        self._cleanup_tmp_cfgs()
         self._connected = False
         print("[RebotArm] disconnected")
+
+    def _cleanup_tmp_cfgs(self) -> None:
+        """Unlink any channel-override temp cfg files this instance created."""
+        for p in self._tmp_cfg_paths:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._tmp_cfg_paths = []
 
     # ── gripper init ───────────────────────────────────────────────────────────
 
@@ -513,11 +555,27 @@ class RebotArm:
         if not self._g_loop_running:
             return
         self._g_loop_stop.set()
+        thread_alive = False
         if self._g_loop_thread is not None:
             self._g_loop_thread.join(timeout=1.0)
+            if self._g_loop_thread.is_alive():
+                # The 500Hz control thread did NOT exit within the timeout —
+                # it may still be touching the gripper motor / CAN bus. It is
+                # UNSAFE to send a follow-up soft-stop frame (we'd race the
+                # still-running tick on the same bus), so mark the loop as
+                # unavailable, log, and leave the shared resources alone.
+                thread_alive = True
+                print(
+                    "[RebotArm] ERROR: gripper control thread did not stop "
+                    "within 1.0s; skipping soft-stop frame to avoid racing "
+                    "the live thread. Gripper marked unavailable."
+                )
+                self._g_loop_running = False
+                self._gripper_mot = None
+                return
             self._g_loop_thread = None
         self._g_loop_running = False
-        if self._gripper_mot is not None:
+        if not thread_alive and self._gripper_mot is not None:
             try:
                 self._gripper_mot.send_mit(self._g_pos, 0.0, 0.0, _G_KD_MOVE, 0.0)
                 self._gripper_mot.request_feedback()
@@ -600,7 +658,14 @@ class RebotArm:
         if self._gripper_mot is None:
             return False
         self._g_stop_loop()
+        # If _g_stop_loop could not stop the thread it nulls _gripper_mot and
+        # marks the gripper unavailable; bail out (cannot zero a live/absent
+        # motor).
+        if self._gripper_mot is None:
+            print("[RebotArm] gripper zero aborted: gripper unavailable")
+            return False
         from motorbridge import CallError
+        ok = False
         try:
             self._gripper_mot.set_zero_position()
             print("[RebotArm] gripper zero set")
@@ -608,7 +673,10 @@ class RebotArm:
         except CallError as e:
             print(f"[RebotArm] gripper zero set failed: {e}")
             ok = False
-        if ok:
+        finally:
+            # ALWAYS restart the control loop — a raise from set_zero_position
+            # (e.g. an unexpected non-CallError) must not leave the gripper
+            # permanently un-controlled.
             self._g_start_loop()
             with self._g_lock:
                 self._g_state = _GS.IDLE

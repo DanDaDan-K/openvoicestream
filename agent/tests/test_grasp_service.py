@@ -11,7 +11,9 @@ We build a fake YoloResult by hand and a recording fake arm to assert:
 
 from __future__ import annotations
 
+import contextlib
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -177,8 +179,12 @@ def test_cancel_midway_stops_after_pregrasp():
     cam = FakeCamera(color, depth, K)
     seg = FakeSegmenter(_make_result())
 
-    # Arm that trips the cancel event right after the pregrasp move, so the
-    # next _check_cancel (grasp_move stage) aborts.
+    # Arm that trips the cancel event right after the pregrasp move. The
+    # interruptible settle-wait (_wait_motion_cancellable) now observes the
+    # cancel DURING the pregrasp wait and safe-parks at stage="pregrasp" —
+    # earlier than the old uninterruptible wait_motion, which only caught it
+    # at the next stage's _check_cancel. Either way: only the pregrasp move
+    # ran, the gripper was never clamped, and it safe-parks open last.
     cancel = threading.Event()
 
     class TrippingArm(FakeArm):
@@ -196,11 +202,12 @@ def test_cancel_midway_stops_after_pregrasp():
     arm = TrippingArm(cancel)
     res = run_grasp_once(
         "banana", arm=arm, segmenter=seg, camera=cam, K=K,
-        T_hand_eye=np.eye(4), cancel_event=cancel,
+        T_hand_eye=np.eye(4), cancel_event=cancel, move_duration=0.3,
     )
 
     assert res["cancelled"] is True
-    assert res["stage"] == "grasp_move"
+    # Cancel is now caught during the pregrasp settle-wait (earlier).
+    assert res["stage"] == "pregrasp"
     names = arm.names_of_calls()
     assert names.count("move_to") == 1     # only the pregrasp move ran
     assert "grasp" not in names            # never clamped
@@ -258,3 +265,132 @@ def test_missing_camera_returns_error():
     res = run_grasp_once("banana", arm=arm, segmenter=seg, camera=None)
     assert res["success"] is False
     assert "camera" in res["error"]
+
+
+# ── actuator-lock coordination (item 2) ────────────────────────────────────
+class _RecordingActuator:
+    """Records lock acquire/release so we can assert the grasp pipeline holds
+    the actuator lock around each bus op and releases it across waits."""
+
+    def __init__(self) -> None:
+        import threading as _t
+        self._lock = _t.RLock()
+        self.depth = 0
+        self.max_depth = 0
+        self.acquired_count = 0
+
+    @contextlib.contextmanager
+    def acquire_motion_lock(self):
+        with self._lock:
+            self.depth += 1
+            self.acquired_count += 1
+            self.max_depth = max(self.max_depth, self.depth)
+            try:
+                yield
+            finally:
+                self.depth -= 1
+
+
+def test_grasp_holds_actuator_lock_per_op_and_releases_across_wait():
+    color, depth, K = _scene()
+    cam = FakeCamera(color, depth, K)
+    seg = FakeSegmenter(_make_result())
+    actuator = _RecordingActuator()
+
+    class LockAssertingArm(FakeArm):
+        def __init__(self, act) -> None:
+            super().__init__()
+            self._act = act
+
+        def move_to(self, *a, **kw) -> bool:
+            # The lock MUST be held during the bus op.
+            assert self._act.depth == 1, "move_to ran without the actuator lock"
+            return super().move_to(*a, **kw)
+
+        def wait_motion(self, duration, extra=0.6) -> None:
+            # The lock MUST be released across the (blocking) settle wait.
+            assert self._act.depth == 0, "wait_motion ran while holding the lock"
+            super().wait_motion(duration, extra)
+
+    arm = LockAssertingArm(actuator)
+    res = run_grasp_once(
+        "banana", arm=arm, actuator=actuator, segmenter=seg, camera=cam, K=K,
+        T_hand_eye=np.eye(4), move_duration=0.05, grasp_force=1.0,
+    )
+    assert res["success"] is True
+    # Lock was acquired per-op (never nested) and acquired multiple times.
+    assert actuator.max_depth == 1
+    assert actuator.acquired_count >= 4  # tcp pose + open + 3 moves + grasp
+
+
+def test_grasp_works_without_actuator_lock_interface():
+    # When no actuator (or one without acquire_motion_lock) is passed, the
+    # pipeline still runs via a null context — backward compatible.
+    color, depth, K = _scene()
+    arm = FakeArm()
+    cam = FakeCamera(color, depth, K)
+    seg = FakeSegmenter(_make_result())
+    res = run_grasp_once(
+        "banana", arm=arm, actuator=object(), segmenter=seg, camera=cam, K=K,
+        T_hand_eye=np.eye(4), move_duration=0.02,
+    )
+    assert res["success"] is True
+
+
+# ── interruptible settle wait (item 10) ────────────────────────────────────
+def test_cancel_during_settle_wait_safe_parks():
+    # A long move_duration means the settle wait dominates; the cancel fires
+    # during that wait and the pipeline must abort + safe-park (open) without
+    # blocking for the full duration or clamping the gripper.
+    color, depth, K = _scene()
+    cam = FakeCamera(color, depth, K)
+    seg = FakeSegmenter(_make_result())
+    cancel = threading.Event()
+
+    class WaitTrippingArm(FakeArm):
+        def __init__(self, ev) -> None:
+            super().__init__()
+            self._ev = ev
+            self._moves = 0
+
+        def move_to(self, *a, **kw) -> bool:
+            self._moves += 1
+            if self._moves == 1:
+                # Trip cancel just after the first move so the next settle
+                # wait observes it.
+                self._ev.set()
+            return super().move_to(*a, **kw)
+
+    arm = WaitTrippingArm(cancel)
+    t0 = time.monotonic()
+    res = run_grasp_once(
+        "banana", arm=arm, segmenter=seg, camera=cam, K=K,
+        T_hand_eye=np.eye(4), cancel_event=cancel, move_duration=5.0,
+    )
+    elapsed = time.monotonic() - t0
+    assert res["cancelled"] is True
+    assert elapsed < 2.0, "settle wait was not interruptible (blocked full 5s)"
+    assert "grasp" not in arm.names_of_calls()
+    assert arm.names_of_calls()[-1] == "open_gripper"
+
+
+# ── holding-property handling (item 12) ────────────────────────────────────
+def test_gripper_is_holding_property_not_called():
+    # On the real RebotArm gripper_is_holding is a PROPERTY (bool), not a
+    # method. The pipeline must not try to call it (TypeError).
+    color, depth, K = _scene()
+    cam = FakeCamera(color, depth, K)
+    seg = FakeSegmenter(_make_result())
+
+    class PropertyHoldingArm(FakeArm):
+        @property
+        def gripper_is_holding(self) -> bool:  # type: ignore[override]
+            return True
+
+    arm = PropertyHoldingArm()
+    res = run_grasp_once(
+        "banana", arm=arm, segmenter=seg, camera=cam, K=K,
+        T_hand_eye=np.eye(4), move_duration=0.02,
+    )
+    assert res["success"] is True
+    assert res["holding"] is True

@@ -66,14 +66,37 @@ class GraspPlugin(Plugin):
 
     async def stop(self) -> None:
         await super().stop()
+        # Signal the in-flight grasp to abort. The grasp body runs in a worker
+        # thread (asyncio.to_thread) which CANNOT be force-cancelled — the
+        # pipeline polls _cancel_event before each motion and safe-parks. So
+        # set the event FIRST, then wait (bounded) for the worker to wind down
+        # rather than just abandoning the thread mid-bus-op.
         self._cancel_event.set()
         if self._grasp_task is not None and not self._grasp_task.done():
-            self._grasp_task.cancel()
             try:
-                await self._grasp_task
+                # Bounded wait for the worker to observe the cancel and return.
+                await asyncio.wait_for(asyncio.shield(self._grasp_task), timeout=6.0)
+            except asyncio.TimeoutError:
+                logger.warning("GraspPlugin: grasp worker did not stop within 6s")
+                self._grasp_task.cancel()
+                try:
+                    await self._grasp_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             except (asyncio.CancelledError, Exception):
                 pass
-            self._grasp_task = None
+        self._grasp_task = None
+        # Release the camera (plugin owns it; the grasp pipeline only borrows
+        # the already-opened handle and must never close the shared camera).
+        cam = self._camera
+        if cam is not None:
+            close_fn = getattr(cam, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    logger.exception("GraspPlugin: camera close failed")
+            self._camera = None
 
     # ── cancellation hooks (barge-in / stop / sleep) ────────────────
     async def on_user_stop_intent(self, data: str) -> None:
@@ -131,9 +154,23 @@ class GraspPlugin(Plugin):
         if self._arm_plugin is None or getattr(self._arm_plugin, "arm", None) is None:
             return {"started": False, "target": target, "error": "arm not available"}
 
-        arm = getattr(self._arm_plugin.arm, "robot", None)
+        actuator = self._arm_plugin.arm
+        arm = getattr(actuator, "robot", None)
         if arm is None:
             return {"started": False, "target": target, "error": "arm not connected"}
+
+        # SAFETY: the grasp pipeline drives the arm directly. Refuse to start
+        # if torque is off — the torque gate is the single source of truth for
+        # "may we move?", and a parallel grasp must honour it just like
+        # execute_sequence does.
+        if not getattr(actuator, "torque_enabled", False):
+            return {"started": False, "target": target, "error": "torque disabled"}
+
+        # SAFETY: refuse re-entry. A second grasp while one is in flight would
+        # overwrite _cancel_event / _grasp_task and let two grasp workers race
+        # the same arm/bus.
+        if self._grasp_task is not None and not self._grasp_task.done():
+            return {"started": False, "target": target, "error": "already_running"}
 
         # Fresh cancel token for this grasp.
         self._cancel_event = threading.Event()
@@ -153,6 +190,7 @@ class GraspPlugin(Plugin):
                 run_grasp_once,
                 target,
                 arm=arm,
+                actuator=actuator,
                 segmenter=self._segmenter,
                 camera=self._camera,
                 T_hand_eye=self._hand_eye,

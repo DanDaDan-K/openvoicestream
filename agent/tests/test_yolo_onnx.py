@@ -116,7 +116,7 @@ def test_postprocess_conf_filter_and_fields():
     det[0, :6] = [100, 100, 300, 300, 0.9, 1]  # bus, kept
     det[0, 6:] = 0.0
     det[0, 6] = 5.0  # weight on proto channel 0
-    det[1, :6] = [50, 50, 80, 80, 0.10, 0]     # person, filtered (conf<=0.25)
+    det[1, :6] = [50, 50, 80, 80, 0.10, 0]     # person, filtered (conf<0.25)
 
     proto = np.zeros((32, 160, 160), dtype=np.float32)
     # channel 0 positive inside a central box → mask present for det0.
@@ -145,6 +145,22 @@ def test_postprocess_empty_when_all_below_conf():
     )
     assert len(out.boxes) == 0
     assert out.masks is None
+
+
+def test_postprocess_keeps_detection_at_exact_threshold():
+    """conf is an INCLUSIVE floor (item 13): a detection whose score equals
+    the threshold must be KEPT (filter is strictly-below), not dropped."""
+    seg = _make_segmenter()
+    det = np.zeros((1, 38), dtype=np.float32)
+    det[0, :6] = [100, 100, 300, 300, 0.25, 1]  # score == threshold
+    det[0, 6] = 5.0
+    proto = np.zeros((32, 160, 160), dtype=np.float32)
+    proto[0, 30:130, 30:130] = 1.0
+    out = seg._postprocess(
+        [det[None], proto[None]], conf=0.25, orig_shape=(640, 640),
+        ratio=1.0, dw=0.0, dh=0.0, net=640,
+    )
+    assert len(out.boxes) == 1   # kept at the threshold
 
 
 def test_postprocess_depadding_resizes_content_to_orig():

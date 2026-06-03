@@ -38,9 +38,11 @@ env-free at construction (the builder translates config → ctor kwargs).
 
 from __future__ import annotations
 
+import contextlib
+import math
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from ovs_agent.actuators.base import Actuator
 from ovs_agent.actuators.factory import register_actuator
@@ -79,9 +81,19 @@ class RebotArmActuator(Actuator):
         self._config_path = config_path
         self._urdf_path = urdf_path
         self._gripper_cfg_path = gripper_cfg_path
-        self._move_duration = float(move_duration)
+        # SAFETY: validate the gripper/motion amplitude clamps up front. A
+        # non-finite or negative clamp would silently defeat the per-frame
+        # clamps in _apply_gripper (e.g. a negative open_distance_m → min()
+        # never bounds the request; a NaN compares False to everything).
+        self._move_duration = self._validate_nonneg_finite(
+            move_duration, "move_duration"
+        )
+        if grasp_force is not None:
+            grasp_force = self._validate_nonneg_finite(grasp_force, "grasp_force")
         self._grasp_force = grasp_force
-        self._open_distance_m = float(open_distance_m)
+        self._open_distance_m = self._validate_nonneg_finite(
+            open_distance_m, "open_distance_m"
+        )
 
         self._robot: Optional[RebotArm] = None
         self._latest_obs: Dict[str, Any] = {}
@@ -98,6 +110,16 @@ class RebotArmActuator(Actuator):
         # source of truth for "can we move?" (mirrors SO-ARM semantics).
         self._torque_state: str = "off"
 
+    @staticmethod
+    def _validate_nonneg_finite(value: Any, name: str) -> float:
+        f = float(value)
+        if not math.isfinite(f) or f < 0.0:
+            raise ValueError(
+                f"rebot_arm actuator {name!r} must be a non-negative finite "
+                f"number; got {value!r}"
+            )
+        return f
+
     @property
     def robot(self):
         """The underlying :class:`RebotArm`, or ``None`` before connect().
@@ -107,6 +129,20 @@ class RebotArmActuator(Actuator):
         through the actuation-sequence abstraction, so it needs the raw arm.
         """
         return self._robot
+
+    @contextlib.contextmanager
+    def acquire_motion_lock(self) -> Iterator[None]:
+        """Hold the actuator's bus lock for a single arm motion.
+
+        Phase B's grasp pipeline drives the raw arm directly (bypassing
+        execute_sequence). To stay mutually exclusive with execute_sequence's
+        per-op locking and with observation reads, it MUST take this same lock
+        around each discrete bus operation (one move / one gripper command).
+        Like execute_sequence, callers acquire it per-op and release it across
+        any blocking wait so torque-off / cache reads are never starved.
+        """
+        with self._lock:
+            yield
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -204,12 +240,20 @@ class RebotArmActuator(Actuator):
         """Execute a normalized sequence of cartesian-waypoint frames.
 
         Each frame's ``joints`` dict holds {x,y,z,roll,pitch,yaw,gripper}.
-        We hold the actuator lock for the whole sequence so the 500Hz
-        gripper thread and per-frame move_to / gripper commands don't
-        interleave from the asyncio dispatch side. ``cancel_event`` is
-        checked before each frame.
 
-        Returns True if dispatched, False if not connected / empty.
+        LOCKING (SAFETY): the actuator lock is held only around each discrete
+        bus operation (one move_to / one gripper command, the final cache
+        read) — NOT across the whole sequence and NOT across the settle
+        ``_sleep_cancellable``. Holding it across the multi-second sleep would
+        block an emergency ``set_torque(False)`` and ``update_cache`` for the
+        entire motion; releasing it between ops keeps each bus touch atomic
+        while letting torque-off pre-empt the sequence promptly.
+
+        Between every frame we re-check ``cancel_event`` AND ``torque_enabled``
+        — a torque-off (emergency disable) mid-sequence aborts immediately.
+
+        Returns True if dispatched (ran ≥0 frames cleanly), False if not
+        connected / empty / a bus op failed / torque was off at start.
         """
         if self._robot is None or not frames:
             return False
@@ -220,57 +264,82 @@ class RebotArmActuator(Actuator):
             )
             return False
 
-        with self._lock:
-            for frame in frames:
-                if cancel_event is not None and cancel_event.is_set():
-                    break
-                wp = frame.get("joints") if isinstance(frame, dict) else None
-                if not isinstance(wp, dict):
-                    continue
-                self._apply_waypoint(wp)
-                delay = (
-                    float(frame.get("delay", self._move_duration))
-                    if isinstance(frame, dict)
-                    else self._move_duration
+        ok = True
+        for frame in frames:
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            # SAFETY: torque dropped mid-sequence (emergency disable) → abort.
+            if not self.torque_enabled:
+                print(
+                    "[RebotArmActuator] ABORT sequence: torque went "
+                    f"{self._torque_state!r} mid-sequence."
                 )
-                # Interruptible settle pause.
-                self._sleep_cancellable(delay, cancel_event)
-            # Refresh cache while we still hold the lock.
+                ok = False
+                break
+            wp = frame.get("joints") if isinstance(frame, dict) else None
+            if not isinstance(wp, dict):
+                continue
+            # Each bus op is atomic under the lock; the sleep below is not.
+            if not self._apply_waypoint(wp):
+                ok = False
+                break
+            delay = (
+                float(frame.get("delay", self._move_duration))
+                if isinstance(frame, dict)
+                else self._move_duration
+            )
+            # Interruptible settle pause — LOCK RELEASED so set_torque(False)
+            # / update_cache can run during the multi-second wait.
+            self._sleep_cancellable(delay, cancel_event)
+
+        # Refresh cache (single locked bus read).
+        with self._lock:
             try:
                 obs = self._read_observation_locked()
                 self._latest_obs = dict(obs)
             except Exception as exc:  # pragma: no cover — best-effort
                 print(f"[RebotArmActuator] cache refresh after sequence failed: {exc}")
-        return True
+        return ok
 
-    def _apply_waypoint(self, wp: Dict[str, Any]) -> None:
+    def _apply_waypoint(self, wp: Dict[str, Any]) -> bool:
         """Apply one cartesian waypoint: move_to (if any pose field) +
-        gripper command (if a gripper field). Caller holds the lock."""
+        gripper command (if a gripper field).
+
+        Each bus op is wrapped in the actuator lock so it stays atomic against
+        the 500Hz gripper thread / observation reads / the grasp pipeline.
+        Returns False if a bus op raised (caller aborts the sequence), True
+        otherwise. A non-OK frame stops the sequence rather than silently
+        continuing on a stale/failed pose.
+        """
         robot = self._robot
         if robot is None:
-            return
+            return False
 
         has_pose = any(k in wp for k in ("x", "y", "z", "roll", "pitch", "yaw"))
         if has_pose:
             try:
-                cur = self._latest_obs
-                x = float(wp.get("x", cur.get("x", 0.0)))
-                y = float(wp.get("y", cur.get("y", 0.0)))
-                z = float(wp.get("z", cur.get("z", 0.0)))
-                roll = float(wp.get("roll", 0.0))
-                pitch = float(wp.get("pitch", 0.0))
-                yaw = float(wp.get("yaw", 0.0))
-                duration = float(wp.get("duration", self._move_duration))
-                robot.move_to(x, y, z, roll, pitch, yaw, duration=duration)
-            except Exception as exc:  # pragma: no cover — best-effort move
+                with self._lock:
+                    cur = self._latest_obs
+                    x = float(wp.get("x", cur.get("x", 0.0)))
+                    y = float(wp.get("y", cur.get("y", 0.0)))
+                    z = float(wp.get("z", cur.get("z", 0.0)))
+                    roll = float(wp.get("roll", 0.0))
+                    pitch = float(wp.get("pitch", 0.0))
+                    yaw = float(wp.get("yaw", 0.0))
+                    duration = float(wp.get("duration", self._move_duration))
+                    robot.move_to(x, y, z, roll, pitch, yaw, duration=duration)
+            except Exception as exc:
                 print(f"[RebotArmActuator] move_to failed: {exc}")
+                return False
 
         if "gripper" in wp:
             try:
                 g = float(wp["gripper"])
             except (TypeError, ValueError):
                 g = 0.0
-            self._apply_gripper(g)
+            if not self._apply_gripper(g):
+                return False
+        return True
 
     def _apply_gripper(self, g: float) -> None:
         """Map the frame gripper field (signed magnitude) to an SDK call.
@@ -290,18 +359,24 @@ class RebotArmActuator(Actuator):
         """
         robot = self._robot
         if robot is None or g == 0.0:
-            return
+            return True
         try:
-            if g > 0.0:
-                dist = min(g, self._open_distance_m)  # clamp to mechanical max
-                robot.open_gripper(dist)
-            else:
-                force = abs(g)
-                if self._grasp_force is not None:
-                    force = min(force, self._grasp_force)  # clamp to safe max
-                robot.grasp(force=force)
-        except Exception as exc:  # pragma: no cover — best-effort gripper
+            with self._lock:
+                if g > 0.0:
+                    # Clamp to [0, mechanical max]: lower bound guards against
+                    # a pathological negative config slipping past validation.
+                    dist = max(0.0, min(g, self._open_distance_m))
+                    robot.open_gripper(dist)
+                else:
+                    force = abs(g)
+                    if self._grasp_force is not None:
+                        # Clamp to [0, safe max].
+                        force = max(0.0, min(force, self._grasp_force))
+                    robot.grasp(force=force)
+        except Exception as exc:
             print(f"[RebotArmActuator] gripper command failed: {exc}")
+            return False
+        return True
 
     @staticmethod
     def _sleep_cancellable(

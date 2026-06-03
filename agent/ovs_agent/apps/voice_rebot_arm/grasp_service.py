@@ -21,6 +21,7 @@ torch / ultralytics anywhere in this path.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -35,6 +36,24 @@ class GraspCancelled(Exception):
     """Raised internally when ``cancel_event`` fires mid-pipeline."""
 
 
+def _motion_lock(actuator: Any):
+    """Return a context manager that holds the actuator's bus lock for one
+    arm motion, or a null context when no actuator is supplied.
+
+    SAFETY: the grasp pipeline drives the raw arm directly, bypassing
+    ``execute_sequence``. Wrapping each discrete bus op (one move / one
+    gripper command) in the actuator's lock keeps it mutually exclusive with
+    a concurrent action sequence, the 500Hz gripper thread and observation
+    reads. Like execute_sequence, the lock is per-op — the blocking
+    ``wait_motion`` poll happens OUTSIDE the lock so torque-off / cache reads
+    are not starved during the multi-second move.
+    """
+    acq = getattr(actuator, "acquire_motion_lock", None)
+    if callable(acq):
+        return acq()
+    return contextlib.nullcontext()
+
+
 def _check_cancel(cancel_event: Optional[threading.Event], arm: Any) -> None:
     """Raise :class:`GraspCancelled` (after parking the gripper safe) if the
     cancel event is set. Safe-park = open the gripper so we never leave it
@@ -47,10 +66,32 @@ def _check_cancel(cancel_event: Optional[threading.Event], arm: Any) -> None:
         raise GraspCancelled()
 
 
+def _wait_motion_cancellable(
+    arm: Any,
+    duration: float,
+    cancel_event: Optional[threading.Event],
+) -> bool:
+    """Wait for a move to settle in small steps, polling ``cancel_event`` every
+    ~0.1s. Returns True if it completed, False if cancelled (caller safe-parks
+    and must NOT issue further motion). The arm's own ``wait_motion`` blocks
+    uninterruptibly, so we poll instead and only consult it for the final
+    settle when not cancelled."""
+    if cancel_event is None:
+        arm.wait_motion(duration)
+        return True
+    end = time.monotonic() + max(0.0, float(duration))
+    while time.monotonic() < end:
+        if cancel_event.is_set():
+            return False
+        time.sleep(min(0.1, max(0.0, end - time.monotonic())))
+    return not cancel_event.is_set()
+
+
 def run_grasp_once(
     target: str,
     *,
     arm: Any,
+    actuator: Any = None,
     segmenter: Any = None,
     camera: Any = None,
     K: Optional[np.ndarray] = None,
@@ -144,7 +185,9 @@ def run_grasp_once(
             return {**result, "stage": stage, "error": "no hand-eye calibration"}
         from .perception.transforms import transform_grasp_pose_to_base
 
-        T_cam2base = np.asarray(arm.get_tcp_pose(), dtype=np.float64) @ np.asarray(
+        with _motion_lock(actuator):
+            tcp_pose = np.asarray(arm.get_tcp_pose(), dtype=np.float64)
+        T_cam2base = tcp_pose @ np.asarray(
             T_hand_eye, dtype=np.float64
         )
         grasp6d, pre6d = transform_grasp_pose_to_base(
@@ -158,35 +201,50 @@ def run_grasp_once(
         result["pregrasp_pose"] = [float(v) for v in pre6d]
 
         # ── 4. execute: open → pregrasp → grasp pos → compliant grasp ───
+        # SAFETY: each arm bus op is wrapped in the actuator lock (atomic vs a
+        # concurrent action / gripper thread / cache read); the blocking
+        # settle wait runs OUTSIDE the lock and is cancellable.
         stage = "open"
         _check_cancel(cancel_event, arm)
-        arm.open_gripper()
+        with _motion_lock(actuator):
+            arm.open_gripper()
 
         stage = "pregrasp"
         _check_cancel(cancel_event, arm)
         xp, yp, zp, rxp, ryp, rzp = pre6d
-        if not arm.move_to(xp, yp, zp, rxp, ryp, rzp, duration=move_duration):
+        with _motion_lock(actuator):
+            pregrasp_ok = arm.move_to(xp, yp, zp, rxp, ryp, rzp, duration=move_duration)
+        if not pregrasp_ok:
             return {**result, "stage": stage, "error": "pregrasp IK failed"}
-        arm.wait_motion(move_duration)
+        if not _wait_motion_cancellable(arm, move_duration, cancel_event):
+            _check_cancel(cancel_event, arm)  # safe-park + raise
 
         stage = "grasp_move"
         _check_cancel(cancel_event, arm)
         xg, yg, zg, rxg, ryg, rzg = grasp6d
-        if not arm.move_to(xg, yg, zg, rxg, ryg, rzg, duration=max(1.0, move_duration * 0.75)):
+        grasp_dur = max(1.0, move_duration * 0.75)
+        with _motion_lock(actuator):
+            grasp_move_ok = arm.move_to(xg, yg, zg, rxg, ryg, rzg, duration=grasp_dur)
+        if not grasp_move_ok:
             return {**result, "stage": stage, "error": "grasp-pose IK failed"}
-        arm.wait_motion(max(1.0, move_duration * 0.75))
+        if not _wait_motion_cancellable(arm, grasp_dur, cancel_event):
+            _check_cancel(cancel_event, arm)  # safe-park + raise
 
         stage = "grasp"
         _check_cancel(cancel_event, arm)
-        held = bool(arm.grasp(force=grasp_force))
+        with _motion_lock(actuator):
+            held = bool(arm.grasp(force=grasp_force))
         result["grasp_closed"] = held
 
         # ── 5. lift (retreat straight up along base Z) ──────────────────
         stage = "lift"
         _check_cancel(cancel_event, arm)
         zl = zg + float(lift_height_m)
-        if arm.move_to(xg, yg, zl, rxg, ryg, rzg, duration=move_duration):
-            arm.wait_motion(move_duration)
+        with _motion_lock(actuator):
+            lift_ok = arm.move_to(xg, yg, zl, rxg, ryg, rzg, duration=move_duration)
+        if lift_ok:
+            if not _wait_motion_cancellable(arm, move_duration, cancel_event):
+                _check_cancel(cancel_event, arm)  # safe-park + raise
         else:
             logger.warning("lift IK failed; leaving arm at grasp height")
 
@@ -194,11 +252,16 @@ def run_grasp_once(
         if release_after:
             stage = "release"
             _check_cancel(cancel_event, arm)
-            arm.release_gripper()
+            with _motion_lock(actuator):
+                arm.release_gripper()
 
-        # holding check (best-effort).
+        # holding check (best-effort). On the real RebotArm this is a
+        # PROPERTY (not a method); only call it when it's actually callable so
+        # we don't TypeError on a bool.
         try:
-            result["holding"] = bool(arm.gripper_is_holding())
+            holding_attr = getattr(arm, "gripper_is_holding", None)
+            holding = holding_attr() if callable(holding_attr) else holding_attr
+            result["holding"] = bool(holding) if holding is not None else held
         except Exception:
             result["holding"] = held
 
