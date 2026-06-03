@@ -102,6 +102,14 @@ RUN pip install --no-cache-dir \
 # Leaving it unpinned (>=0.2.8) is non-deterministic: builds have resolved to
 # 0.2.2 and 0.4.2 on different runs depending on what the mirror served.
 
+# Bake the openWakeWord models (incl. hey_jarvis_v0.1 + the melspectrogram /
+# embedding feature models) into the image. Our wake source loads
+# openwakeword.Model([...]) which expects them under the package's
+# resources/models dir; without this they are absent and wake is disabled at
+# runtime (this image has no entrypoint download step). download_models()
+# fetches them at build (verified reachable from the device).
+RUN python -c "import openwakeword.utils; openwakeword.utils.download_models()"
+
 ENV REBOT_REPO_ROOT=/opt/rebot \
     REBOT_CHANNEL=/dev/ttyACM1 \
     OBSERVATION_PORT=8775 \
