@@ -267,6 +267,10 @@ class BaseApp:
         # On fire, force state back to IDLE so the next user turn isn't
         # blocked. Configurable via ``thinking_timeout_s`` (default 20s).
         self._thinking_watchdog_task: asyncio.Task | None = None
+        # silero-primary stall fallback (config.vad_stall_eos_ms): reset on
+        # every real asr_partial; forces a single asr_eos if silero goes quiet
+        # without finalizing, so the turn can't hang. See _stall_eos_watchdog.
+        self._stall_watchdog_task: asyncio.Task | None = None
         # Dashboard mic RMS is a best-effort visualization signal. Never let
         # a slow browser/plugin backpressure the hot mic pump; at most one
         # RMS hook fanout may be in flight and newer samples are dropped.
@@ -1316,6 +1320,56 @@ class BaseApp:
             task.cancel()
         self._asr_watchdog_task = None
 
+    # ── silero-primary stall fallback (config.vad_stall_eos_ms) ──────
+    def _arm_stall_watchdog(self) -> None:
+        """(Re)arm the no-partial stall timer. Called on every real
+        asr_partial so it acts as an inactivity timeout: as long as silero
+        keeps emitting partials (incl. through a long sentence) the timer is
+        reset and never fires; it only fires after silero goes quiet without
+        a final. No-op when disabled (vad_stall_eos_ms<=0)."""
+        if float(getattr(self.config, "vad_stall_eos_ms", 0.0) or 0.0) <= 0:
+            return
+        self._cancel_stall_watchdog()
+        self._stall_watchdog_task = asyncio.create_task(
+            self._stall_eos_watchdog(), name="stall-eos-watchdog",
+        )
+
+    def _cancel_stall_watchdog(self) -> None:
+        """Cancel any pending stall watchdog (idempotent)."""
+        task = getattr(self, "_stall_watchdog_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._stall_watchdog_task = None
+
+    async def _stall_eos_watchdog(self) -> None:
+        """Force one asr_eos if silero stalls (no asr_partial for
+        vad_stall_eos_ms) while we're still awaiting a command final. Rechecks
+        state before firing so a barge-in / sleep that landed in the meantime
+        doesn't trigger a spurious EOS. send_asr_eos_once is idempotent, so
+        this never double-finalizes."""
+        timeout = float(getattr(self.config, "vad_stall_eos_ms", 0.0) or 0.0) / 1000.0
+        if timeout <= 0:
+            return
+        try:
+            await asyncio.sleep(timeout)
+        except asyncio.CancelledError:
+            return
+        if getattr(self, "_state", ConvState.IDLE) not in (
+            ConvState.IDLE, ConvState.LISTENING
+        ):
+            return  # moved on (speaking/thinking/sleeping) — not our turn to end
+        if getattr(self, "_eos_sent_this_turn", False):
+            return  # already finalized this turn
+        logger.info(
+            "VAD stall: no asr_partial in %.1fs while %s — forcing asr_eos "
+            "(silero-primary fallback)", timeout,
+            getattr(self, "_state", ConvState.IDLE).name,
+        )
+        try:
+            await self.send_asr_eos_once()
+        except Exception:
+            logger.exception("stall-eos asr_eos send failed")
+
     # ── server-loop mode (#37 Phase 2-product) ──────────────────────
 
     def _log_boot_diagnostic(self) -> None:
@@ -2035,6 +2089,13 @@ class BaseApp:
             partial_text = (evt.text or "").strip()
             if not partial_text:
                 return
+            # silero-primary stall fallback: a real partial means silero is
+            # actively transcribing — (re)arm the no-partial timer. Scoped to
+            # the command-listening phase (IDLE/LISTENING) so a barge-in
+            # partial during the assistant's reply doesn't arm it. No-op when
+            # vad_stall_eos_ms<=0.
+            if self._state in (ConvState.IDLE, ConvState.LISTENING):
+                self._arm_stall_watchdog()
             # Barge-in: user spoke (real text) while we were SPEAKING.
             #
             # We gate on FSM state, NOT audio.is_playing alone. Reason: a
@@ -2114,10 +2175,11 @@ class BaseApp:
             return
 
         if isinstance(evt, ASRFinal):
-            # A real final arrived — disarm the watchdog so it doesn't
-            # later reset state out from under whatever dispatch we're
-            # about to run.
+            # A real final arrived — disarm the watchdogs so they don't
+            # later reset state / force a stale EOS out from under whatever
+            # dispatch we're about to run.
             self._cancel_asr_watchdog()
+            self._cancel_stall_watchdog()
             # Snapshot whether the agent had just sent client-side EOS —
             # if a low-signal/empty final follows, that final IS the
             # response to our EOS and there's no LLM turn in flight to

@@ -107,6 +107,16 @@ class Config:
     # open. Only fires after >= eos_min_speech_ms of real speech.
     gate_drive_eos: bool = False
     gate_eos_min_speech_ms: float = 250.0
+    # silero-primary stall fallback. When >0, let the SERVER silero VAD own
+    # the endpoint decision (set gate_drive_eos=false), but guard against
+    # silero wedging on a noisy mic (no endpoint → command never finalizes →
+    # the turn hangs). Reset on every real asr_partial; if NO partial arrives
+    # for this many ms while we're still awaiting a command final, force a
+    # single asr_eos so the server finalizes. This is a STALL/inactivity
+    # timeout (reset by activity), NOT a fixed cap — so a long sentence whose
+    # partials keep flowing is never cut; it only fires after silero goes
+    # quiet. 0 disables (keeps the legacy gate_drive_eos energy-edge path).
+    vad_stall_eos_ms: float = 0.0
     # drop mic audio while the agent is SPEAKING/THINKING (its own TTS echo)
     # so it can't open a server-VAD segment that never cleanly ends.
     mic_drop_while_speaking: bool = False

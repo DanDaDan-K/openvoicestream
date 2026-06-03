@@ -48,8 +48,16 @@ energy_gate_open_rms: 0.002
 energy_gate_close_rms: 0.001
 energy_gate_hangover_ms: 300
 mic_makeup_gain: 12.0
-gate_drive_eos: true
+# silero-primary endpointing: let the SERVER silero VAD decide the end of a
+# command (it handles word-internal dips far better than the energy-gate edge,
+# which cut 4-char commands like "张开夹爪" short → empty finals). The energy
+# gate still zero-fills silence so silero has clean gaps to endpoint on.
+gate_drive_eos: false
 gate_eos_min_speech_ms: 250
+# Stall fallback: if silero goes quiet without finalizing (wedge on a noisy
+# mic), force one asr_eos after this long with no asr_partial — reset by each
+# partial, so a long sentence is never cut, it only catches a true stall.
+vad_stall_eos_ms: 1500
 mic_drop_while_speaking: true
 # Force a fresh ASR worker on every wake (single Qwen3-ASR worker degrades
 # after ~4 utterances on one persistent session).
