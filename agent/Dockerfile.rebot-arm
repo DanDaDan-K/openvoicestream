@@ -114,7 +114,13 @@ ENV REBOT_REPO_ROOT=/opt/rebot \
     REBOT_CHANNEL=/dev/ttyACM1 \
     OBSERVATION_PORT=8775 \
     MIC_INDEX=reSpeaker \
-    WAKEWORD_MODEL="hey jarvis"
+    WAKEWORD_MODEL="hey jarvis" \
+    OVS_AGENT_SERVER_LOOP=1
+# OVS_AGENT_SERVER_LOOP=1: match production — SLV (seeed-voice, already in
+# voxedge + server-loop mode) runs the LLM + tool loop; the agent advertises
+# its arm tools and executes remote tool_calls. Without this the agent falls
+# back to the legacy client-loop ("skipping tool advertise"), the unvalidated
+# path for the arm.
 # MIC_INDEX=reSpeaker: config's audio_input_device is ${MIC_INDEX:-}; empty
 # errors "Multiple input devices found for ''" (reSpeaker + Jetson APE both
 # enumerate). NOTE: MIC_INDEX=auto does NOT work — ovs_agent/audio/devices.py
