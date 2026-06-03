@@ -2,7 +2,7 @@
 name = "openvoicestream-agent"
 version = "0.1.0"
 description = "Agent-layer client that wires OpenVoiceStream (SLV /v2v/stream) to an OpenAI-compatible LLM."
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 readme = "README.md"
 dependencies = [
     "websockets>=12",
@@ -30,6 +30,34 @@ arm = [
     "openwakeword>=0.6",
     "feetech-servo-sdk>=1.0",
     "pyaudio>=0.2.13",
+]
+# reBot B601-DM voice-app (apps/voice_rebot_arm): the reBotArm_control_py
+# SDK + motorbridge + Pinocchio kinematics are NOT pip-published here and
+# are installed inside Dockerfile.rebot-arm (cloned to /opt/rebot). This
+# extra only pulls the shared agent deps the app needs (wakeword, obs HTTP
+# server, mic). Intentionally NO torch / SDK / motorbridge to keep the Mac
+# dev + CI env clean — those live in the container image.
+rebot = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "openwakeword>=0.6",
+    "pyaudio>=0.2.13",
+    # Pinocchio kinematics used by the vendored RebotArm driver (IK/FK).
+    # SDK + motorbridge are container-only (see Dockerfile.rebot-arm).
+    "pin>=3.9.0",
+    # Phase B vision-grasp (torch-free): YOLOE-seg inference + numpy/cv2
+    # post-process. On Mac / CI this CPU wheel is used for tests; on the
+    # Jetson device install ``onnxruntime-gpu`` instead (Jetson Zoo aarch64
+    # wheel — TODO: pin the matching JetPack/CUDA build there, NOT this
+    # PyPI x86/CPU wheel) so the TensorRT/CUDA execution providers light up.
+    "onnxruntime>=1.17",
+    "opencv-python-headless>=4.8",
+    "scipy>=1.10",
+    # Camera SDKs are device-only and NOT pip-published for our targets:
+    #   Orbbec Gemini 2 → pyorbbecsdk2 (build from source on device)
+    #   RealSense       → pyrealsense2 (aarch64 wheel on device)
+    # Both are imported lazily inside the camera drivers so this extra stays
+    # installable on a camera-less Mac / CI host.
 ]
 e2e = [
     "pytest-asyncio>=0.21",

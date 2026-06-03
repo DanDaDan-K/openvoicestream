@@ -1,0 +1,140 @@
+# voice_rebot_arm agent config — reBot B601-DM cartesian-waypoint voice
+# controller (Phase A). Mirrors apps/voice_arm/config.yaml; only the
+# actuator block + app-specific prompt differ.
+#
+# Anything ${...} is substituted from environment at load time.
+
+slv_url: "ws://${VOICE_SERVICE_HOST:-localhost}:${VOICE_SERVICE_PORT:-8621}/v2v/stream"
+
+slv_config:
+  asr_language: "${STT_LANGUAGE:-auto}"
+  tts_language: "zh"
+  tts_speaker_id: ${TTS_SID:-52}
+  tts_speed: ${TTS_SPEED:-1.0}
+  sample_rate: 16000
+  vad: "silero"
+  vad_silence_ms: 600
+  multi_utterance: true
+
+# Wake-word pipeline; OpenWakeWordSource fires app.wake() from local audio.
+pipeline_mode: "wake_word"
+default_mode: "chat"
+wake_sources: []
+sleep_timeout_s: 30.0
+
+# VAD: server-only (agent forwards raw mic audio; SLV segments + finalises).
+client_vad_backend: "off"
+client_vad_threshold: 0.012
+client_vad_speech_min_ms: 200
+client_vad_silence_ms: 600
+client_vad_drive_eos: false
+
+# ── continuous-dialogue mic-pump (reSpeaker Flex XVF3800 ch1). Same
+# calibrated defaults as voice_arm.
+energy_gate_enabled: true
+energy_gate_open_rms: 0.002
+energy_gate_close_rms: 0.001
+energy_gate_hangover_ms: 300
+mic_makeup_gain: 12.0
+gate_drive_eos: false
+gate_eos_min_speech_ms: 250
+vad_stall_eos_ms: 1500
+mic_drop_while_speaking: true
+reconnect_on_wake: true
+
+# LLM — points at the edge-llm container by service name.
+llm_backend: "edge_llm"
+llm_base_url: "http://${LLM_SERVICE_HOST:-localhost}:${LLM_SERVICE_PORT:-8000}/v1"
+llm_api_key: "EMPTY"
+llm_model: "${LLM_MODEL:-Qwen/Qwen3-4B-AWQ}"
+llm_first_token_timeout_s: 15.0
+llm_stream_idle_timeout_s: 30.0
+
+# Tool calling — required for actuator-action dispatch.
+tools_enabled: true
+tools_default_allowlist: []
+tools_max_iterations: 3
+
+# System prompt — imperative robotic-arm controller.
+system_prompt: |
+  You are a voice controller for a reBot B601-DM robotic arm.
+  The user speaks commands aloud and you reply via TTS.
+
+  Behaviour:
+  - When the user clearly requests a motion, FIRST emit a brief
+    spoken acknowledgement, THEN call the matching tool function.
+    The acknowledgement is ONE OR TWO words in the user's language
+    ("好的，" / "OK," / "Sure,") and gets spoken immediately while
+    the robot executes the motion. Examples:
+      User: "挥手"       → Emit "好的" → call wave()
+      User: "回到原位"   → Emit "好的" → call go_home()
+      User: "张开夹爪"   → Emit "好的" → call open_gripper()
+    AFTER the tool returns, emit a short confirmation ("已挥手" /
+    "Done" / "已回到原位"), 1 short sentence max.
+  - To pick the right tool, read each tool's description and match the
+    user's exact phrase against the trigger words listed there. Chinese
+    triggers are LITERAL: '挥手' MUST call wave; '张开夹爪' MUST call
+    open_gripper; '闭合夹爪' MUST call close_gripper; '回到原位' MUST
+    call go_home; '指向' MUST call point_at. Never substitute a
+    semantically-similar tool — if no description literally contains the
+    user's phrase, reply that you don't have that action.
+  - HARD RULE — only call a tool when the user's text contains the
+    EXACT trigger phrase listed in that tool's description. If the
+    phrase is not literally present, DO NOT call any tool — reply
+    "没听清，请再说一次。" / "Sorry, I didn't catch that." instead.
+
+  /no_think
+
+mode_overrides:
+  chat:
+    temperature: 0.0
+
+audio_input_device: ${MIC_INDEX:-}
+audio_output_device: ${SPEAKER_DEVICE:-}
+audio_input_sample_rate: 16000
+audio_output_sample_rate: 16000
+
+log_level: "INFO"
+
+metadata:
+  wakeword:
+    model: "${WAKEWORD_MODEL:-hey jarvis}"
+    threshold: ${WAKEWORD_THRESHOLD:-0.5}
+    cooldown_s: ${WAKEWORD_COOLDOWN:-2.0}
+    vad_threshold: ${WAKEWORD_VAD_THRESHOLD:-0.0}
+    mic_channels: ${MIC_CHANNELS:-1}
+    mic_channel_select: ${MIC_CHANNEL_SELECT:-}
+
+  # ── Pluggable actuator: reBot B601-DM ────────────────────────────
+  actuator:
+    backend: rebot_arm
+    config:
+      # ① The SDK default channel is /dev/ttyACM0 — that is the SO-ARM's
+      #    port. The B601-DM is on ttyACM1, so we MUST override it here.
+      # ② The SDK decides serial-vs-SocketCAN with
+      #    channel.startswith("/dev/tty"), so this MUST be the REALPATH
+      #    (/dev/ttyACM1), NOT a /dev/serial/by-id/... symlink (a by-id
+      #    link would be misread as a CAN interface → SocketCAN error).
+      # ③ The container must run with `--device /dev/ttyACM1` and as root
+      #    (root bypasses the dialout-group permission requirement).
+      channel: "${REBOT_CHANNEL:-/dev/ttyACM1}"
+      # reBotArm_control_py SDK location (parent dir that CONTAINS
+      # reBotArm_control_py/). Falls back to $REBOT_REPO_ROOT then the
+      # container default /opt/rebot.
+      repo_root: "${REBOT_REPO_ROOT:-/opt/rebot}"
+      # Optional SDK robot.yaml / URDF / gripper.yaml overrides (null →
+      # SDK defaults). The channel MUST be wired through the SDK robot.yaml
+      # too if the SDK does not accept it directly (see ① above).
+      config_path: "${REBOT_CONFIG_PATH:-}"
+      urdf_path: "${REBOT_URDF_PATH:-}"
+      gripper_cfg_path: "${REBOT_GRIPPER_CFG:-}"
+      # Default per-waypoint move duration (seconds) when a frame omits it.
+      move_duration: ${REBOT_MOVE_DURATION:-2.0}
+      # Compliant-grasp force (Nm). null → plain torque close on close cmds.
+      grasp_force: "${REBOT_GRASP_FORCE:-}"
+      open_distance_m: ${REBOT_OPEN_DIST:-0.09}
+    actions_yaml_path: "${CONFIG_DIR:-/opt/seeed/voice_rebot_arm/config}/actions.yaml"
+    # Distinct from voice_arm's 8765 so both can coexist on one host.
+    observation_port: ${OBSERVATION_PORT:-8775}
+    clear_history_on_tool_change: ${ARM_CLEAR_HISTORY_ON_TOOL_CHANGE:-false}
+    clear_history_on_turn_end: ${ARM_CLEAR_HISTORY_ON_TURN_END:-true}
