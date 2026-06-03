@@ -113,11 +113,16 @@ RUN python -c "import openwakeword.utils; openwakeword.utils.download_models()"
 ENV REBOT_REPO_ROOT=/opt/rebot \
     REBOT_CHANNEL=/dev/ttyACM1 \
     OBSERVATION_PORT=8775 \
-    MIC_INDEX=auto \
+    MIC_INDEX=reSpeaker \
     WAKEWORD_MODEL="hey jarvis"
-# MIC_INDEX=auto: config's audio_input_device is ${MIC_INDEX:-}; without this
-# sounddevice errors "Multiple input devices found for ''" (the reSpeaker +
-# Jetson APE both enumerate). 'auto' disambiguates, mirroring production.
+# MIC_INDEX=reSpeaker: config's audio_input_device is ${MIC_INDEX:-}; empty
+# errors "Multiple input devices found for ''" (reSpeaker + Jetson APE both
+# enumerate). NOTE: MIC_INDEX=auto does NOT work — ovs_agent/audio/devices.py
+# resolve_input_index() is dead code (never called on the boot path), so
+# 'auto' reaches PortAudio verbatim and fails. A unique name substring
+# ('reSpeaker') is matched by sounddevice and is more robust than a numeric
+# index (no enumeration-order drift). TODO(canonical): wire resolve_input_index
+# so 'auto' works for all apps.
 
 # Observation HTTP server port (distinct from voice_arm's 8765).
 EXPOSE 8775
