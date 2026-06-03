@@ -1,0 +1,117 @@
+# OpenVoiceStream Agent — reBot B601-DM voice-arm image (apps/voice_rebot_arm).
+#
+# Independent from the SO-ARM image: this one bundles the reBot B601-DM SDK
+# (reBotArm_control_py + motorbridge) instead of the LeRobot/Feetech stack.
+#
+# Build context = repo root (so `COPY agent` resolves):
+#   docker build -f agent/Dockerfile.rebot-arm -t ovs-agent-rebot:latest .
+#
+# RUNTIME (do NOT bake into the image):
+#   * Mount the B601-DM serial device:  --device /dev/ttyACM1
+#     (the SDK reads channel.startswith("/dev/tty") to choose serial vs CAN,
+#      so the channel MUST be the REALPATH /dev/ttyACM1, not a by-id symlink).
+#   * Run as ROOT (--user 0 or default) so the container bypasses the host
+#     dialout-group permission requirement on /dev/ttyACM1.
+#   * Set REBOT_CHANNEL=/dev/ttyACM1 (default) and, if needed, REBOT_REPO_ROOT.
+#
+# NOTE: this Dockerfile is provided for completeness; per task scope it is
+# NOT built here. Image bring-up + device wiring is a later (powered) phase.
+
+# Use an aarch64 base for the Jetson/edge target. python:3.10-slim is
+# multi-arch so it resolves to arm64 on the device. Python is pinned to 3.10
+# (NOT 3.11) because the Pinocchio `pin==4.0.0` aarch64 wheel was verified to
+# install cleanly on cpython 3.10 on this Jetson; 3.11 wheels are not assured.
+# Phase A is CPU-only (wakeword + audio + actuator + SLV/LLM clients); the
+# heavy ASR/LLM/TTS run in the shared seeed-voice/edge-llm GPU containers, so
+# no CUDA base is needed here.
+FROM python:3.10-slim
+
+ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=${PIP_INDEX} \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN if [ -n "$APT_MIRROR" ]; then \
+        sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" \
+            /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+    fi && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        libportaudio2 \
+        libsndfile1 \
+        ca-certificates \
+        git \
+        build-essential \
+        portaudio19-dev \
+    && rm -rf /var/lib/apt/lists/*
+# build-essential + portaudio19-dev: pyaudio has no aarch64 wheel and is
+# compiled from source on python:3.10-slim (needs gcc + portaudio headers).
+
+WORKDIR /opt/slv
+
+# Agent source (self-contained; no SLV server tree needed).
+COPY agent /opt/slv/agent
+
+ENV PYTHONPATH=/opt/slv/agent
+
+# ── reBot B601-DM SDK ─────────────────────────────────────────────────
+# Clone reBotArm_control_py (vectorBH6) into /opt/rebot and install editable.
+# find_rebot_repo_root() resolves this canonical /opt/rebot location (or
+# $REBOT_REPO_ROOT). The SDK's bundled config/arm.yaml ships the full B601-DM
+# 6-joint + gripper motor map; our actuator copies it and overrides only the
+# `channel` field at connect time. Pinned to the verified commit.
+ARG REBOT_SDK_REF=893f09568db51d4da46b2c368f995d3421161bd6
+RUN git clone https://github.com/vectorBH6/reBotArm_control_py.git \
+        /opt/rebot/reBotArm_control_py \
+    && git -C /opt/rebot/reBotArm_control_py checkout ${REBOT_SDK_REF} \
+    && pip install --no-cache-dir -e /opt/rebot/reBotArm_control_py
+
+# Python deps:
+#   * pin>=3.9.0  — Pinocchio kinematics (IK/FK) used by the SDK.
+#   * pin==4.0.0 — Pinocchio kinematics (IK/FK); aarch64 wheel verified on the
+#     Jetson under cpython 3.10 (pulls eigenpy/coal/cmeel-* prebuilt wheels).
+#   * motorbridge — CAN motor bridge (B601-DM low-level transport). Confirmed
+#     on PyPI (it is a declared dep of reBotArm_control_py, resolved by pip);
+#     installed explicitly here to be safe.
+#   * onnxruntime (CPU) — openWakeWord wakeword inference. Phase A uses the CPU
+#     EP (same as the production SO-ARM slim image); the wakeword models are
+#     small. The aarch64 onnxruntime-gpu / TensorRT-EP wheel (NVIDIA jp index)
+#     is only needed for Phase B's YOLO segmenter — wire it then.
+RUN pip install --no-cache-dir \
+        "websockets>=12" \
+        "sounddevice>=0.4" \
+        "numpy>=1.24" \
+        "openai>=1.40" \
+        "pyyaml>=6.0" \
+        "pysbd>=0.3.4" \
+        "fastapi>=0.110" \
+        "uvicorn[standard]>=0.27" \
+        "openwakeword>=0.6" \
+        "pyaudio>=0.2.13" \
+        "onnxruntime>=1.17" \
+        "opencv-python-headless>=4.8" \
+        "scipy>=1.10" \
+        "pin>=3.9.0" \
+        "motorbridge==0.2.8" \
+    && pip install --no-cache-dir /opt/slv/agent
+# motorbridge PINNED to 0.2.8 — the version powered-validated on the device's
+# /home/seeed/venv (move_to / gripper / enable all confirmed on hardware).
+# Leaving it unpinned (>=0.2.8) is non-deterministic: builds have resolved to
+# 0.2.2 and 0.4.2 on different runs depending on what the mirror served.
+
+ENV REBOT_REPO_ROOT=/opt/rebot \
+    REBOT_CHANNEL=/dev/ttyACM1 \
+    OBSERVATION_PORT=8775 \
+    MIC_INDEX=auto \
+    WAKEWORD_MODEL="hey jarvis"
+# MIC_INDEX=auto: config's audio_input_device is ${MIC_INDEX:-}; without this
+# sounddevice errors "Multiple input devices found for ''" (the reSpeaker +
+# Jetson APE both enumerate). 'auto' disambiguates, mirroring production.
+
+# Observation HTTP server port (distinct from voice_arm's 8765).
+EXPOSE 8775
+
+CMD ["ovs-agent", "run", "voice_rebot_arm"]
