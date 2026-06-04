@@ -54,6 +54,17 @@ def _default_output_index() -> int | None:
         audio.terminate()
 
 
+def _default_input_index() -> int | None:
+    audio = pyaudio.PyAudio()
+    try:
+        info = audio.get_default_input_device_info()
+        return int(info.get("index")) if info else None
+    except Exception:
+        return None
+    finally:
+        audio.terminate()
+
+
 def _find_respeaker(devices: list[tuple[int, str]]) -> tuple[int, str] | None:
     for index, name in devices:
         lo = name.lower()
@@ -62,44 +73,82 @@ def _find_respeaker(devices: list[tuple[int, str]]) -> tuple[int, str] | None:
     return None
 
 
-def resolve_input_index(value: str | int) -> int:
+def _find_name(devices: list[tuple[int, str]], needle: str) -> tuple[int, str] | None:
+    if needle.lower() == "respeaker":
+        return _find_respeaker(devices)
+    needle = needle.lower()
+    for index, name in devices:
+        if needle in name.lower():
+            return index, name
+    return None
+
+
+def _requested_name(value: str | int | None) -> str | None:
+    if isinstance(value, int):
+        return None
+    raw = "" if value is None else str(value).strip()
+    if not raw or raw.lower() == "auto":
+        return "reSpeaker"
+    if raw.lower() in ("default", "system", "system_default"):
+        return None
+    try:
+        int(raw)
+    except ValueError:
+        return raw
+    return None
+
+
+def _explicit_index(value: str | int | None) -> int | None:
     if isinstance(value, int):
         return value
-    if value and str(value).strip().lower() != "auto":
-        return int(value)
+    raw = "" if value is None else str(value).strip()
+    if not raw or raw.lower() in ("auto", "default", "system", "system_default"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def resolve_input_index(value: str | int | None) -> int:
+    explicit = _explicit_index(value)
+    if explicit is not None:
+        return explicit
+    raw = "" if value is None else str(value).strip().lower()
+    requested = None if raw in ("default", "system", "system_default") else (
+        _requested_name(value) or "reSpeaker"
+    )
 
     # USB devices (the reSpeaker) sometimes enumerate a beat after pipeline
     # startup. Try a few times before falling back to whatever is available
     # so we don't get stuck on the Jetson APE every cold boot.
     last_devices: list[tuple[int, str]] = []
-    for attempt in range(10):
-        devices = _enumerate_inputs()
-        last_devices = devices
-        match = _find_respeaker(devices)
-        if match is not None:
-            index, name = match
-            _log(f"[Audio] Auto-selected input device [{index}] {name}")
-            return index
-        if attempt < 9:
-            time.sleep(1.0)
+    if requested is not None:
+        for attempt in range(10):
+            devices = _enumerate_inputs()
+            last_devices = devices
+            match = _find_name(devices, requested)
+            if match is not None:
+                index, name = match
+                _log(f"[Audio] Auto-selected input device [{index}] {name}")
+                return index
+            if attempt < 9:
+                time.sleep(1.0)
 
-    # Still no reSpeaker after 10s — log everything we did see, then
-    # fall back to the first input device. Fallback is almost certainly
-    # NOT what the user wants (probably Jetson APE which has no real mic)
-    # but it lets the rest of the pipeline boot for diagnostics.
-    _log("[Audio] reSpeaker / XVF3800 not found after 10s. Available inputs:")
-    for index, name in last_devices:
-        _log(f"[Audio]   [{index}] {name}")
-    if last_devices:
-        index, name = last_devices[0]
-        _log(f"[Audio] Auto-selected fallback input device [{index}] {name}")
-        _log("[Audio] ⚠ Set MIC_INDEX env var explicitly if this is wrong.")
-        return index
+        _log(f"[Audio] input device matching {requested!r} not found after 10s. Available inputs:")
+        for index, name in last_devices:
+            _log(f"[Audio]   [{index}] {name}")
+    default_index = _default_input_index()
+    if default_index is not None:
+        _log(f"[Audio] Falling back to system default input device [{default_index}]")
+        _log("[Audio] ⚠ Set MIC_INDEX env var explicitly if ASR is silent.")
+        return default_index
 
-    raise RuntimeError("No audio input device found")
+    _log("[Audio] No default input device; letting sounddevice choose.")
+    return -1
 
 
-def resolve_output_index(value: str | int) -> int:
+def resolve_output_index(value: str | int | None) -> int:
     """Resolve the TTS playback device index by reSpeaker name, mirroring
     resolve_input_index. Returns -1 to mean "let sounddevice use its default".
 
@@ -109,26 +158,30 @@ def resolve_output_index(value: str | int) -> int:
     TTS plays into the void. Resolve by name the same way the mic is, so the
     speaker tracks the reSpeaker wherever it enumerates.
     """
-    if isinstance(value, int):
-        return value
-    if value and str(value).strip().lower() != "auto":
-        return int(value)
+    explicit = _explicit_index(value)
+    if explicit is not None:
+        return explicit
+    raw = "" if value is None else str(value).strip().lower()
+    requested = None if raw in ("default", "system", "system_default") else (
+        _requested_name(value) or "reSpeaker"
+    )
 
     last_devices: list[tuple[int, str]] = []
-    for attempt in range(10):
-        devices = _enumerate_outputs()
-        last_devices = devices
-        match = _find_respeaker(devices)
-        if match is not None:
-            index, name = match
-            _log(f"[Audio] Auto-selected output device [{index}] {name}")
-            return index
-        if attempt < 9:
-            time.sleep(1.0)
+    if requested is not None:
+        for attempt in range(10):
+            devices = _enumerate_outputs()
+            last_devices = devices
+            match = _find_name(devices, requested)
+            if match is not None:
+                index, name = match
+                _log(f"[Audio] Auto-selected output device [{index}] {name}")
+                return index
+            if attempt < 9:
+                time.sleep(1.0)
 
-    _log("[Audio] reSpeaker / XVF3800 output not found after 10s. Available outputs:")
-    for index, name in last_devices:
-        _log(f"[Audio]   [{index}] {name}")
+        _log(f"[Audio] output device matching {requested!r} not found after 10s. Available outputs:")
+        for index, name in last_devices:
+            _log(f"[Audio]   [{index}] {name}")
     default_index = _default_output_index()
     if default_index is not None:
         _log(f"[Audio] Falling back to system default output device [{default_index}]")

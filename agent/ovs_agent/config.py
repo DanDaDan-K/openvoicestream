@@ -408,6 +408,51 @@ def _expand_env(value: Any) -> Any:
     return value
 
 
+def _coerce_slv_value(key: str, value: Any, target_type: type, default: Any) -> Any:
+    if value is None or value == "":
+        return default
+    if target_type is bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            v = _normalize_env_flag(value)
+            if v in ("1", "true", "yes", "on"):
+                return True
+            if v in ("0", "false", "no", "off", ""):
+                return False
+        raise ValueError(f"slv_config.{key} must be a bool; got {value!r}")
+    if target_type is int:
+        if isinstance(value, bool):
+            raise ValueError(f"slv_config.{key} must be an int; got {value!r}")
+        return int(value)
+    if target_type is float:
+        if isinstance(value, bool):
+            raise ValueError(f"slv_config.{key} must be a float; got {value!r}")
+        return float(value)
+    if target_type is str:
+        return str(value)
+    return value
+
+
+def _coerce_slv_config_types(slv_cfg: dict[str, Any]) -> dict[str, Any]:
+    defaults = _default_slv_config()
+    type_overrides = {
+        # Default is None to mean "use model default", but configured values
+        # are speaker IDs and must be sent to SLV as integers.
+        "tts_speaker_id": int,
+    }
+    for key, default in defaults.items():
+        if key not in slv_cfg:
+            continue
+        target_type = type_overrides.get(key)
+        if target_type is None and default is not None:
+            target_type = type(default)
+        if target_type is None:
+            continue
+        slv_cfg[key] = _coerce_slv_value(key, slv_cfg[key], target_type, default)
+    return slv_cfg
+
+
 def load_config(path: str | Path) -> Config:
     """Load YAML config, apply env substitution, return a Config."""
     p = Path(path).expanduser()
@@ -423,6 +468,7 @@ def load_config(path: str | Path) -> Config:
     slv_cfg.update(raw.get("slv_config", {}) or {})
     # Force the framework invariant: persistent WS across utterances.
     slv_cfg["multi_utterance"] = True
+    slv_cfg = _coerce_slv_config_types(slv_cfg)
 
     fields = {k: v for k, v in raw.items() if k != "slv_config"}
     # Tolerate template ↔ Config drift: a base-image ``agent.yaml.tmpl`` may
