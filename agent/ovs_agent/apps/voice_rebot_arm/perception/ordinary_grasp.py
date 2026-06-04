@@ -23,16 +23,6 @@ from .transforms import grasp_axes_to_rebot_tcp_rotation
 
 
 # ── torch-free helpers (inlined from upstream common_utils) ──────────────────
-def _to_numpy(value: Any) -> Optional[np.ndarray]:
-    """Coerce a result field to numpy. The YoloResult path is already numpy,
-    so this is a no-op cast; kept generic to tolerate list/scalar inputs.
-    No torch / ``.cpu()`` involved.
-    """
-    if value is None:
-        return None
-    return np.asarray(value)
-
-
 def detection_count(result: Any) -> int:
     for attr in ("obb", "boxes"):
         container = getattr(result, attr, None)
@@ -118,12 +108,15 @@ def estimate_grasp(
     center = rect_points.mean(axis=0).astype(np.float32)
 
     mask = _depth_mask(result, index, depth_mm.shape, rect_points)
-    short_vec_uv, short_len_px = _short_edge(rect_points)
-    short_dir_uv = _normalize(short_vec_uv)
-    edge_lengths = [
-        float(np.linalg.norm(rect_points[(i + 1) % 4] - rect_points[i])) for i in range(4)
-    ]
+    # One pass over the 4 rect edges: gather vectors/norms, then derive the
+    # longest edge (object length) and the shortest edge (grasp short-axis).
+    edge_vecs = [rect_points[(i + 1) % 4] - rect_points[i] for i in range(4)]
+    edge_lengths = [float(np.linalg.norm(vec)) for vec in edge_vecs]
     long_len_px = max(edge_lengths)
+    short_i = min(range(4), key=lambda i: edge_lengths[i])
+    short_vec_uv = edge_vecs[short_i].astype(np.float32)
+    short_len_px = edge_lengths[short_i]
+    short_dir_uv = _normalize(short_vec_uv)
     grasp_span_px = short_len_px
     short_edge_points = _line_from_center(center, short_vec_uv)
 
@@ -304,21 +297,35 @@ def _rect_from_mask(mask: np.ndarray) -> Optional[np.ndarray]:
     return cv2.boxPoints(rect).astype(np.float32)
 
 
+def _instance_mask(
+    result: Any, index: int, image_shape: tuple[int, int]
+) -> Optional[np.ndarray]:
+    """Return the resized binary instance mask, or ``None`` if unavailable.
+
+    Shared prefix of :func:`_rect_points` / :func:`_depth_mask`: pull the
+    seg mask out of the result, resize to the image grid, threshold at 0.5.
+    """
+    masks = getattr(result, "masks", None)
+    boxes = getattr(result, "boxes", None)
+    if masks is None or boxes is None or len(masks.data) != len(boxes):
+        return None
+    mask = np.asarray(masks.data[index])
+    if mask.shape != tuple(image_shape):
+        mask = cv2.resize(
+            mask, (image_shape[1], image_shape[0]), interpolation=cv2.INTER_NEAREST
+        )
+    return (mask > 0.5).astype(np.uint8)
+
+
 def _rect_points(
     result: Any,
     index: int,
     image_shape: tuple[int, int],
     bbox_xyxy: tuple[int, int, int, int],
 ) -> np.ndarray:
-    masks = getattr(result, "masks", None)
-    boxes = getattr(result, "boxes", None)
-    if masks is not None and boxes is not None and len(masks.data) == len(boxes):
-        mask = np.asarray(masks.data[index])
-        if mask.shape != tuple(image_shape):
-            mask = cv2.resize(
-                mask, (image_shape[1], image_shape[0]), interpolation=cv2.INTER_NEAREST
-            )
-        rect = _rect_from_mask((mask > 0.5).astype(np.uint8))
+    mask = _instance_mask(result, index, image_shape)
+    if mask is not None:
+        rect = _rect_from_mask(mask)
         if rect is not None:
             return rect
 
@@ -329,34 +336,14 @@ def _rect_points(
 def _depth_mask(
     result: Any, index: int, image_shape: tuple[int, int], rect_points: np.ndarray
 ) -> np.ndarray:
-    masks = getattr(result, "masks", None)
-    boxes = getattr(result, "boxes", None)
-    if masks is not None and boxes is not None and len(masks.data) == len(boxes):
-        mask = np.asarray(masks.data[index])
-        if mask.shape != tuple(image_shape):
-            mask = cv2.resize(
-                mask, (image_shape[1], image_shape[0]), interpolation=cv2.INTER_NEAREST
-            )
-        return (mask > 0.5).astype(np.uint8)
+    mask = _instance_mask(result, index, image_shape)
+    if mask is not None:
+        return mask
 
     polygon = np.round(rect_points).astype(np.int32)
     mask = np.zeros(image_shape, dtype=np.uint8)
     cv2.fillPoly(mask, [polygon], 1)
     return mask
-
-
-def _short_edge(rect_points: np.ndarray) -> tuple[np.ndarray, float]:
-    best_vec = rect_points[1] - rect_points[0]
-    best_len = float(np.linalg.norm(best_vec))
-    for i in range(4):
-        p0 = rect_points[i]
-        p1 = rect_points[(i + 1) % 4]
-        vec = p1 - p0
-        length = float(np.linalg.norm(vec))
-        if length < best_len:
-            best_vec = vec
-            best_len = length
-    return best_vec.astype(np.float32), best_len
 
 
 def _backproject(u: float, v: float, z_m: float, K: np.ndarray) -> np.ndarray:

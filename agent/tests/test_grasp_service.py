@@ -81,9 +81,11 @@ class FakeSegmenter:
     def __init__(self, result) -> None:
         self._result = result
         self.predict_calls = 0
+        self.last_only_names = None
 
-    def predict(self, image_bgr, conf=0.25, iou=0.45):
+    def predict(self, image_bgr, conf=0.25, iou=0.45, only_names=None):
         self.predict_calls += 1
+        self.last_only_names = only_names
         return [self._result]
 
 

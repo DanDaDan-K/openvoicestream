@@ -52,11 +52,6 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 
 WORKDIR /opt/slv
 
-# Agent source (self-contained; no SLV server tree needed).
-COPY agent /opt/slv/agent
-
-ENV PYTHONPATH=/opt/slv/agent
-
 # ── reBot B601-DM SDK ─────────────────────────────────────────────────
 # Clone reBotArm_control_py (vectorBH6) into /opt/rebot and install editable.
 # find_rebot_repo_root() resolves this canonical /opt/rebot location (or
@@ -95,8 +90,7 @@ RUN pip install --no-cache-dir \
         "opencv-python-headless>=4.8" \
         "scipy>=1.10" \
         "pin>=3.9.0" \
-        "motorbridge==0.2.8" \
-    && pip install --no-cache-dir /opt/slv/agent
+        "motorbridge==0.2.8"
 # motorbridge PINNED to 0.2.8 — the version powered-validated on the device's
 # /home/seeed/venv (move_to / gripper / enable all confirmed on hardware).
 # Leaving it unpinned (>=0.2.8) is non-deterministic: builds have resolved to
@@ -109,6 +103,15 @@ RUN pip install --no-cache-dir \
 # runtime (this image has no entrypoint download step). download_models()
 # fetches them at build (verified reachable from the device).
 RUN python -c "import openwakeword.utils; openwakeword.utils.download_models()"
+
+# Agent source (self-contained; no SLV server tree needed). Copied LAST so a
+# code edit only re-runs this cheap install layer — the SDK clone, the big
+# wheel install and the model download above all stay cached. Dependencies are
+# already satisfied by the wheel layer, so `pip install` here just registers
+# the package (kept dependency-bearing so a fresh build is still complete).
+COPY agent /opt/slv/agent
+RUN pip install --no-cache-dir /opt/slv/agent
+ENV PYTHONPATH=/opt/slv/agent
 
 ENV REBOT_REPO_ROOT=/opt/rebot \
     REBOT_CHANNEL=/dev/ttyACM1 \

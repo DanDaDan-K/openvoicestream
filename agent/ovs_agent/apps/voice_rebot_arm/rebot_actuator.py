@@ -54,6 +54,30 @@ from ovs_agent.actuators.factory import register_actuator
 # connect()).
 from .rebot_arm import RebotArm
 
+
+def sleep_cancellable(
+    delay: float, cancel_event: Optional[threading.Event]
+) -> bool:
+    """Sleep ``delay`` seconds in small steps, polling ``cancel_event``.
+
+    Returns True if the full delay elapsed (or there was nothing to wait for),
+    False if ``cancel_event`` fired before the deadline. Shared by the actuator
+    settle pause and the grasp pipeline's motion-settle wait so both honour the
+    same cancellation cadence.
+    """
+    if delay <= 0:
+        return True
+    if cancel_event is None:
+        time.sleep(delay)
+        return True
+    end = time.monotonic() + delay
+    while time.monotonic() < end:
+        if cancel_event.is_set():
+            return False
+        time.sleep(min(0.05, max(0.0, end - time.monotonic())))
+    return not cancel_event.is_set()
+
+
 # Observation schema fields exposed by GET /observation/schema and used by
 # ActionsManager to validate that every saved frame supplies these fields.
 _CARTESIAN_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw", "gripper")
@@ -244,7 +268,7 @@ class RebotArmActuator(Actuator):
         LOCKING (SAFETY): the actuator lock is held only around each discrete
         bus operation (one move_to / one gripper command, the final cache
         read) — NOT across the whole sequence and NOT across the settle
-        ``_sleep_cancellable``. Holding it across the multi-second sleep would
+        ``sleep_cancellable``. Holding it across the multi-second sleep would
         block an emergency ``set_torque(False)`` and ``update_cache`` for the
         entire motion; releasing it between ops keeps each bus touch atomic
         while letting torque-off pre-empt the sequence promptly.
@@ -290,7 +314,7 @@ class RebotArmActuator(Actuator):
             )
             # Interruptible settle pause — LOCK RELEASED so set_torque(False)
             # / update_cache can run during the multi-second wait.
-            self._sleep_cancellable(delay, cancel_event)
+            sleep_cancellable(delay, cancel_event)
 
         # Refresh cache (single locked bus read).
         with self._lock:
@@ -341,7 +365,7 @@ class RebotArmActuator(Actuator):
                 return False
         return True
 
-    def _apply_gripper(self, g: float) -> None:
+    def _apply_gripper(self, g: float) -> bool:
         """Map the frame gripper field (signed magnitude) to an SDK call.
 
         The gripper field is a per-frame SIGNED MAGNITUDE so each action can
@@ -377,21 +401,6 @@ class RebotArmActuator(Actuator):
             print(f"[RebotArmActuator] gripper command failed: {exc}")
             return False
         return True
-
-    @staticmethod
-    def _sleep_cancellable(
-        delay: float, cancel_event: Optional[threading.Event]
-    ) -> None:
-        if delay <= 0:
-            return
-        if cancel_event is None:
-            time.sleep(delay)
-            return
-        end = time.monotonic() + delay
-        while time.monotonic() < end:
-            if cancel_event.is_set():
-                return
-            time.sleep(min(0.05, max(0.0, end - time.monotonic())))
 
     # ── torque control ───────────────────────────────────────────────
 

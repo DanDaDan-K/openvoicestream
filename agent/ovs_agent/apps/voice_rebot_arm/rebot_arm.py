@@ -22,6 +22,7 @@ runs against real hardware.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -189,17 +190,22 @@ class RebotArm:
                      verbatim (SDK default ttyACM0).
     """
 
-    # Where the SDK ships its default arm.yaml relative to the located repo
-    # root. ``init_gripper`` already probes the same two layouts for
-    # gripper.yaml; we mirror that here for arm.yaml.
-    def _default_arm_cfg_path(self) -> Optional[str]:
-        cand = self._repo_root / _REBOT_REPO_NAME / "config" / "arm.yaml"
+    # Probe the two layouts the SDK config files can live under, relative to
+    # the located repo root: the packaged ``reBotArm_control_py/config/`` first,
+    # then the SDK-relative ``config/`` fallback the upstream driver used.
+    def _sdk_cfg_path(self, filename: str) -> Optional[str]:
+        cand = self._repo_root / _REBOT_REPO_NAME / "config" / filename
         if cand.exists():
             return str(cand)
-        cand = self._repo_root / "config" / "arm.yaml"
+        cand = self._repo_root / "config" / filename
         if cand.exists():
             return str(cand)
         return None
+
+    # Where the SDK ships its default arm.yaml relative to the located repo
+    # root. ``init_gripper`` probes the same two layouts for gripper.yaml.
+    def _default_arm_cfg_path(self) -> Optional[str]:
+        return self._sdk_cfg_path("arm.yaml")
 
     def __init__(
         self,
@@ -376,9 +382,10 @@ class RebotArm:
         from reBotArm_control_py.actuator.gripper import load_cfg as load_gripper_cfg
 
         if cfg_path is None:
-            cfg_path = str(self._repo_root / _REBOT_REPO_NAME / "config" / "gripper.yaml")
-            if not Path(cfg_path).exists():
-                # Fallback to the SDK-relative layout the upstream driver used.
+            cfg_path = self._sdk_cfg_path("gripper.yaml")
+            if cfg_path is None:
+                # Neither layout has the file; fall back to the SDK-relative
+                # path string so load_cfg surfaces a clear missing-file error.
                 cfg_path = str(self._repo_root / "config" / "gripper.yaml")
 
         gcfg = load_gripper_cfg(cfg_path)
@@ -458,12 +465,7 @@ class RebotArm:
         tau_safe = float(np.clip(pos_term + tau_ff, -_G_TAU_MAX, _G_TAU_MAX)) - pos_term
         lock = getattr(self._gripper_ctrl, "_bus_lock", None)
         try:
-            if lock:
-                with lock:
-                    self._gripper_mot.send_mit(pos_cmd, vel, kp, kd, tau_safe)
-                    self._gripper_mot.request_feedback()
-                    self._gripper_ctrl.poll_feedback_once()
-            else:
+            with (lock or contextlib.nullcontext()):
                 self._gripper_mot.send_mit(pos_cmd, vel, kp, kd, tau_safe)
                 self._gripper_mot.request_feedback()
                 self._gripper_ctrl.poll_feedback_once()

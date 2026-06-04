@@ -24,10 +24,11 @@ from __future__ import annotations
 import contextlib
 import logging
 import threading
-import time
 from typing import Any, Optional
 
 import numpy as np
+
+from .rebot_actuator import sleep_cancellable
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +80,7 @@ def _wait_motion_cancellable(
     if cancel_event is None:
         arm.wait_motion(duration)
         return True
-    end = time.monotonic() + max(0.0, float(duration))
-    while time.monotonic() < end:
-        if cancel_event.is_set():
-            return False
-        time.sleep(min(0.1, max(0.0, end - time.monotonic())))
-    return not cancel_event.is_set()
+    return sleep_cancellable(max(0.0, float(duration)), cancel_event)
 
 
 def run_grasp_once(
@@ -162,7 +158,11 @@ def run_grasp_once(
         _check_cancel(cancel_event, arm)
         from .perception.ordinary_grasp import estimate_grasps, select_best_grasp
 
-        results = segmenter.predict(color_bgr, conf=conf, iou=iou)
+        results = segmenter.predict(
+            color_bgr, conf=conf, iou=iou, only_names={target}
+        )
+        # only_names already drops non-target rows in-graph; the filter below is
+        # a cheap belt-and-braces fallback (matches the same target口径).
         results = _filter_results_to_target(results, target)
         grasps = estimate_grasps(results, depth_mm, K, depth_quantile=depth_quantile)
         best = select_best_grasp(grasps)

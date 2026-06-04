@@ -34,6 +34,7 @@ class OrbbecGemini2(CameraDriver):
         self._K: Optional[np.ndarray] = None
         self._D: Optional[np.ndarray] = None
         self._aruco = None
+        self._OBFormat = None  # cached SDK enum, set in open()
 
     # ── 生命周期 ─────────────────────────────────────────────────────────────
 
@@ -58,6 +59,8 @@ class OrbbecGemini2(CameraDriver):
         OBFormat = _sdk.OBFormat
         OBAlignMode = _sdk.OBAlignMode
         Context = _sdk.Context
+        # Cache the enum for per-frame format dispatch (get_frame is hot).
+        self._OBFormat = OBFormat
         self._ob_sdk_name = _name
 
         # 仅在 C++ SDK 初始化时压制 stderr（避免时间戳异常等日志刷屏）
@@ -138,7 +141,7 @@ class OrbbecGemini2(CameraDriver):
         if self._pipeline is None:
             return None, None
         try:
-            OBFormat = __import__(getattr(self, "_ob_sdk_name", "pyorbbecsdk")).OBFormat
+            OBFormat = self._OBFormat
             frames = self._pipeline.wait_for_frames(500)
             if frames is None:
                 return None, None

@@ -31,10 +31,38 @@ IMG_PATH = PROBE_DIR / "bus.jpg"
 BASELINE = PROBE_DIR / "baseline.json"
 CLASSES = ["person", "bus"]
 
+# The person/bus fixture ONNX is published on HF; fetch it on demand when the
+# local probe copy is absent so the real-inference test is reproducible on any
+# machine. Network failure leaves the file missing → the skipif below skips
+# (never fails) on offline hosts.
+_ONNX_URL = (
+    "https://huggingface.co/harvestsu/yoloe-26s-seg-onnx/"
+    "resolve/main/yoloe-26s-seg.onnx"
+)
+
+
+def _ensure_onnx() -> bool:
+    """Return True if the fixture ONNX is available (downloading if needed)."""
+    if ONNX_PATH.exists():
+        return True
+    import urllib.request
+
+    try:
+        PROBE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = ONNX_PATH.with_suffix(".onnx.part")
+        urllib.request.urlretrieve(_ONNX_URL, tmp)  # noqa: S310 — fixed HTTPS URL
+        tmp.replace(ONNX_PATH)
+        return True
+    except Exception:
+        return False
+
+
+_ONNX_READY = _ensure_onnx()
+
 
 # ── layer 1: real inference (opportunistic) ──────────────────────────────────
 @pytest.mark.skipif(
-    not (ONNX_PATH.exists() and IMG_PATH.exists()),
+    not (_ONNX_READY and IMG_PATH.exists()),
     reason="probe ONNX / image not present",
 )
 def test_real_inference_fields_and_depadding():
@@ -193,6 +221,50 @@ def test_postprocess_depadding_resizes_content_to_orig():
     bx = np.asarray(out.boxes[0].xyxy[0])
     assert bx[1] == pytest.approx(120.0, abs=1.0)   # 200 - 80
     assert bx[3] == pytest.approx(360.0, abs=1.0)   # 440 - 80
+
+
+def test_postprocess_only_names_equivalent_to_full_then_filter():
+    """``only_names`` must yield exactly the target-class subset that a full
+    prediction followed by post-hoc name filtering would produce."""
+    seg = _make_segmenter()
+    net = 640
+    # Two above-conf rows: cls 0 (person) and cls 1 (bus).
+    det = np.zeros((2, 38), dtype=np.float32)
+    det[0, :6] = [50, 50, 200, 200, 0.9, 0]   # person
+    det[0, 6] = 5.0
+    det[1, :6] = [300, 300, 500, 500, 0.8, 1]  # bus
+    det[1, 6] = 5.0
+    proto = np.zeros((32, 160, 160), dtype=np.float32)
+    proto[0, 10:150, 10:150] = 1.0
+
+    full = seg._postprocess(
+        [det[None], proto[None]], conf=0.25, orig_shape=(640, 640),
+        ratio=1.0, dw=0.0, dh=0.0, net=net,
+    )
+    gated = seg._postprocess(
+        [det[None], proto[None]], conf=0.25, orig_shape=(640, 640),
+        ratio=1.0, dw=0.0, dh=0.0, net=net, only_names={"bus"},
+    )
+
+    # only_names result contains exactly the target class.
+    assert len(gated.boxes) == 1
+    assert gated.names[int(gated.boxes[0].cls[0])] == "bus"
+
+    # ... and is identical to filtering the full result down to that class.
+    full_bus = [
+        i for i in range(len(full.boxes))
+        if full.names[int(full.boxes[i].cls[0])] == "bus"
+    ]
+    assert len(full_bus) == len(gated.boxes)
+    assert int(full.boxes[full_bus[0]].cls[0]) == int(gated.boxes[0].cls[0])
+    np.testing.assert_allclose(
+        np.asarray(full.boxes[full_bus[0]].xyxy[0]),
+        np.asarray(gated.boxes[0].xyxy[0]),
+    )
+    assert gated.masks is not None
+    np.testing.assert_array_equal(
+        full.masks.data[full_bus[0]], gated.masks.data[0]
+    )
 
 
 def test_boxes_container_len_and_index():

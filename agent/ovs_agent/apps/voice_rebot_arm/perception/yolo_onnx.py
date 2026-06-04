@@ -186,12 +186,19 @@ class YoloOnnxSegmenter:
         image_bgr: np.ndarray,
         conf: float = 0.25,
         iou: float = 0.45,  # noqa: ARG002 — NMS is baked into the graph
+        only_names: Optional[set] = None,
     ) -> list[YoloResult]:
         """Run inference on one BGR frame; return ``[YoloResult]`` (list for
         ultralytics API parity — always length 1).
 
         ``iou`` is accepted for signature compatibility but unused: the export
         bakes NMS in. We only apply the ``conf`` confidence gate on rows.
+
+        ``only_names`` (optional): a set of class label strings. When given,
+        rows whose class name is not in the set are dropped *before* the
+        expensive per-row mask assembly. This is purely a cost optimisation —
+        the result is identical to running full inference and filtering the
+        boxes/masks by name afterwards (``None`` keeps the legacy behaviour).
         """
         self._ensure_session()
         img0 = np.asarray(image_bgr)
@@ -204,7 +211,11 @@ class YoloOnnxSegmenter:
             padded[:, :, ::-1].transpose(2, 0, 1)[None].astype(np.float32) / 255.0
         )
         outs = self._session.run(None, {self._input_name: blob})
-        return [self._postprocess(outs, conf, (h0, w0), ratio, dw, dh, net)]
+        return [
+            self._postprocess(
+                outs, conf, (h0, w0), ratio, dw, dh, net, only_names
+            )
+        ]
 
     # ── numpy/cv2 seg post-process (validated against ultralytics) ─────────
     def _postprocess(
@@ -216,6 +227,7 @@ class YoloOnnxSegmenter:
         dw: float,
         dh: float,
         net: int,
+        only_names: Optional[set] = None,
     ) -> YoloResult:
         det = np.asarray(outs[0])[0]      # [300, 38]
         proto = np.asarray(outs[1])[0]    # [32, 160, 160]
@@ -237,8 +249,13 @@ class YoloOnnxSegmenter:
             # only drop strictly-below-threshold rows.
             if c < conf:
                 continue
-            box640 = row[:4].astype(np.float32)
             cls_id = int(round(float(row[5])))
+            # Class-name gate (optional, before the costly mask assembly). The
+            # caller filters to the same name set downstream, so dropping here
+            # is behaviour-equivalent but skips the per-row mask work.
+            if only_names is not None and self.names.get(cls_id) not in only_names:
+                continue
+            box640 = row[:4].astype(np.float32)
             coeffs = row[6:]
 
             # box in original-image space (un-letterbox).
