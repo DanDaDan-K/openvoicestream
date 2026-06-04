@@ -4,6 +4,7 @@
 + Actuator ABC 框架；Phase A = 笛卡尔预设动作，Phase B = 去 torch 视觉抓取。
 
 设备：**seeed-orin-nx**（Jetson Orin NX 16G, JetPack 6.2.1, CUDA 12.6, Python 3.10）。
+访问：直接 **SSH**（`ssh seeed@seeed-orin-nx`；docker / 串口 / dpkg 需 `sudo`）。
 机械臂在 **`/dev/ttyACM1`**（Damiao CAN via DM-serial）。**`/dev/ttyACM0` 是 SO-ARM，勿碰。**
 
 ---
@@ -35,7 +36,7 @@
   ```
   `seeed-voice`(ASR/TTS) / `edge-llm`(LLM) 常驻共享，**绝不 stop/down**。
 - 首次/换 image 起容器（完整 docker run，已含全部 env）：见 §5。
-- 日志：`docker logs --tail 80 voice-rebot-arm`（fleet：`fleet exec --sudo seeed-orin-nx -- docker logs --tail 80 voice-rebot-arm`）。
+- 日志：设备上 `sudo docker logs --tail 80 voice-rebot-arm`（远程一行：`ssh seeed@seeed-orin-nx sudo docker logs --tail 80 voice-rebot-arm`）。
 
 ---
 
@@ -71,6 +72,8 @@
 - 注意：一次性脚本里 TRT "warm" 跑 ~3.2s 是进程冷启（session 初始化+engine 反序列化）开销；
   **常驻进程（grasp_service）里 session 只建一次，稳态单帧推理是几十 ms 级**，远快于 CPU 1.18s。
   换词表需重导 ONNX + 重建 engine（再开一次腾内存窗口）。
+- **ONNX 已发布**：两个 ONNX（`test_yolo_onnx.py` 的 person/bus fixture + 上面的 grasp7 词表）
+  已上传至 `https://huggingface.co/harvestsu/yoloe-26s-seg-onnx`，设备 / 复现可从此拉取。
 
 ### 3.2 手眼标定（eye-in-hand）→ `hand_eye.npz` ★硬门槛，必须到场
 当前**没有** `config/calibration/orbbec_gemini2/hand_eye.npz`，没它相机系位姿转不到机械臂基座系 → **无法抓**。
@@ -91,8 +94,13 @@
 → move_to(pregrasp→grasp) → grasp(force) → lift。barge-in/“停” 会 cancel 并安全张爪。
 
 ### 3.5 GPU 推理（可选，提速）
-- onnxruntime-gpu 暴露 [TensorRT, CUDA, CPU] EP，但**生产语音栈占满 16G 内存 → TRT 建 engine 会 OOM**。
-  要用 GPU/TRT：先腾内存（停语音栈），或接受 CPU EP（dry-run 实测 1.18s/帧，单次抓取够用）。
+- onnxruntime-gpu 暴露 [TensorRT, CUDA, CPU] EP。**TRT 建 engine 内存峰值极高**——生产栈在跑时会 OOM；
+  已在停 edge-llm 的窗口建好并缓存（见 §3.1），缓存后内存紧也能直接加载推理。
+- **TensorRT/CUDA 用的是宿主机 JetPack 的库**：pip 的 `onnxruntime-gpu` 只带 ORT 本体，TRT EP 动态链接
+  host `/lib/aarch64-linux-gnu/libnvinfer.so.10`（TensorRT 10.3）+ host CUDA 12.6。两个推论：
+  ① engine cache **绑本机**（sm87 + TRT 版本），换设备/升 JetPack 要重建；
+  ② **容器内要 GPU** 必须注入宿主 CUDA/TRT：`--runtime nvidia` + 宿主库挂载（参考 seeed-voice 的 GPU 容器做法），
+    否则容器里只有 CPU EP（1.18s/帧，单次抓取也够用）。
 - dry-run 脚本 `tools/perception_dryrun.py` 有 `OVS_ORT_PROVIDERS=cpu|cuda` 开关。
 
 ---
@@ -116,9 +124,10 @@
 - Orbbec USB 节点默认 root-only → `sudo chmod a+rw /dev/bus/usb/<bus>/<dev>`（单节点，非破坏）后 SDK 才能开。
 - `pyorbbecsdk`(v1) 无 cp310/aarch64 wheel；用 `pyorbbecsdk2`（pip 名），导入名 `pyorbbecsdk`。
 
-**Fleet**
-- `fleet exec` 直接 exec argv（无 shell）：`cd`/管道/`python -c` 等需 `--literal` + `sh -c '...'`。
-- 带空格的 env 值（如 `WAKEWORD_MODEL="hey jarvis"`）经 fleet 会被拆 → 用 `--literal` + `-e "WAKEWORD_MODEL=hey jarvis"`。
+**远程操作（SSH）**
+- 设备操作直接 `ssh seeed@seeed-orin-nx`，docker/串口/系统操作需 `sudo`。
+- 带空格的 env 值（如 `WAKEWORD_MODEL="hey jarvis"`）经多层 shell 转发（ssh 一行式、脚本套脚本）容易被拆——
+  要么登进设备再执行，要么仔细保引号（`ssh host 'docker run ... -e "WAKEWORD_MODEL=hey jarvis" ...'`）。
 
 ---
 
