@@ -29,6 +29,7 @@ import logging
 
 from ovs_agent.apps.multi_mode.app import MultiModeApp
 
+from ovs_agent.audio.profiles import resolve_mic_profile
 from ovs_agent.audio.tapped_audio_io import TappedAudioIO
 from ovs_agent.plugins.actuator_actions import ArmPlugin
 from ovs_agent.wake_sources.openwakeword import OpenWakeWordSource
@@ -132,12 +133,30 @@ class VoiceArmApp(MultiModeApp):
         # Override AudioIO again, now that we know the mic channel count
         # from the wakeword config (reSpeaker = 6 channels, exclusive USB
         # device that rejects channels=1 → PaErrorCode -9998).
-        mic_channels = int(wake_cfg.get("mic_channels", 1))
+        # Resolve the mic channel count. An explicit numeric ``mic_channels``
+        # in the YAML/env wins (back-compat: pinned deployments unchanged).
+        # ``auto`` (the default) runs reSpeaker profile auto-detection, so
+        # swapping a firmware variant that changes the USB-UAC channel count
+        # (6ch Flex ↔ 2ch 4-Mic) no longer needs a config edit. See
+        # ovs_agent.audio.profiles.
+        mic_channels_cfg = wake_cfg.get("mic_channels", "auto")
         mic_channel_select_raw = wake_cfg.get("mic_channel_select")
-        mic_channel_select = (
-            None if mic_channel_select_raw in (None, "", "mean")
-            else int(mic_channel_select_raw)
-        )
+        if str(mic_channels_cfg).strip().lower() in ("", "auto", "none"):
+            prof = resolve_mic_profile(config.audio_input_device)
+            mic_channels = prof.mic_channels
+            mic_channel_select = (
+                prof.mic_channel_select
+                if mic_channel_select_raw in (None, "", "auto", "mean")
+                else int(mic_channel_select_raw)
+            )
+        else:
+            mic_channels = int(mic_channels_cfg)
+            if mic_channel_select_raw in (None, "", "auto"):
+                mic_channel_select = 0
+            elif mic_channel_select_raw == "mean":
+                mic_channel_select = None
+            else:
+                mic_channel_select = int(mic_channel_select_raw)
         if mic_channels > 1:
             logger.info(
                 "Re-opening AudioIO with mic_channels=%d select=%r",
