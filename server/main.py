@@ -2325,7 +2325,7 @@ async def _asr_impl(file: UploadFile, language: str):
                 "text": result.text,
                 "language": result.language,
                 "backend": asr_be.name,
-                **result.meta,
+                **(result.meta or {}),
             }
     asr_be = _get_asr_backend()
     if asr_be and asr_be.is_ready():
@@ -2341,7 +2341,7 @@ async def _asr_impl(file: UploadFile, language: str):
             "text": result.text,
             "language": result.language,
             "backend": asr_be.name,
-            **result.meta,
+            **(result.meta or {}),
         }
     else:
         return JSONResponse(

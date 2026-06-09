@@ -251,8 +251,15 @@ def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") 
     os.makedirs(model_dir, exist_ok=True)
 
     for dir_name, cdn_file, desc in missing:
+        # Per-model URL override (lets slow-default sources be redirected to a
+        # fast mirror/CDN per deployment). SenseVoice in particular defaults to
+        # a raw GitHub release with no CDN fallback, which is impractically slow
+        # on edge devices (RPi) without good GitHub access — point
+        # SENSEVOICE_MODEL_URL at a mirror to skip it.
+        if dir_name == "sensevoice" and os.environ.get("SENSEVOICE_MODEL_URL"):
+            url = os.environ["SENSEVOICE_MODEL_URL"]
         # Use GitHub releases for models not hosted on CDN
-        if cdn_file.startswith("http"):
+        elif cdn_file.startswith("http"):
             url = cdn_file
         elif cdn_file == "kokoro-multi-lang-v1_0.tar.bz2":
             url = os.environ.get(
