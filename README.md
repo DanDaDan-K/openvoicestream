@@ -112,6 +112,8 @@ docker compose -f deploy/docker-compose.yml up -d
 OVS_PROFILE=jetson-moss-tts-nano-trt docker compose -f deploy/docker-compose.yml up -d
 
 # Paraformer RKNN ASR + Matcha RKNN TTS on Rockchip RK3588.
+# This profile name is the stable Paraformer alias; it uses the current
+# hybrid encoder + RKNN decoder artifact set.
 OVS_PROFILE=rk3588-paraformer-matcha \
 docker compose -f deploy/docker-compose.radxa.yml up -d
 
@@ -120,6 +122,8 @@ OVS_PROFILE=rk3588-kokoro-rknn \
 docker compose -f deploy/docker-compose.radxa.yml up -d
 
 # Paraformer RKNN ASR + Matcha RKNN TTS on Rockchip RK3576.
+# This profile name is the stable Paraformer alias; it uses the current
+# hybrid encoder + RKNN decoder artifact set.
 OVS_PROFILE=rk3576-paraformer-matcha \
 docker compose -f deploy/docker-compose.rk.yml up -d
 ```
@@ -130,9 +134,10 @@ Matcha) because it is the fastest path to reproduce. Use `jetson-paraformer-koko
 for bilingual ASR with expressive English TTS, `jetson-kokoro-trt` for TTS-only,
 `jetson-moss-tts-nano-trt` for lightweight multilingual TTS-only (48kHz stereo),
 or a `jetson-multilang-*` profile for the Qwen3 TensorRT-EdgeLLM route. On Rockchip,
-use `rk3588-paraformer-matcha` or `rk3576-paraformer-matcha` for the NPU-accelerated
-Paraformer RKNN ASR with Matcha TTS, or `rk3588-kokoro-rknn` for Qwen3 RKNN ASR with
-higher-quality multilingual Kokoro RKNN TTS.
+use `rk3588-paraformer-matcha` or `rk3576-paraformer-matcha` for the current
+validated Paraformer RKNN ASR path (hybrid encoder + RKNN decoder) with Matcha
+TTS, or `rk3588-kokoro-rknn` for Qwen3 RKNN ASR with higher-quality multilingual
+Kokoro RKNN TTS.
 
 ## Table of Contents
 
@@ -557,7 +562,7 @@ resident memory, startup time, and concurrency results.
 ### v2.3
 
 - **Paraformer + Kokoro combined profile** — new `jetson-paraformer-kokoro` profile pairs bilingual Paraformer ASR with Kokoro TensorRT TTS (53 English speakers) on Jetson Orin.
-- **Paraformer RKNN on Rockchip** — NPU-accelerated Paraformer ASR via RKNN (hybrid encoder on NPU + ONNX decoder on CPU) with dedicated `rk3588-paraformer-matcha` and `rk3576-paraformer-matcha` profiles.
+- **Paraformer RKNN on Rockchip** — NPU-accelerated Paraformer ASR via RKNN (hybrid encoder on NPU + RKNN decoder) with dedicated `rk3588-paraformer-matcha` and `rk3576-paraformer-matcha` profiles. The older CPU-decoder Paraformer path is deprecated.
 - **Model-scoped speaker registry** — speaker tables are now per-TTS-model; Kokoro exposes all 53 labeled voices (`af_heart`, `bm_george`, `zf_xiaobei`, etc.).
 - **Speaker management API** — `GET /tts/speakers`, `POST /tts/speakers/register`, `DELETE /tts/speakers/{id}` for listing, registering, and deleting speakers.
 - **Profile loader hardening** — operator-set env keys are preserved across profile reloads; stale keys are cleaned on profile switch.

@@ -1,6 +1,6 @@
 {
   "name": "rk3588-paraformer-hybrid-rknn-decoder-matcha",
-  "description": "Rockchip RK3588 Paraformer + Matcha experimental profile: hybrid Paraformer RKNN encoder prefix plus RKNN decoder with Matcha RKNN TTS.",
+  "description": "Rockchip RK3588 Paraformer + Matcha profile: validated hybrid Paraformer RKNN encoder prefix plus RKNN decoder with Matcha RKNN TTS.",
   "asr_backend": "rk.asr",
   "tts_backend": "rk.tts",
   "execution_policy": {
@@ -10,6 +10,7 @@
   "env": {
     "LANGUAGE_MODE": "rk",
     "RK_PLATFORM": "rk3588",
+    "RK_ARTIFACT_SET": "rk3588-paraformer-hybrid-rknn-decoder-2026-06-09",
     "ASR_BACKEND": "paraformer_rknn",
     "PARAFORMER_MODEL_DIR": "/opt/asr/paraformer",
     "PARAFORMER_RKNN_DIR": "/opt/asr/paraformer/rknn/rk3588",

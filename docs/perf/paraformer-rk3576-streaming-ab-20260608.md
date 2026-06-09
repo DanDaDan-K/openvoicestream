@@ -4,8 +4,8 @@ Device: `cat-remote` RK3576
 Base container image: `openvoicestream:rk-slim-fresh-20260603`  
 Validation image: `openvoicestream:rk-paraformer-v2v-prepare-20260608`  
 Corpus: `bench/perf/corpus`, `short`, 5 zh + 5 en files  
-Artifact: `paraformer-hybrid` with CPU encoder suffix ONNX, CPU decoder ONNX,
-and RK3576 hybrid prefix RKNN buckets:
+Artifact: `paraformer-hybrid` with RKNN encoder prefix buckets, CPU encoder
+suffix ONNX, and RKNN decoder:
 
 - initial: `encoder_prefix_to_block30.400.fp16.rknn`
 - added in this run: `40`, `80`, `160`, `240` frame FP16 buckets

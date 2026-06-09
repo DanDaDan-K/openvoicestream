@@ -62,6 +62,19 @@ def test_rk3588_paraformer_hybrid_rknn_decoder_contract_matches_profile():
     )
 
 
+def test_legacy_paraformer_profile_names_select_current_rknn_decoder_artifacts():
+    _assert_paraformer_contract_matches_profile(
+        "rk3576-paraformer-hybrid-rknn-decoder-2026-06-09",
+        "configs/profiles/rk3576-paraformer-matcha.json",
+        "opt/asr/paraformer/rknn/rk3576/decoder.400x40.fp16.rknn",
+    )
+    _assert_paraformer_contract_matches_profile(
+        "rk3588-paraformer-hybrid-rknn-decoder-2026-06-09",
+        "configs/profiles/rk3588-paraformer-matcha.json",
+        "opt/asr/paraformer/rknn/rk3588/decoder.400x40.fp16.rknn",
+    )
+
+
 def _assert_paraformer_contract_matches_profile(
     artifact_set: str,
     profile_path: str,
@@ -74,6 +87,7 @@ def _assert_paraformer_contract_matches_profile(
     contract_env = spec["runtime_contract"]["env"]
     profile_env = profile["env"]
 
+    assert profile_env["RK_ARTIFACT_SET"] == artifact_set
     for key in (
         "ASR_BACKEND",
         "PARAFORMER_MODEL_DIR",

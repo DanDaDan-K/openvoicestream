@@ -113,8 +113,8 @@ startup the service listens on `http://<device>:8621`.
 | Target | Compose file | Example profile | Validated image |
 |---|---|---|---|
 | **Jetson** (Orin Nano/NX/AGX) | `deploy/docker-compose.yml` | `jetson-qwen3asr-matcha-nx` (default multilang), `jetson-multilang-highperf` (heavy), `jetson-zh-en` (lightest) | `seeed-local-voice:jetson-v1.14-hotswap` |
-| **RK3588** (Radxa ROCK 5T) | `deploy/docker-compose.radxa.yml` | `rk3588-paraformer-matcha`, `rk3588-kokoro-rknn` | `seeed-local-voice:rk-v1.4-closedloop` |
-| **RK3576** (BPI-M5 Pro) | `deploy/docker-compose.rk.yml` | `rk3576-paraformer-matcha` | `seeed-local-voice:rk-v1.4-closedloop` |
+| **RK3588** (Radxa ROCK 5T) | `deploy/docker-compose.radxa.yml` | `rk3588-paraformer-matcha` (current Paraformer hybrid+RKNN decoder), `rk3588-kokoro-rknn` | `seeed-local-voice:rk-v1.4-closedloop` |
+| **RK3576** (BPI-M5 Pro) | `deploy/docker-compose.rk.yml` | `rk3576-paraformer-matcha` (current Paraformer hybrid+RKNN decoder) | `seeed-local-voice:rk-v1.4-closedloop` |
 | **Raspberry Pi** (4/5) | `deploy/docker-compose.rpi.yml` | `rpi5-default` | `seeed-local-voice:rpi-v1.0-onnx` |
 
 Images live under the registry `sensecraft-missionpack.seeed.cn/solution/`.
@@ -131,6 +131,12 @@ OVS_PROFILE=jetson-qwen3asr-matcha-nx docker compose -f deploy/docker-compose.ym
 # Rockchip RK3588:
 OVS_PROFILE=rk3588-paraformer-matcha docker compose -f deploy/docker-compose.radxa.yml up -d
 ```
+
+The RK Paraformer profile names above are stable aliases for the current
+validated artifact sets:
+`rk3588-paraformer-hybrid-rknn-decoder-2026-06-09` and
+`rk3576-paraformer-hybrid-rknn-decoder-2026-06-09`. The older CPU-decoder
+Paraformer path is deprecated.
 
 ### China-mirror note
 
