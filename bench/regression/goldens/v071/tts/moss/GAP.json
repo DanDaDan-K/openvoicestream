@@ -1,0 +1,7 @@
+{
+  "gap": true,
+  "dimension": "tts/moss",
+  "reason": "MOSS-TTS-Nano is NOT deployed in the v0.7.1 image :prod-unified-v8. The live TTS backend is matcha_trt (probed from /tts/capabilities). The MOSS in-process slot-pool stress (stress_moss_tts_n2.py: parity/burst) requires the MossTtsNanoBackend to be loadable in-process; not applicable here. No MOSS golden could be captured without faking it.",
+  "to_capture_later": "On a service/image with MOSS loaded, run run_v080_regression.py --capture (writes correctness.json here) and additionally MOSS_MAX_SLOTS=2 python3 bench/perf/stress_moss_tts_n2.py --mode parity --mode burst --rounds 30 for the byte-deterministic slot-pool parity gate.",
+  "design_ref": "v080-regression-harness.md §2, §3"
+}

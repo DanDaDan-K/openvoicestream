@@ -1,0 +1,30 @@
+{
+  "harness_version": "v080-regression-1",
+  "captured_from": "v0.7.1 voice-engine (GOLDEN baseline)",
+  "device": "orin-nx",
+  "client_host": "orin-nx",
+  "base_url": "http://localhost:8621",
+  "container": "seeed-voice",
+  "image_sha": "sha256:910e298e9b5bf3643133c070618588164f104f9b326cc3f16de8200f5c760f5a sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:prod-unified-v8",
+  "image_tag_expected": "prod-unified-v8",
+  "asr_backend": "paraformer_trt",
+  "tts_backend": "matcha_trt",
+  "date_device_utc": "2026-06-09T09:53:05Z",
+  "captured_dimensions": [
+    "build",
+    "asr_streaming",
+    "tts/matcha",
+    "tts_n2_slotpool"
+  ],
+  "gaps": [
+    "asr: engine invariants R2/R3/R4/KV-overflow not observable on 'paraformer_trt' (qwen3-asr edgellm runtime is v0.8.0-only); corpus transcript baseline captured instead",
+    "tts/customvoice: CustomVoice (zh/en 9-row prefix) not deployed (live backend is 'matcha_trt'); no CustomVoice golden",
+    "tts/moss: MOSS-TTS-Nano not deployed (live backend is 'matcha_trt'); no MOSS golden"
+  ],
+  "notes": [
+    "READ-ONLY capture: no container was stopped/restarted. seeed-voice stayed 'Up' across the entire run.",
+    "TTS ASR-roundtrip uses the /asr/stream WebSocket. The offline 'POST /asr' endpoint is BROKEN in :prod-unified-v8 (server main.py:2228 builds the response with '**result.meta' but result.meta is None -> TypeError: 'NoneType' object is not a mapping -> HTTP 500). This is a pre-existing v0.7.1 service bug, unrelated to ASR/TTS engine quality.",
+    "build.log_error_count (30) consists of those same 'POST /asr' 500 tracebacks left in the rolling docker-log tail by the harness's own first-pass roundtrip probes (later switched to the WS path). They are NOT engine/CUDA faults. The build gate's primary signal is engine-MD5 drift; treat this log count as a known-benign artifact of the broken offline endpoint, not a v0.8.0 regression signal.",
+    "matcha_trt is NOT byte-deterministic even at N=1 (bf16 TRT): same prompt twice yields different PCM MD5, same byte length, ~equal RMS. The N=2 slot-pool gate therefore uses energy (RMS) parity, not MD5 parity, for this backend (recorded as deterministic=false in tts/n2_slotpool.json). A deterministic engine (e.g. MOSS) would be gated on MD5."
+  ]
+}

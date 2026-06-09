@@ -1,0 +1,7 @@
+{
+  "gap": true,
+  "dimension": "tts/customvoice",
+  "reason": "CustomVoice (language=chinese|english, 9-row prefix, patch 0005) is NOT deployed in the v0.7.1 image :prod-unified-v8. The live TTS backend is matcha_trt (probed from /tts/capabilities). No CustomVoice golden could be captured without faking it.",
+  "to_capture_later": "Re-run run_v080_regression.py --capture against a service whose /tts/capabilities reports backend=customvoice; the harness will then write correctness.json here automatically (zh: language=chinese, en: language=english).",
+  "design_ref": "v080-regression-harness.md §2"
+}
