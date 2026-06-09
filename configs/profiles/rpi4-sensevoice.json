@@ -1,8 +1,7 @@
 {
   "name": "rpi4-sensevoice",
-  "description": "Raspberry Pi 4 (CPU-only): SenseVoice offline ASR (zh/en/ja/ko/yue) via sherpa-onnx OfflineRecognizer.from_sense_voice. SenseVoice serves the offline /asr path; streaming Paraformer also loads for /asr/stream. 'exclusive' policy so ASR and TTS can't both pin all four cores at once.",
+  "description": "Raspberry Pi 4 (CPU-only): SenseVoice offline ASR (zh/en/ja/ko/yue) via sherpa-onnx OfflineRecognizer.from_sense_voice. ASR-only transcription profile (no TTS) — SenseVoice serves the offline /asr path; streaming Paraformer also loads for /asr/stream. 'exclusive' policy bounds CPU pressure on 4 cores.",
   "asr_backend": "cpu.sherpa_asr",
-  "tts_backend": "cpu.sherpa",
   "execution_policy": {
     "mode": "exclusive"
   },
@@ -10,6 +9,5 @@
     "ENSURE_OFFLINE_ASR": "1",
     "OFFLINE_ASR_PROVIDER": "cpu",
     "STREAMING_ASR_PROVIDER": "cpu"
-  },
-  "tts_model_id": "sherpa"
+  }
 }
