@@ -78,3 +78,17 @@ docs/specs/tts-n2-throughput.md
 docs/specs/tts-worker-cancel-protocol.md
 docs/specs/tts-worker-concurrency.md
 docs/specs/voice-pipeline-concurrency-plan.md
+
+# Internal engine-provisioning / builder design (references fork builder = moat)
+docs/specs/engine-host-coverage-and-builder-sidecar.md
+
+# Backend implementations are the edge-performance moat — they live in the
+# private `voxedge` package (see server/core/asr_backend.py registry), NOT in
+# this public shell. Local backend drafts stay out of git.
+app/backends/
+
+# Large deploy artifacts (built/exported per release, not source)
+deploy/*.tar.gz
+
+# Throwaway dev/proof drivers
+agent/proof_driver.py
