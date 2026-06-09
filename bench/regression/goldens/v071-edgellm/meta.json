@@ -1,0 +1,42 @@
+{
+  "harness_version": "v080-regression-1",
+  "captured_from": "v0.7.1 EDGELLM voice-engine (GOLDEN baseline for the v0.8.0 migration)",
+  "device": "orin-nx",
+  "client_host": "orin-nx",
+  "base_url": "http://localhost:8631",
+  "container": "seeed-voice-baseline (throwaway, removed after capture)",
+  "image_tag": "sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:server-loop-prod-v7-asrmultiturn",
+  "image_sha": "sha256:0d991898b897f095e730e4bc5959773335068519f9d0766ae01eac0bb74c46f8",
+  "image_note": "server-loop-prod-v7 is the COHERENT edgellm candidate (the image that ran edgellm/voxedge server-loop live in production). Deployed prod-unified-v8 was NOT used for edgellm capture: its qwen3-tts path is broken (same --max_slots worker bug, see coherence below).",
+  "date_device_utc": "2026-06-09T12:16:48Z",
+  "host_signature": "sm87-trt10.3-jp6.2-cuda12.6",
+
+  "coherence_verdict": {
+    "qwen3_asr_trt_edgellm": "COHERENT - profile jetson-qwen3asr-matcha-nx. /asr/capabilities -> backend=trt_edgellm; clean boot, no crash-loop (unlike prod-unified-v8). 20/20 corpus files transcribed with got_final=True. EN cer 0.00-0.07. Captured.",
+    "matcha_trt": "COHERENT - runs under the edgellm image (profile jetson-qwen3asr-matcha-nx). /tts/capabilities -> backend=matcha_trt. 20/20 prompts produce non-silent audio (RMS 0.094-0.144), 19/20 ASR roundtrips OK. Captured (bonus dimension).",
+    "qwen3_tts_customvoice": "BLOCKED / COHERENCE DISPROVEN - profile jetson-multilang-highperf-nx. Application startup FAILED with: RuntimeError: TTS worker failed to start: /opt/jv-workers/qwen3_tts_worker: unrecognized option '--max_slots'. SAME bug as prod-unified-v8: the Python TTS backend passes --max_slots to the May-23 qwen3_tts_worker that does not know it. server-loop-v7 is NOT coherent for the qwen3-tts/CustomVoice path. NOT captured.",
+    "moss_tts_nano": "BLOCKED (missing artifact, not a code bug) - profile jetson-moss-tts-nano-trt. Boot downloaded several MOSS engines from the mirror but FAILED: RuntimeError: engine moss_tts_prefill.plan not found: no valid local engine and no HF bundle for sm87-trt10.3-jp6.2-cuda. The host-specific (sm87/trt10.3) MOSS TRT engines are not pre-staged on orin-nx and not in the offline HF bundle; they would need to be built/staged on the device. NOT captured.",
+    "n2_slotpool_qwen3_tts": "BLOCKED - depends on qwen3-tts coming up (it does not, see above). On the captured profile (qwen3-asr serial + matcha) the coordinator downgrades to serialized (asr.supports_parallel=False) and the session ceiling = 1, so the N=2 dual-client path 429s by design; not representative. NOT captured."
+  },
+
+  "asr_backend": "trt_edgellm",
+  "tts_backend": "matcha_trt",
+  "profiles_attempted": {
+    "jetson-qwen3asr-matcha-nx": "OK (asr=trt_edgellm, tts=matcha_trt) - CAPTURED",
+    "jetson-multilang-highperf-nx": "FAILED - qwen3_tts_worker --max_slots crash (same as prod-unified-v8)",
+    "jetson-moss-tts-nano-trt": "FAILED - moss_tts_prefill.plan not staged for sm87"
+  },
+  "captured_dimensions": [
+    "build (engine_md5s incl. edgellm ASR/TTS engine anchors)",
+    "asr_streaming (qwen3-asr trt_edgellm, 20/20 files, got_final=True)",
+    "tts/matcha (20/20 prompts, non-silent, 19/20 roundtrips OK)"
+  ],
+  "gaps": [
+    "asr: engine invariants R2/R3/R4/KV-overflow are v0.8.0-runtime-only (not observable through the v0.7.1 WS surface); corpus transcript baseline captured instead.",
+    "tts/customvoice: qwen3-tts/CustomVoice could NOT be captured - server-loop-v7 hits the same qwen3_tts_worker '--max_slots' crash as prod-unified-v8. To capture this dimension the worker binary or the Python backend's flag-passing must be fixed first.",
+    "tts/moss: MOSS could NOT be captured - host-specific TRT engines (moss_tts_prefill.plan etc. for sm87) are not staged on orin-nx and absent from the offline HF bundle. Stage/build MOSS engines, then re-capture.",
+    "n2: N=2 slot-pool moat could NOT be captured - qwen3-tts (the only supports_parallel TTS) does not boot; the matcha+serial-ASR profile cannot exercise N=2."
+  ],
+  "harness_changes_applied": "test_asr_streaming_correctness.py + test_tts_correctness.py were hardened for the serial qwen3-asr backend: real-time chunk pacing (matching bench/perf/client.py:179), whole-session retry on session_already_active, 3s inter-file settle, and /tts 429 retry. 4 ASR files (zh_short_04, zh_long_01, zh_long_03, zh_long_05) that hit the slot-release race during the batch run were re-captured one-per-fresh-worker (restart between each) and patched into asr/streaming.json; all 20 now have got_final=True.",
+  "restore_proof": "throwaway seeed-voice-baseline removed; prod seeed-voice restarted -> :8621 asr=paraformer_trt tts=matcha_trt; translator + edge-llm-chat-service healthy; box left exactly as found."
+}
