@@ -1,42 +1,56 @@
 {
   "harness_version": "v080-regression-1",
-  "captured_from": "v0.7.1 EDGELLM voice-engine (GOLDEN baseline for the v0.8.0 migration)",
+  "captured_from": "v0.7.1 voice-engine (GOLDEN baseline)",
   "device": "orin-nx",
   "client_host": "orin-nx",
   "base_url": "http://localhost:8631",
-  "container": "seeed-voice-baseline (throwaway, removed after capture)",
-  "image_tag": "sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:server-loop-prod-v7-asrmultiturn",
-  "image_sha": "sha256:0d991898b897f095e730e4bc5959773335068519f9d0766ae01eac0bb74c46f8",
-  "image_note": "server-loop-prod-v7 is the COHERENT edgellm candidate (the image that ran edgellm/voxedge server-loop live in production). Deployed prod-unified-v8 was NOT used for edgellm capture: its qwen3-tts path is broken (same --max_slots worker bug, see coherence below).",
-  "date_device_utc": "2026-06-09T12:16:48Z",
-  "host_signature": "sm87-trt10.3-jp6.2-cuda12.6",
-
-  "coherence_verdict": {
-    "qwen3_asr_trt_edgellm": "COHERENT - profile jetson-qwen3asr-matcha-nx. /asr/capabilities -> backend=trt_edgellm; clean boot, no crash-loop (unlike prod-unified-v8). 20/20 corpus files transcribed with got_final=True. EN cer 0.00-0.07. Captured.",
-    "matcha_trt": "COHERENT - runs under the edgellm image (profile jetson-qwen3asr-matcha-nx). /tts/capabilities -> backend=matcha_trt. 20/20 prompts produce non-silent audio (RMS 0.094-0.144), 19/20 ASR roundtrips OK. Captured (bonus dimension).",
-    "qwen3_tts_customvoice": "BLOCKED / COHERENCE DISPROVEN - profile jetson-multilang-highperf-nx. Application startup FAILED with: RuntimeError: TTS worker failed to start: /opt/jv-workers/qwen3_tts_worker: unrecognized option '--max_slots'. SAME bug as prod-unified-v8: the Python TTS backend passes --max_slots to the May-23 qwen3_tts_worker that does not know it. server-loop-v7 is NOT coherent for the qwen3-tts/CustomVoice path. NOT captured.",
-    "moss_tts_nano": "BLOCKED (missing artifact, not a code bug) - profile jetson-moss-tts-nano-trt. Boot downloaded several MOSS engines from the mirror but FAILED: RuntimeError: engine moss_tts_prefill.plan not found: no valid local engine and no HF bundle for sm87-trt10.3-jp6.2-cuda. The host-specific (sm87/trt10.3) MOSS TRT engines are not pre-staged on orin-nx and not in the offline HF bundle; they would need to be built/staged on the device. NOT captured.",
-    "n2_slotpool_qwen3_tts": "BLOCKED - depends on qwen3-tts coming up (it does not, see above). On the captured profile (qwen3-asr serial + matcha) the coordinator downgrades to serialized (asr.supports_parallel=False) and the session ceiling = 1, so the N=2 dual-client path 429s by design; not representative. NOT captured."
-  },
-
+  "container": "seeed-voice-baseline",
+  "image_sha": "sha256:0d991898b897f095e730e4bc5959773335068519f9d0766ae01eac0bb74c46f8 sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:server-loop-prod-v7-asrmultiturn",
+  "image_tag_expected": "prod-unified-v8",
   "asr_backend": "trt_edgellm",
   "tts_backend": "matcha_trt",
-  "profiles_attempted": {
-    "jetson-qwen3asr-matcha-nx": "OK (asr=trt_edgellm, tts=matcha_trt) - CAPTURED",
-    "jetson-multilang-highperf-nx": "FAILED - qwen3_tts_worker --max_slots crash (same as prod-unified-v8)",
-    "jetson-moss-tts-nano-trt": "FAILED - moss_tts_prefill.plan not staged for sm87"
-  },
+  "date_device_utc": "2026-06-09T12:16:48Z",
   "captured_dimensions": [
-    "build (engine_md5s incl. edgellm ASR/TTS engine anchors)",
-    "asr_streaming (qwen3-asr trt_edgellm, 20/20 files, got_final=True)",
-    "tts/matcha (20/20 prompts, non-silent, 19/20 roundtrips OK)"
+    "build",
+    "asr_streaming",
+    "tts/matcha"
   ],
   "gaps": [
-    "asr: engine invariants R2/R3/R4/KV-overflow are v0.8.0-runtime-only (not observable through the v0.7.1 WS surface); corpus transcript baseline captured instead.",
-    "tts/customvoice: qwen3-tts/CustomVoice could NOT be captured - server-loop-v7 hits the same qwen3_tts_worker '--max_slots' crash as prod-unified-v8. To capture this dimension the worker binary or the Python backend's flag-passing must be fixed first.",
-    "tts/moss: MOSS could NOT be captured - host-specific TRT engines (moss_tts_prefill.plan etc. for sm87) are not staged on orin-nx and absent from the offline HF bundle. Stage/build MOSS engines, then re-capture.",
-    "n2: N=2 slot-pool moat could NOT be captured - qwen3-tts (the only supports_parallel TTS) does not boot; the matcha+serial-ASR profile cannot exercise N=2."
+    "asr: engine invariants R2/R3/R4/KV-overflow not observable on 'trt_edgellm' (qwen3-asr edgellm runtime is v0.8.0-only); corpus transcript baseline captured instead",
+    "tts/customvoice: BLOCKED — see blocked_dimensions_investigation (0.7.1-vs-0.7.0 worker runtime mismatch + unified-memory contention with edge-llm-chat-service).",
+    "tts/moss: BLOCKED — unified-memory contention (MOSS sm87 engines ARE on HF; not attempted live).",
+    "n2: BLOCKED — depends on a coherent qwen3-tts worker; --max_slots-drop overlay prepared but synthesis blocked by the two blockers above."
   ],
-  "harness_changes_applied": "test_asr_streaming_correctness.py + test_tts_correctness.py were hardened for the serial qwen3-asr backend: real-time chunk pacing (matching bench/perf/client.py:179), whole-session retry on session_already_active, 3s inter-file settle, and /tts 429 retry. 4 ASR files (zh_short_04, zh_long_01, zh_long_03, zh_long_05) that hit the slot-release race during the batch run were re-captured one-per-fresh-worker (restart between each) and patched into asr/streaming.json; all 20 now have got_final=True.",
-  "restore_proof": "throwaway seeed-voice-baseline removed; prod seeed-voice restarted -> :8621 asr=paraformer_trt tts=matcha_trt; translator + edge-llm-chat-service healthy; box left exactly as found."
+  "blocked_dimensions_investigation": {
+    "date_utc": "2026-06-09",
+    "summary": "qwen3-tts/CustomVoice, MOSS, and N=2 remain BLOCKED on orin-nx. Two compounding blockers found; neither fixable within task scope (no engine/worker rebuild, cannot stop co-resident edge-llm-chat-service).",
+    "blocker_1_runtime_version_mismatch": {
+      "detail": "CustomVoice engines are model version 0.7.1; the cached image's bundled qwen3_tts_worker AND the ~/project/repro-qwen3 build (TensorRT-Edge-LLM build/examples/omni/qwen3_tts_worker, May 25, branch qwen3-tts-highperf-runtime-w8a16) are BOTH runtime version 0.7.0.",
+      "evidence": "worker log: 'Model version 0.7.1 does not match runtime version 0.7.0. Consider re-exporting or re-building'; strings on both worker binaries report 0.7.0.",
+      "impact": "warning-level at load, but /tts/stream returns only the 4-byte SR header (no PCM); worker 'exited during stream'."
+    },
+    "blocker_2_unified_memory_contention": {
+      "detail": "edge-llm-chat-service (a TRT-LLM serving container, out-of-scope to stop) holds ~10GB of Jetson unified GPU memory (invisible to ps/docker-stats RSS). tegrastats RAM 13712/15656MB with only seeed-voice stopped. After bringing up the baseline TTS service, available RAM fell to ~1.8GB.",
+      "evidence": "qwen3_tts_worker reaches 'worker_init_error' / 'worker exited during stream' with mem_available_mb dropping 3366->773 and 857->233 during engine deserialization + code2wav activation; TensorRT 'weight streaming enabled will increase peak CPU memory usage by 1X weights size'. FP16 talker (904MB) reached worker_after_ready+stateful_code2wav then died at synthesis; w8a16 talker (456MB) sometimes init-errored, sometimes reached ready but produced 0 audio.",
+      "qwen3_tts_engine_footprint": "talker-w8a16 456MB + code_predictor(llm.engine) 191MB + code2wav 234MB ~= 881MB engines, ~1.7GB peak with weight-streaming 1x duplication + activations, on top of resident qwen3_asr_worker (~2GB)."
+    },
+    "root_cause_rediagnosis_vs_task_premise": {
+      "task_premise": "backend passes --max_slots which the OLD bundled worker rejects; fix = swap in NEW streaming worker (branch streaming-asr/m2-worker-capacity) supporting --max_slots.",
+      "actual_finding": "No streaming-asr/m2-worker-capacity branch and NO binary supporting --max_slots exists in ~/project/repro-qwen3. The bundled qwen3_tts_worker uses getopt_long with NO --max_slots option (parseArgs default:return false -> EXIT_FAILURE on unknown flag). N>1 concurrency is instead driven by the OVS_TTS_WORKER_CONCURRENCY env var (worker has full SlotPool/asyncCode2wavStreams[slot]/dispatcher machinery, readTtsWorkerConcurrencyEnv). The backend (voxedge/backends/jetson/trt_edge_llm_tts.py:807-811) only appends --max_slots when worker_concurrency>1, and at N=1 omits it (which is why qwen3-asr+matcha were coherent). A 2-line overlay patch (drop the --max_slots append, rely on the env var) was prepared and applied to the throwaway container — it is NOT the blocker. The real blockers are the 0.7.1-vs-0.7.0 runtime version mismatch and unified-memory contention above."
+    },
+    "what_was_attempted": "Throwaway 'seeed-voice-baseline' on :8631 from :server-loop-prod-v7-asrmultiturn with OVS_PROFILE=jetson-multilang-highperf-nx + HF_HUB_OFFLINE=1, prod host-lib mounts, speech-models volume, CustomVoice engine tree (~/qwen3-tts-export-workspace/Qwen3-TTS-12Hz-0.6B-CustomVoice/engines-nx) mounted at /opt/cv-engines, generic talker+code_predictor backends, and the --max_slots-drop overlay. Service reached 'Application startup complete' (TTS backend=trt_edgellm model_id=qwen3-tts voice_clone) but synthesis produced no audio (blockers 1+2).",
+    "hf_artifact_availability_sm87": {
+      "repo": "harvestsu/seeed-local-voice-artifacts (model)",
+      "qwen3_tts_customvoice_PRESENT": "orin-nx/qwen3-tts-12hz-0.6b-customvoice/engines/{talker-fp16,talker-w8a16,code_predictor,code2wav} + onnx-w8a16 (matches host engine tree).",
+      "moss_sm87_PRESENT": "models/moss-tts-nano/engines/*.plan (prefill, decode_step, local_decoder, local_cached_step, local_fixed_sampled_frame, *_shared.data) + codec_onnx/*.plan + tokenizer.model + moss_tts_nano_worker + manifest.json. NOTE: task premise 'MOSS failure was no HF bundle for sm87' is OUTDATED — MOSS sm87/trt10.3/jp6.2 engines ARE on HF.",
+      "other_sm87_bundles": "kokoro / matcha / paraformer each have sm87-trt10.3-jp6.2-cuda12.6.tar.gz."
+    },
+    "moss_status": "NOT attempted live — same unified-memory contention with edge-llm-chat-service would apply; MOSS engines would need pulling from HF first. MOSS engines DO exist on HF for sm87 (see above), so MOSS is gated by memory contention on this box, not by missing artifacts.",
+    "to_complete_baseline": [
+      "Either (a) capture on a box WITHOUT a co-resident ~10GB LLM (free >=4-5GB unified RAM), OR temporarily stop edge-llm-chat-service (out of scope here), AND",
+      "(b) obtain a v0.7.1-coherent qwen3_tts_worker runtime (the available 0.7.0 worker mismatches the 0.7.1 CustomVoice engines) — i.e. rebuild the worker at the 0.7.1 runtime or re-export engines at 0.7.0.",
+      "N=2: with a coherent worker, the prepared --max_slots-drop overlay + OVS_TTS_WORKER_CONCURRENCY=2 yields the env-var slot-pool the HTTP-concurrent harness needs."
+    ]
+  },
+  "date_blocked_update_utc": "2026-06-09T13:21:00Z"
 }
