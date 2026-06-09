@@ -68,6 +68,13 @@ e2e = [
 [project.scripts]
 ovs-agent = "ovs_agent.cli:main"
 
+# Use the Aliyun PyPI mirror as the default index (fast from CN, used by
+# CI/device builds). Recorded here so it travels with the repo instead of
+# relying on a per-machine ~/.config/uv/uv.toml.
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

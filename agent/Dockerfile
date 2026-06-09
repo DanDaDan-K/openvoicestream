@@ -30,6 +30,8 @@ RUN if [ -n "$APT_MIRROR" ]; then \
         libportaudio2 \
         libsndfile1 \
         ca-certificates \
+        build-essential \
+        portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/slv
@@ -46,6 +48,18 @@ RUN pip install --no-cache-dir \
         "openai>=1.40" \
         "pyyaml>=6.0" \
         "pysbd>=0.3.4" \
+        "fastapi>=0.110" \
+        "uvicorn[standard]>=0.27" \
+        "openwakeword>=0.6" \
+        "pyaudio>=0.2.13" \
+        "onnxruntime>=1.17" \
+        "scipy>=1.10" \
     && pip install --no-cache-dir /opt/slv/agent
+
+RUN python -c "import openwakeword.utils; openwakeword.utils.download_models()"
+
+ENV MIC_INDEX=reSpeaker \
+    WAKEWORD_MODEL="hey jarvis" \
+    OVS_AGENT_SERVER_LOOP=1
 
 CMD ["ovs-agent", "run", "voice_arm"]
