@@ -997,18 +997,21 @@ async def startup():
     # Opt-in, default-OFF. Eager-load ONLY when enabled so the first request
     # doesn't pay download + init latency; when disabled these are never
     # imported beyond the cheap env check (zero memory / behavior change).
+    # Fire-and-forget (NOT awaited): a slow/large model download (~294MB) must
+    # not block startup completion / /readyz. The model becomes ready in the
+    # background; a request arriving first falls back to the same lazy load.
     try:
         from server.core import punctuation as _punct
         if _punct.punctuation_enabled():
-            logger.info("Punctuation enabled (OVS_PUNCT); pre-loading model...")
-            await asyncio.get_event_loop().run_in_executor(None, _punct.preload)
+            logger.info("Punctuation enabled (OVS_PUNCT); pre-loading model in background...")
+            asyncio.get_event_loop().run_in_executor(None, _punct.preload)
     except Exception as exc:  # pragma: no cover
         logger.warning("Punctuation preload skipped: %s", exc)
     try:
         from server.core import speaker_embedding as _spk
         if _spk.speaker_embedding_enabled():
-            logger.info("Speaker embedding enabled (OVS_SPEAKER_EMB); pre-loading model...")
-            await asyncio.get_event_loop().run_in_executor(None, _spk.preload)
+            logger.info("Speaker embedding enabled (OVS_SPEAKER_EMB); pre-loading model in background...")
+            asyncio.get_event_loop().run_in_executor(None, _spk.preload)
     except Exception as exc:  # pragma: no cover
         logger.warning("Speaker embedding preload skipped: %s", exc)
 

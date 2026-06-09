@@ -77,7 +77,14 @@ def _ensure_model(path: str) -> None:
     logger.info("Speaker model missing; downloading %s -> %s", url, path)
     tmp = path + ".part"
     if shutil.which("curl"):
-        subprocess.run(["curl", "-fSL", "--retry", "3", "-o", tmp, url], check=True)
+        # -L follows the HF-mirror 302 → LFS/CDN store; timeouts so a stuck or
+        # unreachable mirror fails fast (feature degrades to off) instead of
+        # hanging forever and wedging startup readiness.
+        subprocess.run(
+            ["curl", "-fSL", "--connect-timeout", "20", "--max-time", "1800",
+             "--retry", "3", "-o", tmp, url],
+            check=True, timeout=1900,
+        )
     else:
         import urllib.request
 
