@@ -300,6 +300,8 @@ def run_v2v_stream_bench(
     asr_endpoint_min_speech_s: float | None = None,
     asr_endpoint_min_audio_s: float | None = None,
     vad_tail_max_ms: int | None = None,
+    asr_language: str = "corpus",
+    prepare_lead_ms: int = 0,
 ) -> list[dict]:
     """Benchmark ASR-only via the real /v2v/stream protocol.
 
@@ -310,7 +312,11 @@ def run_v2v_stream_bench(
     records: list[dict] = []
     for label, entry, k in _iter_loop(corpus, warmup, runs):
         lang_map = {"zh": "Chinese", "en": "English"}
-        language = lang_map.get(entry["lang"], "Chinese")
+        language = (
+            lang_map.get(entry["lang"], "Chinese")
+            if asr_language == "corpus"
+            else asr_language
+        )
         try:
             r = run_v2v_stream_asr(
                 base_url, entry["bytes"],
@@ -320,6 +326,7 @@ def run_v2v_stream_bench(
                 asr_endpoint_min_speech_s=asr_endpoint_min_speech_s,
                 asr_endpoint_min_audio_s=asr_endpoint_min_audio_s,
                 vad_tail_max_ms=vad_tail_max_ms,
+                prepare_lead_ms=prepare_lead_ms,
             )
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
@@ -359,6 +366,7 @@ def run_v2v_stream_bench(
               f"endpoint={r.endpoint_latency_ms:.0f}ms  "
               f"asr_finalize={r.asr_finalize_ms:.0f}ms  "
               f"total={r.total_latency_ms:.0f}ms  "
+              f"prepare_to_final={r.prepare_to_final_ms or 0:.0f}ms  "
               f"{err_label}={error_rate*100:.1f}%  "
               f"text='{r.text[:25]}...'{tail}")
     return records

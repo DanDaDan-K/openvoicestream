@@ -542,6 +542,7 @@ def test_backend_owned_endpoint_vad_gets_audio_from_first_frame_and_hybrid_eou()
         r"_asr_stream_allows_frontend_eou_finalize\(\).*?"
         r"accepted_audio_s >= _asr_stream_frontend_eou_min_audio_s\(\).*?"
         r"if frontend_eou_may_finalize:\s*\n"
+        r"\s*_schedule_asr_prepare\(\"vad_speech_end\"\)\s*\n"
         r"\s*state\[\"endpoint_pending\"\] = \"vad\"",
         re.S,
     )
@@ -693,6 +694,79 @@ def test_single_utterance_final_stops_dispatcher_and_skips_cleanup_cancel():
     )
     assert cleanup_cancel_guard.search(src), (
         "cleanup can call asr_manager.cancel('ws_close') after a normal final"
+    )
+
+
+def test_v2v_asr_prepare_control_is_generation_gated():
+    """Source pin: dialogue clients can precompute final ASR before EOS."""
+    import re
+
+    here = os.path.dirname(__file__)
+    main_path = os.path.abspath(os.path.join(here, "..", "main.py"))
+    v2v_path = os.path.abspath(os.path.join(here, "..", "core", "v2v.py"))
+    with open(main_path, "r", encoding="utf-8") as f:
+        src = f.read()
+    with open(v2v_path, "r", encoding="utf-8") as f:
+        proto_src = f.read()
+
+    assert 'CLIENT_ASR_PREPARE = "asr_prepare"' in proto_src
+    assert '"asr_prepare_task": None' in src
+    assert '"asr_prepare_gen": None' in src
+    assert "def _schedule_asr_prepare(reason: str)" in src
+    assert 'getattr(v2v_proto, "CLIENT_ASR_PREPARE", "asr_prepare")' in src
+    assert '_schedule_asr_prepare("client_prepare")' in src
+
+    generation_gate = re.compile(
+        r"gen = int\(state\.get\(\"asr_active_gen\"\) or 0\).*?"
+        r"prepare_finalize_for_generation.*?await fn\(gen\)",
+        re.S,
+    )
+    assert generation_gate.search(src), (
+        "ASR prepare is no longer bound to the active generation"
+    )
+
+
+def test_v2v_vad_eou_prepares_before_endpoint_finalize():
+    """Source pin: frontend VAD EOU schedules prepare before latching endpoint."""
+    import re
+
+    here = os.path.dirname(__file__)
+    main_path = os.path.abspath(os.path.join(here, "..", "main.py"))
+    with open(main_path, "r", encoding="utf-8") as f:
+        src = f.read()
+
+    speech_end_prepare = re.compile(
+        r"if frontend_eou_may_finalize:\s*\n"
+        r"\s*_schedule_asr_prepare\(\"vad_speech_end\"\)\s*\n"
+        r"\s*state\[\"endpoint_pending\"\] = \"vad\"\s*\n"
+        r"\s*state\[\"endpoint_pending_gen\"\] = state\[\"asr_active_gen\"\]",
+        re.S,
+    )
+    assert speech_end_prepare.search(src), (
+        "VAD speech_end no longer starts prepare before endpoint finalize"
+    )
+
+
+def test_v2v_finalize_waits_for_same_generation_prepare():
+    """Source pin: finalize waits for only the matching prepare task."""
+    import re
+
+    here = os.path.dirname(__file__)
+    main_path = os.path.abspath(os.path.join(here, "..", "main.py"))
+    with open(main_path, "r", encoding="utf-8") as f:
+        src = f.read()
+
+    finalize_wait = re.compile(
+        r"finalize_gen = state\[\"asr_active_gen\"\]\s*\n"
+        r"\s*prep_task = state\.get\(\"asr_prepare_task\"\).*?"
+        r"state\.get\(\"asr_prepare_gen\"\) == finalize_gen.*?"
+        r"await prep_task.*?"
+        r"async with coord\.acquire\(\"asr\"\):\s*\n"
+        r"\s*ran_gen, final_text, finalize_accepted, detected_language = \(",
+        re.S,
+    )
+    assert finalize_wait.search(src), (
+        "ASR finalize no longer waits for matching-generation prepare"
     )
 
 

@@ -32,6 +32,7 @@ except ImportError:
 # ────────────────────────────────────────────────────────────────────────
 CLIENT_CONFIG     = "config"        # initial setup, must be first message
 CLIENT_TEXT       = "text"          # streaming text input for TTS
+CLIENT_ASR_PREPARE = "asr_prepare"  # precompute ASR final before EOS
 CLIENT_ASR_EOS    = "asr_eos"       # manually finalize ASR (overrides VAD)
 CLIENT_TTS_FLUSH  = "tts_flush"     # flush remaining TTS buffer
 CLIENT_ABORT      = "abort"         # barge-in: cancel current TTS

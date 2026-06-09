@@ -143,10 +143,13 @@ def cmd_v2v_stream(args):
             asr_endpoint_min_speech_s=args.asr_endpoint_min_speech_s,
             asr_endpoint_min_audio_s=args.asr_endpoint_min_audio_s,
             vad_tail_max_ms=args.vad_tail_max_ms,
+            asr_language=args.asr_language,
+            prepare_lead_ms=args.prepare_lead_ms,
         )
     summary = summarize(rows, group_by=("category", "lang"),
                         metrics=("endpoint_latency_ms", "asr_finalize_ms",
-                                 "total_latency_ms", "tfd_ms", "error_rate",
+                                 "total_latency_ms", "prepare_to_final_ms",
+                                 "tfd_ms", "error_rate",
                                  "strict_error_rate", "coverage_rate",
                                  "short_output_rate", "tail_truncation_rate"))
     meta = {**_common_meta(args, "v2v-stream"), "eos": args.eos,
@@ -154,7 +157,9 @@ def cmd_v2v_stream(args):
             "vad_silence_ms": args.vad_silence_ms,
             "asr_endpoint_min_speech_s": args.asr_endpoint_min_speech_s,
             "asr_endpoint_min_audio_s": args.asr_endpoint_min_audio_s,
-            "vad_tail_max_ms": args.vad_tail_max_ms}
+            "vad_tail_max_ms": args.vad_tail_max_ms,
+            "asr_language": args.asr_language,
+            "prepare_lead_ms": args.prepare_lead_ms}
     jp, mp = save_results(RESULTS_DIR, _scenario_tag(args, "v2v_stream"),
                           rows, summary, mem.summary(), meta)
     print(f"\nSaved: {jp}\n       {mp}")
@@ -410,6 +415,18 @@ def main():
     sp_v2v_stream.add_argument("--asr-endpoint-min-speech-s", type=float, default=None)
     sp_v2v_stream.add_argument("--asr-endpoint-min-audio-s", type=float, default=None)
     sp_v2v_stream.add_argument("--vad-tail-max-ms", type=int, default=None)
+    sp_v2v_stream.add_argument(
+        "--prepare-lead-ms",
+        type=int,
+        default=0,
+        help="send client asr_prepare after speech audio, wait this long, then send EOS",
+    )
+    sp_v2v_stream.add_argument(
+        "--asr-language",
+        choices=["corpus", "auto", "Chinese", "English"],
+        default="corpus",
+        help="ASR language hint for /v2v/stream; corpus keeps current per-file hint.",
+    )
     sp_v2v_stream.add_argument("--realtime", action="store_true", default=True)
     sp_v2v_stream.add_argument("--no-realtime", dest="realtime", action="store_false")
     sp_v2v_stream.set_defaults(func=cmd_v2v_stream)

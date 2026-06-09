@@ -110,6 +110,7 @@ def run_once(
     realtime: bool = True,
     chunk_ms: int = 100,
     timeout: float = 30.0,
+    prepare_lead_ms: int = 0,
 ) -> RunResult:
     """One V2V session. If multi_count > 1, plays the wav N times with
     silence_ms gaps between, expecting N mid-session finals + 1 closing
@@ -175,6 +176,14 @@ def run_once(
                 send_audio(silence_pcm, mark_stop_for=None)
 
         t_session_stop = t_stops[-1]
+
+        if prepare_lead_ms > 0:
+            ws.send(json.dumps({"type": "asr_prepare"}))
+            deadline = time.monotonic() + (prepare_lead_ms / 1000.0)
+            while time.monotonic() < deadline:
+                _drain_nonblocking(ws, t_first_send, utt_pending, utt_idx_send,
+                                   t_stops, result)
+                time.sleep(min(chunk_dur_s, 0.02))
 
         # End the session.
         ws.send(json.dumps({"type": "asr_eos"}))
@@ -363,6 +372,8 @@ def main():
                     help="silence injected between utterances (multi mode)")
     ap.add_argument("--no-realtime", action="store_true",
                     help="send audio as fast as possible (default: real-time pacing)")
+    ap.add_argument("--prepare-lead-ms", type=int, default=0,
+                    help="send asr_prepare after speech and wait this long before asr_eos")
     args = ap.parse_args()
 
     wav_pcm, dur = load_wav_16k_i16(args.wav)
@@ -382,6 +393,7 @@ def main():
                 multi_count=args.multi,
                 silence_ms=args.silence_ms,
                 realtime=not args.no_realtime,
+                prepare_lead_ms=args.prepare_lead_ms,
             )
         except Exception as e:
             r = RunResult(audio_dur_s=dur, error=f"{type(e).__name__}: {e}")

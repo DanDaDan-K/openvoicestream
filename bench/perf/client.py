@@ -4,6 +4,7 @@ Single source of truth for perf timing. Every runner uses these — keeps
 timestamp semantics consistent across asr/tts/v2v/concurrent.
 """
 from __future__ import annotations
+import ast
 import io, json, time, urllib.parse, wave
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -20,11 +21,25 @@ import websocket  # websocket-client
 def _coerce_text(value) -> str:
     """ASR servers vary in `text` field type. Coerce to a single string.
     - str: pass through
+    - tuple/list-like transcript payloads: use first item as text
     - dict: try common per-language keys, then fall back to first string value
     - None / other: empty string
     """
     if isinstance(value, str):
+        if value[:1] in ("(", "["):
+            try:
+                parsed = ast.literal_eval(value)
+            except (SyntaxError, ValueError):
+                parsed = None
+            if (
+                isinstance(parsed, (tuple, list))
+                and parsed
+                and isinstance(parsed[0], str)
+            ):
+                return parsed[0]
         return value
+    if isinstance(value, (tuple, list)):
+        return _coerce_text(value[0]) if value else ""
     if isinstance(value, dict):
         for k in ("zh", "en", "text", "result", "transcript"):
             v = value.get(k)
@@ -465,6 +480,7 @@ class V2VStreamASRResult:
     endpoint_latency_ms: float = 0.0           # EOS → asr_endpoint (VAD front-end)
     asr_finalize_ms: float = 0.0               # asr_endpoint → asr_final (ASR compute)
     total_latency_ms: float = 0.0              # EOS → asr_final (sum of above)
+    prepare_to_final_ms: float | None = None   # asr_prepare → asr_final
     partial_before_client_eos: bool = False
     endpoint_before_client_eos: bool = False
     final_before_client_eos: bool = False
@@ -488,6 +504,7 @@ def run_v2v_stream_asr(
     asr_endpoint_min_speech_s: float | None = None,
     asr_endpoint_min_audio_s: float | None = None,
     vad_tail_max_ms: int | None = None,
+    prepare_lead_ms: int = 0,
 ) -> V2VStreamASRResult:
     """Drive /v2v/stream in ASR-only mode and measure split timings.
 
@@ -556,6 +573,7 @@ def run_v2v_stream_asr(
     t_first_partial: float | None = None
     t_endpoint: float | None = None
     t_final: float | None = None
+    t_prepare: float | None = None
     final_text = ""
     partial_before_client_eos = False
     endpoint_before_client_eos = False
@@ -606,6 +624,16 @@ def run_v2v_stream_asr(
         if realtime:
             time.sleep(chunk_dur)
 
+    if prepare_lead_ms > 0 and not done:
+        ws.send(json.dumps({"type": "asr_prepare"}))
+        t_prepare = time.monotonic()
+        deadline_prepare = t_prepare + prepare_lead_ms / 1000.0
+        while time.monotonic() < deadline_prepare and not done:
+            _drain_available(before_client_eos=True)
+            remaining = deadline_prepare - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.02, remaining))
+
     t_eos = time.monotonic()
     if eos_mode == "client" and not done:
         ws.send(json.dumps({"type": "asr_eos"}))
@@ -637,6 +665,7 @@ def run_v2v_stream_asr(
                 text="<timeout>", audio_dur_s=dur,
                 tfd_ms=((t_first_partial - t_first_send) * 1000) if t_first_partial else None,
                 endpoint_latency_ms=(t_endpoint - t_eos) * 1000 if t_endpoint else 0,
+                prepare_to_final_ms=((t_final - t_prepare) * 1000) if (t_final and t_prepare) else None,
                 error="timeout waiting for asr_final",
             )
         try:
@@ -669,6 +698,7 @@ def run_v2v_stream_asr(
         endpoint_latency = max(0.0, (t_endpoint - t_eos) * 1000) if t_endpoint else 0.0
         asr_finalize = max(0.0, (t_final - t_endpoint) * 1000) if (t_final and t_endpoint) else 0.0
         total_latency = max(0.0, (t_final - t_eos) * 1000) if t_final else 0.0
+    prepare_to_final = max(0.0, (t_final - t_prepare) * 1000) if (t_final and t_prepare) else None
     return V2VStreamASRResult(
         text=final_text,
         audio_dur_s=dur,
@@ -676,6 +706,7 @@ def run_v2v_stream_asr(
         endpoint_latency_ms=endpoint_latency,
         asr_finalize_ms=asr_finalize,
         total_latency_ms=total_latency,
+        prepare_to_final_ms=prepare_to_final,
         partial_before_client_eos=partial_before_client_eos,
         endpoint_before_client_eos=endpoint_before_client_eos,
         final_before_client_eos=final_before_client_eos,

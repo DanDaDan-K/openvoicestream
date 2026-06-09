@@ -3232,6 +3232,10 @@ async def v2v_stream(ws: WebSocket):
                                            # utterance and must NOT fire finalize
                                            # against the new one (gen-race fix,
                                            # codex root-cause 2026-05-19).
+            "asr_prepare_task": None,      # optional same-generation
+                                           # prepare_finalize task for low
+                                           # dialogue EOU latency.
+            "asr_prepare_gen": None,
             "tts_flush":        False,   # set when client tts_flush
             "current_tts_task": None,    # running TTS synth task (cancellable)
             "current_tts_stop": None,    # threading.Event to signal synth thread
@@ -3280,6 +3284,63 @@ async def v2v_stream(ws: WebSocket):
     
         async def send_error(msg):
             await send_json({"type": v2v_proto.SERVER_ERROR, "error": msg})
+
+        def _clear_asr_prepare_state() -> None:
+            state["asr_prepare_task"] = None
+            state["asr_prepare_gen"] = None
+
+        def _schedule_asr_prepare(reason: str) -> None:
+            """Run stream.prepare_finalize ahead of EOS when supported.
+
+            The normal generation-gated finalize path remains authoritative.
+            This helper only hides the expensive tail encode/decoder prep under
+            client or frontend-VAD EOU lead time.
+            """
+            if asr_manager is None or not state.get("asr_active"):
+                return
+            gen = int(state.get("asr_active_gen") or 0)
+            existing = state.get("asr_prepare_task")
+            if (
+                existing is not None
+                and not existing.done()
+                and state.get("asr_prepare_gen") == gen
+            ):
+                return
+
+            async def _run_prepare() -> None:
+                try:
+                    async with coord.acquire("asr"):
+                        fn = getattr(asr_manager, "prepare_finalize_for_generation", None)
+                        if fn is not None:
+                            ran_gen, prepared = await fn(gen)
+                        else:
+                            if getattr(asr_manager, "current_generation", None) != gen:
+                                return
+                            stream = getattr(asr_manager, "stream", None)
+                            prepare = getattr(stream, "prepare_finalize", None)
+                            if prepare is None:
+                                return
+                            loop2 = asyncio.get_event_loop()
+                            await loop2.run_in_executor(_get_asr_executor(), prepare)
+                            ran_gen, prepared = gen, True
+                    logger.debug(
+                        "v2v ASR prepare_finalize finished reason=%s gen=%s prepared=%s",
+                        reason,
+                        ran_gen,
+                        prepared,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.debug(
+                        "v2v ASR prepare_finalize failed reason=%s gen=%s",
+                        reason,
+                        gen,
+                        exc_info=True,
+                    )
+
+            state["asr_prepare_gen"] = gen
+            state["asr_prepare_task"] = asyncio.create_task(_run_prepare())
 
         def _asr_stream_prefers_backend_endpoint_vad() -> bool:
             """Return True only for streams that explicitly own endpoint VAD.
@@ -3420,6 +3481,7 @@ async def v2v_stream(ws: WebSocket):
                                     # firing on the wrong generation).
                                     state["endpoint_pending"] = None
                                     state["endpoint_pending_gen"] = None
+                                    _clear_asr_prepare_state()
                                     state["asr_active"] = True
                                     state["asr_active_gen"] = new_gen
                                     state["asr_audio_samples_accepted"] = 0
@@ -3460,6 +3522,7 @@ async def v2v_stream(ws: WebSocket):
                                 continue
                             state["endpoint_pending"] = None
                             state["endpoint_pending_gen"] = None
+                            _clear_asr_prepare_state()
                             state["asr_active"] = True
                             state["asr_active_gen"] = new_gen
                             state["asr_audio_samples_accepted"] = 0
@@ -3487,6 +3550,7 @@ async def v2v_stream(ws: WebSocket):
                                 )
                             )
                             if frontend_eou_may_finalize:
+                                _schedule_asr_prepare("vad_speech_end")
                                 state["endpoint_pending"] = "vad"
                                 state["endpoint_pending_gen"] = state["asr_active_gen"]
                                 if not multi_utterance:
@@ -3530,6 +3594,13 @@ async def v2v_stream(ws: WebSocket):
                         state["endpoint_pending_gen"] = state["asr_active_gen"]
                         if not multi_utterance:
                             state["asr_session_closed"] = True
+                    elif typ in {
+                        getattr(v2v_proto, "CLIENT_ASR_PREPARE", "asr_prepare"),
+                        "prepare",
+                        "pre_eou",
+                        "prepare_finalize",
+                    }:
+                        _schedule_asr_prepare("client_prepare")
                     elif typ == v2v_proto.CLIENT_ABORT:
                         t = state["current_tts_task"]
                         if t is not None and not t.done():
@@ -3549,6 +3620,7 @@ async def v2v_stream(ws: WebSocket):
                             state["asr_active"] = False
                             state["asr_audio_samples_accepted"] = 0
                             state["asr_turn_started_at"] = None
+                            _clear_asr_prepare_state()
             except WebSocketDisconnect:
                 state["client_closed"] = True
                 # See websocket.disconnect branch above: cancel work tasks so
@@ -3628,6 +3700,7 @@ async def v2v_stream(ws: WebSocket):
                     state["asr_turn_started_at"] = None
                     state["endpoint_pending"] = None
                     state["endpoint_pending_gen"] = None
+                    _clear_asr_prepare_state()
                     try:
                         await send_error(
                             f"asr: per-turn deadline {asr_turn_timeout_s:.0f}s "
@@ -3715,6 +3788,16 @@ async def v2v_stream(ws: WebSocket):
     
                     if state["asr_active"]:
                         finalize_gen = state["asr_active_gen"]
+                        prep_task = state.get("asr_prepare_task")
+                        if (
+                            prep_task is not None
+                            and state.get("asr_prepare_gen") == finalize_gen
+                            and not prep_task.done()
+                        ):
+                            try:
+                                await prep_task
+                            except Exception:
+                                pass
                         async with coord.acquire("asr"):
                             ran_gen, final_text, finalize_accepted, detected_language = (
                                 await asr_manager.finalize_with_status(
@@ -3730,6 +3813,7 @@ async def v2v_stream(ws: WebSocket):
                             state["asr_active"] = False
                             state["asr_audio_samples_accepted"] = 0
                             state["asr_turn_started_at"] = None
+                            _clear_asr_prepare_state()
                     else:
                         final_text = ""
                         ran_gen = state["asr_active_gen"]

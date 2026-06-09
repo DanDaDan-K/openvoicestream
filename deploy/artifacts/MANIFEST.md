@@ -53,6 +53,16 @@ Validated image:
 Artifact sets:
 
 - `rk3588-multilang-2026-05-17` — Matcha TTS (closed-loop validated).
+- `rk3576-paraformer-hybrid-rknn-decoder-2026-06-09` — Paraformer ASR
+  hybrid encoder prefix RKNN + CPU suffix + RKNN decoder, paired with
+  `rk3576-paraformer-hybrid-rknn-decoder-matcha`. `/v2v/stream` short-corpus
+  validation on `cat-remote`: client-EOS zh/en mean 548/579 ms; with
+  `asr_prepare` 500 ms lead zh/en mean 105/165 ms.
+- `rk3588-paraformer-hybrid-rknn-decoder-2026-06-09` — same Paraformer ASR
+  layout with RK3588-specific RKNN prefix/decoder artifacts, paired with
+  `rk3588-paraformer-hybrid-rknn-decoder-matcha`. `/v2v/stream` validation on
+  `radxa`: client-EOS zh/en mean 424/477 ms; with `asr_prepare` 500 ms lead
+  zh/en mean 100/98 ms.
 - `rk3588-kokoro-hybrid-2026-05-23` — Kokoro hybrid TTS (CPU prefix ONNX +
   RKNN decoder-front int8 + CPU tail ONNX), paired with `rk3588-kokoro-rknn`
   profile. Files:

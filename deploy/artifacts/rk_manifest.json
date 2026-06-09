@@ -124,6 +124,108 @@
         }
       ]
     },
+    "rk3576-paraformer-hybrid-rknn-decoder-2026-06-09": {
+      "soc": "rk3576",
+      "profile": "paraformer-hybrid-rknn-decoder",
+      "root": "/",
+      "runtime": {
+        "rknn_toolkit_lite2": "2.3.2",
+        "librknnrt_sha256": "d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac738e8"
+      },
+      "runtime_contract": {
+        "asr_path": "paraformer_hybrid_prefix_rknn_suffix_cpu_decoder_rknn",
+        "streaming_validated": true,
+        "validated_device": "cat-remote",
+        "validated_at": "2026-06-09",
+        "validated_profile": "rk3576-paraformer-hybrid-rknn-decoder-matcha",
+        "metrics": {
+          "corpus": "bench/perf/corpus short zh/en, 5 files per language",
+          "v2v_stream_client_eos": {
+            "zh_cer": 0.121,
+            "zh_total_mean_ms": 548,
+            "en_wer": 0.217,
+            "en_total_mean_ms": 579
+          },
+          "v2v_stream_asr_prepare_500ms": {
+            "zh_cer": 0.121,
+            "zh_total_mean_ms": 105,
+            "zh_prepare_to_final_mean_ms": 606,
+            "en_wer": 0.217,
+            "en_total_mean_ms": 165,
+            "en_prepare_to_final_mean_ms": 667
+          }
+        },
+        "env": {
+          "ASR_BACKEND": "paraformer_rknn",
+          "PARAFORMER_MODEL_DIR": "/opt/asr/paraformer",
+          "PARAFORMER_RKNN_DIR": "/opt/asr/paraformer/rknn/rk3576",
+          "PARAFORMER_RKNN_ENCODER_MODE": "hybrid",
+          "PARAFORMER_RKNN_DECODER": "rknn",
+          "PARAFORMER_RKNN_ENC_PRECISION": "fp16",
+          "PARAFORMER_RKNN_DEC_PRECISION": "fp16",
+          "PARAFORMER_ENCODER_SUFFIX_ONNX": "/opt/asr/paraformer/encoder_suffix_from_block30.onnx",
+          "PARAFORMER_FBANK_CMVN": "none",
+          "PARAFORMER_STREAM_DECODE": "batch_final",
+          "PARAFORMER_STREAM_PROCESS_SEC": "2.0"
+        }
+      },
+      "files": [
+        {
+          "path": "opt/asr/paraformer/tokens.txt",
+          "source_path": "rk3576/paraformer-hybrid/tokens.txt",
+          "size_bytes": 75756,
+          "sha256": "59aba8873a2ed1e122c25fee421e25f283b63290efbde85c1f01a853d83cb6e6"
+        },
+        {
+          "path": "opt/asr/paraformer/encoder_suffix_from_block30.onnx",
+          "source_path": "rk3576/paraformer-hybrid/encoder_suffix_from_block30.onnx",
+          "size_bytes": 231191738,
+          "sha256": "1cc45479271f819e043f7db14d101a345c51aeaac87e8a1674b420b57ccdf8a1"
+        },
+        {
+          "path": "opt/asr/paraformer/decoder-rknn.onnx",
+          "source_path": "rk3576/paraformer-hybrid/decoder-rknn.onnx",
+          "size_bytes": 228461006,
+          "sha256": "cc98122f63240ebae31f8392f83a78c1deea844af419bb088761c412f7b0a50a"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3576/encoder_prefix_to_block30.40.fp16.rknn",
+          "source_path": "rk3576/paraformer-hybrid/rknn/rk3576/encoder_prefix_to_block30.40.fp16.rknn",
+          "size_bytes": 214050369,
+          "sha256": "4e8f4193c49315288794c3343147cad2dec9f301278c6255b5e489a0c114caef"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3576/encoder_prefix_to_block30.80.fp16.rknn",
+          "source_path": "rk3576/paraformer-hybrid/rknn/rk3576/encoder_prefix_to_block30.80.fp16.rknn",
+          "size_bytes": 214335553,
+          "sha256": "b8cbf49d6d37face309adec2b38459a656b803d37e149c148f1643d4500b5624"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3576/encoder_prefix_to_block30.160.fp16.rknn",
+          "source_path": "rk3576/paraformer-hybrid/rknn/rk3576/encoder_prefix_to_block30.160.fp16.rknn",
+          "size_bytes": 214673476,
+          "sha256": "6fc303ab449917c9460a0008a58af7b6f29dde5629d3816b9b4dd9c9156e2c43"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3576/encoder_prefix_to_block30.240.fp16.rknn",
+          "source_path": "rk3576/paraformer-hybrid/rknn/rk3576/encoder_prefix_to_block30.240.fp16.rknn",
+          "size_bytes": 216796740,
+          "sha256": "a92b56f92ef1ed6fc45ef1ba9bfd1d14c4ff2ca00ce0f05217ac182cc486b921"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3576/encoder_prefix_to_block30.400.fp16.rknn",
+          "source_path": "rk3576/paraformer-hybrid/rknn/rk3576/encoder_prefix_to_block30.400.fp16.rknn",
+          "size_bytes": 220473732,
+          "sha256": "3f598845d4e9e9aa1c1722be80e13845623e584176f497e23bf7ff23b62ce2e9"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3576/decoder.400x40.fp16.rknn",
+          "source_path": "rk3576/paraformer-hybrid/rknn/rk3576/decoder.400x40.fp16.rknn",
+          "size_bytes": 123548613,
+          "sha256": "f3ae05e6ece4894f4642e31cc03703a2af8fcecbc6c70e2ba961f57ee6707dd9"
+        }
+      ]
+    },
     "rk3588-multilang-2026-05-17": {
       "soc": "rk3588",
       "profile": "multilang",
@@ -216,6 +318,108 @@
         {
           "path": "opt/tts/models/matcha-icefall-zh-en/",
           "source": "Seeed CDN models-matcha.tar.gz via model_downloader"
+        }
+      ]
+    },
+    "rk3588-paraformer-hybrid-rknn-decoder-2026-06-09": {
+      "soc": "rk3588",
+      "profile": "paraformer-hybrid-rknn-decoder",
+      "root": "/",
+      "runtime": {
+        "rknn_toolkit_lite2": "2.3.2",
+        "librknnrt_sha256": "d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac738e8"
+      },
+      "runtime_contract": {
+        "asr_path": "paraformer_hybrid_prefix_rknn_suffix_cpu_decoder_rknn",
+        "streaming_validated": true,
+        "validated_device": "radxa",
+        "validated_at": "2026-06-09",
+        "validated_profile": "rk3588-paraformer-hybrid-rknn-decoder-matcha",
+        "metrics": {
+          "corpus": "bench/perf/corpus short zh/en, 5 files per language",
+          "v2v_stream_client_eos": {
+            "zh_cer": 0.121,
+            "zh_total_mean_ms": 424,
+            "en_wer": 0.217,
+            "en_total_mean_ms": 477
+          },
+          "v2v_stream_asr_prepare_500ms": {
+            "zh_cer": 0.121,
+            "zh_total_mean_ms": 100,
+            "zh_prepare_to_final_mean_ms": 602,
+            "en_wer": 0.217,
+            "en_total_mean_ms": 98,
+            "en_prepare_to_final_mean_ms": 599
+          }
+        },
+        "env": {
+          "ASR_BACKEND": "paraformer_rknn",
+          "PARAFORMER_MODEL_DIR": "/opt/asr/paraformer",
+          "PARAFORMER_RKNN_DIR": "/opt/asr/paraformer/rknn/rk3588",
+          "PARAFORMER_RKNN_ENCODER_MODE": "hybrid",
+          "PARAFORMER_RKNN_DECODER": "rknn",
+          "PARAFORMER_RKNN_ENC_PRECISION": "fp16",
+          "PARAFORMER_RKNN_DEC_PRECISION": "fp16",
+          "PARAFORMER_ENCODER_SUFFIX_ONNX": "/opt/asr/paraformer/encoder_suffix_from_block30.onnx",
+          "PARAFORMER_FBANK_CMVN": "none",
+          "PARAFORMER_STREAM_DECODE": "batch_final",
+          "PARAFORMER_STREAM_PROCESS_SEC": "2.0"
+        }
+      },
+      "files": [
+        {
+          "path": "opt/asr/paraformer/tokens.txt",
+          "source_path": "rk3588/paraformer-hybrid/tokens.txt",
+          "size_bytes": 34846,
+          "sha256": "fca8b98b28803e4235d6cd630e3666232bf55d3a34032c1cd7568c331ac213cd"
+        },
+        {
+          "path": "opt/asr/paraformer/encoder_suffix_from_block30.onnx",
+          "source_path": "rk3588/paraformer-hybrid/encoder_suffix_from_block30.onnx",
+          "size_bytes": 231191774,
+          "sha256": "00ca68e94c83f191c345725fc0e9be6bd1ffdf01e664aaae5aeb06e6d30721f8"
+        },
+        {
+          "path": "opt/asr/paraformer/decoder-rknn.onnx",
+          "source_path": "rk3588/paraformer-hybrid/decoder-rknn.onnx",
+          "size_bytes": 228461006,
+          "sha256": "cc98122f63240ebae31f8392f83a78c1deea844af419bb088761c412f7b0a50a"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3588/encoder_prefix_to_block30.40.fp16.rknn",
+          "source_path": "rk3588/paraformer-hybrid/rknn/rk3588/encoder_prefix_to_block30.40.fp16.rknn",
+          "size_bytes": 208368769,
+          "sha256": "f84c64c48f78b57af20494ac503b247b3e912ad1d2fed6abc4fb73759a8cd932"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3588/encoder_prefix_to_block30.80.fp16.rknn",
+          "source_path": "rk3588/paraformer-hybrid/rknn/rk3588/encoder_prefix_to_block30.80.fp16.rknn",
+          "size_bytes": 208559361,
+          "sha256": "f71c717f87eae92367f7e950c738672d9046c4f03f01c3bc82e172028f997579"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3588/encoder_prefix_to_block30.160.fp16.rknn",
+          "source_path": "rk3588/paraformer-hybrid/rknn/rk3588/encoder_prefix_to_block30.160.fp16.rknn",
+          "size_bytes": 209928580,
+          "sha256": "eff18f95bcfeec0d0475cc150a642f3af3b31ea469e478be7d7739e22bda0e98"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3588/encoder_prefix_to_block30.240.fp16.rknn",
+          "source_path": "rk3588/paraformer-hybrid/rknn/rk3588/encoder_prefix_to_block30.240.fp16.rknn",
+          "size_bytes": 210596996,
+          "sha256": "479e66cae9078ab84265534c150e3c815068bef85abb33643e3741376588e80b"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3588/encoder_prefix_to_block30.400.fp16.rknn",
+          "source_path": "rk3588/paraformer-hybrid/rknn/rk3588/encoder_prefix_to_block30.400.fp16.rknn",
+          "size_bytes": 213524420,
+          "sha256": "8c9e2a37063ebe906d4fe1997be6f8220a8597e77f004d93c7fff7486f9a7843"
+        },
+        {
+          "path": "opt/asr/paraformer/rknn/rk3588/decoder.400x40.fp16.rknn",
+          "source_path": "rk3588/paraformer-hybrid/rknn/rk3588/decoder.400x40.fp16.rknn",
+          "size_bytes": 120424901,
+          "sha256": "e26ed76c870080fc9abafb7025cf7742a6428df9cd3e75daca9597b43e7bfd99"
         }
       ]
     },
