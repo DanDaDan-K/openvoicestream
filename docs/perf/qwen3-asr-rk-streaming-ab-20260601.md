@@ -1364,3 +1364,218 @@ Decision:
   is invalid with the current RKLLM/NPU-core configuration.
 - Add explicit runtime validation so unsupported CPU counts fail early instead
   of silently falling back to the old 2-core mask.
+
+### 2026-06-09 RK3588 W8A8 full quality boundary
+
+The full RK3588 W8A8/FP16 recheck used the updated in-process harness with:
+
+- highperf clocks
+- `ASR_DECODER_EMBED_CACHE_REUSE=1`
+- `ASR_DECODER_ASYNC=1`
+- `ASR_ENABLED_CPUS=4`
+- `QWEN3_ASR_STREAM_MODE=true_streaming`
+- `bench/perf/corpus/manifest.json` plus
+  `bench/perf/corpus/multilingual_manifest.json`
+
+Raw JSONL results were collected under:
+
+```text
+bench/perf/results/_from_radxa/qwen3-quality-boundary-20260609-valid/
+```
+
+Summary:
+
+```text
+target/profile        set                 n   mean error   char error   mean eos->final
+W8A8 true-streaming   zh/en short         10     6.55%       5.04%          246.6 ms
+FP16 true-streaming   zh/en short         10     7.55%       5.63%          388.1 ms
+W8A8 true-streaming   multilingual short   5     5.00%       1.67%          264.1 ms
+FP16 true-streaming   multilingual short   5     5.00%       1.67%          408.0 ms
+W8A8 true-streaming   zh/en long          10    62.86%      62.84%          109.6 ms
+FP16 true-streaming   zh/en long          10    62.86%      62.64%          165.1 ms
+W8A8 true-streaming   multilingual long    5    67.45%      64.67%           88.9 ms
+FP16 true-streaming   multilingual long    5    67.45%      64.67%          119.5 ms
+```
+
+Interpretation:
+
+- Short utterances support keeping RK3588 W8A8 as the low-latency default:
+  W8A8 was faster than FP16 and did not show a quality regression on this set.
+- Long utterances fail in both W8A8 and FP16 with nearly identical text and
+  error rates, so the long-set regression is not a W8A8 quantization boundary.
+- The failure mode is truncation caused by the low-latency true-streaming
+  endpoint policy.  Example:
+
+```text
+id=en_long_02 duration=11.46s
+true-streaming output:
+In easy reach is a romantic and fascinating town of Centra, which was.
+WER: 69.70%
+stats.total_audio_s: 5.2s
+```
+
+The same sample under FP16 produced the same truncated text.  The stream had
+only processed 5.2s of audio before endpoint/final, while the fixture is
+11.46s.  This matches the code path in `Qwen3TrueStreamingASRStream`: after VAD
+endpoint sets `_episode_final`, later `feed_audio()` calls return immediately
+unless `QWEN3_ASR_ALLOW_AUTO_RESUME_AFTER_ENDPOINT=1`, and the current resume
+path clears `_archive_text` rather than accumulating completed segments.  That
+is correct for V2V turn-taking, but it is the wrong profile for complete long
+audio transcription.
+
+Validated remediation for dictation/long-quality checks:
+
+```text
+QWEN3_ASR_STREAM_PARTIAL=0
+QWEN3_ASR_VAD_MIN_AUDIO_S=30
+QWEN3_ASR_TRUE_ROLL_SEC=30
+```
+
+On RK3588 W8A8, `en_long_02` recovered from 69.70% WER to 12.12% WER:
+
+```text
+true-streaming low-latency:
+In easy reach is a romantic and fascinating town of Centra, which was.
+eos->final: 0.76ms
+
+long-dictation profile:
+To the north and within easy reach is a romantic and fascinating town of
+Centra, which was made famous to foreigners after a glowing account of its
+splendourous recorded by Lord Byron.
+eos->final: 1720ms
+```
+
+Decision:
+
+- Keep RK3588 W8A8 as the low-latency short-turn default.
+- Do not use the low-latency true-streaming profile to judge long-form ASR
+  quality; it intentionally finalizes at VAD endpoint and drops/ignores later
+  audio in the same stream.
+- Add a separate long-dictation benchmark/profile for full transcription.  The
+  reproducible host-side probe is
+  `bench/perf/rk_qwen3_long_dictation_probe_host.sh`.
+- If production needs continuous dictation instead of V2V turn-taking, implement
+  a multi-segment archive mode that accumulates VAD-finalized segments instead
+  of clearing `_archive_text` on auto-resume.  That should be a separate mode,
+  not the default V2V path, because it trades sub-10ms endpoint finalization for
+  ~1.5-1.8s client-EOS finalization on 10-12s utterances.
+
+Follow-up fix:
+
+The long-form failure above is a real streaming-state bug for dictation-style
+use, not a model quantization issue.  The direct fix is a separate
+multi-segment accumulation mode:
+
+```text
+QWEN3_ASR_ALLOW_AUTO_RESUME_AFTER_ENDPOINT=1
+QWEN3_ASR_ACCUMULATE_SEGMENTS=1
+QWEN3_ASR_TRUE_ROLL_SEC=30
+QWEN3_ASR_VAD_FINAL_ASYNC=0
+QWEN3_ASR_STREAM_PARTIAL=0
+```
+
+Implementation details:
+
+- `_maybe_resume_new_utterance()` no longer clears `_archive_text` when segment
+  accumulation is enabled.
+- VAD-finalized text is committed via `_commit_final_text()`, which appends the
+  new segment to the accumulated archive.
+- `QWEN3_ASR_VAD_FINAL_ASYNC=0` avoids dropping the start of the next segment
+  while the previous segment's background final decode is still running.
+- `QWEN3_ASR_TRUE_ROLL_SEC=30` prevents long segment finalization from losing
+  its own prefix due to the default 5s rolling encoder buffer.
+
+RK3588 W8A8 validation on the 5 English long samples:
+
+```text
+profile                         n   mean WER   char error   mean eos->final   median eos->final
+low-latency true-streaming      5    62.09%      62.06%          208.2 ms            0.8 ms
+multi-segment dictation fix     5     9.64%       6.78%          549.2 ms          217.8 ms
+```
+
+`en_long_02` improved from 69.70% WER to 21.21% WER.  The remaining errors are
+recognition/substitution errors around the segment boundary (`Sintra`→`Centra`,
+missing `made famous to`), not wholesale truncation.  A tested
+`QWEN3_ASR_SEGMENT_CONTEXT_PREFIX=1` experiment made quality worse by suppressing
+later segments, so it is kept as an off-by-default diagnostic knob rather than a
+profile setting.
+
+Additional boundary experiments:
+
+- `QWEN3_ASR_SEGMENT_AUDIO_CARRY_SEC=0.8` was rejected.  It worsened the 5-sample
+  English long WER from 9.64% to 15.89% and produced one prompt-leak artifact
+  (`You are a helpful assistant.`) on `en_long_04`.
+- Text overlap de-duplication is implemented as
+  `QWEN3_ASR_SEGMENT_TEXT_OVERLAP_TOKENS`, but the validated dictation profile
+  keeps audio carry disabled.  It is a guard for future overlap experiments, not
+  the source of the current quality gain.
+
+Final long-dictation fix and full validation:
+
+The English/Chinese full-set rerun exposed one additional bug in the benchmark
+profile: `bench/perf/qwen3_asr_stream_eos_bench.py` had hard-coded
+`final_stop_on_punctuation=True`.  That is valid as a short-turn latency
+experiment, but it is wrong for long dictation because one VAD segment can
+contain multiple sentences.  `zh_long_02` reproduced this directly: with
+punctuation stop enabled it ended after `2011年8月完工`; with punctuation stop
+disabled the full tail `但直到2017年3月才开始通车` returned.
+
+The long-dictation host profile now explicitly uses:
+
+```text
+QWEN3_ASR_ALLOW_AUTO_RESUME_AFTER_ENDPOINT=1
+QWEN3_ASR_ACCUMULATE_SEGMENTS=1
+QWEN3_ASR_STREAM_PARTIAL=0
+QWEN3_ASR_TRUE_ROLL_SEC=30
+QWEN3_ASR_VAD_FINAL_ASYNC=0
+QWEN3_ASR_SEGMENT_TEXT_OVERLAP_TOKENS=8
+ASR_FINAL_STOP_ON_PUNCTUATION=0
+ASR_MAX_NEW_TOKENS=128
+```
+
+`_commit_final_text()` also strips short prompt-leak suffixes such as
+`转录。` / `Transcribe:`.  This is needed once punctuation stop is disabled;
+otherwise weak EOS can leak the next prompt token after an otherwise complete
+transcript.
+
+RK3588 W8A8 full validation under highperf:
+
+```text
+set/profile                         n   mean error   char error   mean eos->final   median eos->final
+baseline low-latency zh/en long    10    62.86%      62.84%          109.6 ms             n/a
+fixed dictation zh/en long         10    10.10%       8.50%          361.1 ms           220.2 ms
+baseline low-latency multi long     5    67.45%      64.67%           88.9 ms             n/a
+fixed dictation multi long          5    10.78%       5.51%          393.8 ms           249.4 ms
+```
+
+Breakdown for the fixed `manifest.json` long set:
+
+```text
+language   n   mean error   char error   mean eos->final   notes
+zh         5     9.96%       9.96%          108.8 ms        raw metric over-penalizes number format (十五 vs 15)
+en         5    10.25%       7.04%          613.4 ms        remaining errors concentrated in en_long_02/en_long_05
+```
+
+Breakdown for the fixed multilingual long set:
+
+```text
+language   n   mean error   char error   mean eos->final
+ja         1    14.89%      14.89%         1331.7 ms
+es         1    13.33%       3.60%          249.4 ms
+ko         1     5.66%       5.66%            0.3 ms
+de         1     0.00%       0.00%          386.8 ms
+fr         1    20.00%       3.41%            0.7 ms
+```
+
+Remaining quality boundary:
+
+- The original 60-70% long-set WER/CER was a streaming state/profile bug:
+  VAD endpoint finalization plus punctuation early-stop truncated long audio.
+- The fixed dictation profile no longer drops the back half of long samples.
+- Remaining high-error rows are normal recognition/substitution boundaries:
+  `Sintra` -> `Centra` and missing `made famous to` in `en_long_02`, `3:2` ->
+  `free-to-two` in `en_long_05`, and minor multilingual word/grammar
+  substitutions.
+- Keep the short-turn V2V profile separate.  It may continue to use aggressive
+  endpoint/final policies for latency, but long-form ASR quality must be judged
+  with the dictation profile above.
