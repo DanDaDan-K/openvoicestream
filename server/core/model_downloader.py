@@ -165,6 +165,11 @@ def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") 
         # this for the compile-fallback path; its list-shaped-manifest skip
         # (97a9b9f) is untouched.
         _ensure_moss_artifacts()
+    if os.environ.get("ASR_BACKEND") == "sensevoice_rknn":
+        # SenseVoice RKNN model + decode assets are a flat HF file list; fetch
+        # the RK_PLATFORM-specific .rknn + decode assets so switching to a
+        # *-sensevoice profile auto-provisions the model. Idempotent.
+        _ensure_sensevoice_rknn_artifacts()
 
     if language_mode == "rk":
         _ensure_rk_artifacts()
@@ -510,6 +515,56 @@ def _ensure_moss_artifacts() -> None:
     except Exception as exc:
         logger.error("MOSS artifact check/download failed: %s", exc)
         sys.exit(1)
+
+
+# SenseVoice RKNN: encoder .rknn (per SoC) + decode assets, hosted as a flat HF
+# file list so a *-sensevoice profile auto-provisions on first start.
+_SENSEVOICE_RKNN_SHARED = ("am.mvn", "embedding.npy", "chn_jpn_yue_eng_ko_spectok.bpe.model")
+
+
+def _ensure_sensevoice_rknn_artifacts() -> None:
+    """Download the SenseVoice RKNN model + decode assets if missing (idempotent).
+
+    Fetches the ``RK_PLATFORM``-specific encoder ``.rknn`` plus the shared decode
+    assets (CMVN, prompt embeddings, sentencepiece model) from HF into
+    ``SENSEVOICE_RKNN_MODEL_DIR``. Honors HF_ENDPOINT mirrors. The HF repo is
+    overridable via ``SENSEVOICE_RKNN_HF_REPO``.
+    """
+    dest = os.environ.get("SENSEVOICE_RKNN_MODEL_DIR", "/opt/asr/sensevoice-rknn")
+    platform = os.environ.get("RK_PLATFORM", "rk3576").lower()
+    repo = os.environ.get("SENSEVOICE_RKNN_HF_REPO", "harvestsu/sensevoice-rknn")
+    endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+    base = f"{endpoint}/{repo}/resolve/main"
+
+    files = [f"sense-voice-encoder.{platform}.fp16.rknn", *_SENSEVOICE_RKNN_SHARED]
+    os.makedirs(dest, exist_ok=True)
+    for name in files:
+        path = os.path.join(dest, name)
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            logger.info("SenseVoice RKNN asset OK: %s", name)
+            continue
+        url = f"{base}/{name}"
+        logger.info("Downloading SenseVoice RKNN asset %s ...", url)
+        tmp = path + ".part"
+        try:
+            if shutil.which("curl"):
+                subprocess.run(
+                    ["curl", "-fSL", "--connect-timeout", "20", "--max-time", "1800",
+                     "--retry", "3", "-o", tmp, url],
+                    check=True, timeout=1900,
+                )
+            else:
+                import urllib.request
+
+                req = urllib.request.Request(url, headers={"User-Agent": "openvoicestream/1.0"})
+                with urllib.request.urlopen(req, timeout=1800) as resp, open(tmp, "wb") as fh:
+                    shutil.copyfileobj(resp, fh)
+            os.replace(tmp, path)
+            logger.info("SenseVoice RKNN asset ready: %s (%d bytes)", name, os.path.getsize(path))
+        except Exception as exc:
+            logger.error("Failed to download SenseVoice RKNN asset %s: %s", name, exc)
+            logger.error("Manually place %s under %s", name, dest)
+            raise
 
 
 # Custom voice patches: replace unused speakers in voices.bin with custom voices.
