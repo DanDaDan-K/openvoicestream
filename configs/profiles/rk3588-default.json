@@ -1,6 +1,6 @@
 {
   "name": "rk3588-default",
-  "description": "Rockchip RK3588 release profile: Qwen3 ASR on RKNN/RKLLM plus Matcha hybrid TTS (ORT acoustic + RKNN Vocos) validated by TTS-to-ASR closed-loop.",
+  "description": "Rockchip RK3588 release profile: Qwen3 ASR on RKNN/RKLLM W8A8 plus Matcha hybrid TTS (ORT acoustic + RKNN Vocos) validated by TTS-to-ASR closed-loop. W8A8 is the default RK3588 decoder after the 2026-06-09 highperf short-set recheck.",
   "asr_backend": "rk.asr",
   "tts_backend": "rk.tts",
   "execution_policy": {
@@ -15,7 +15,9 @@
     "OVS_VAD_BACKEND": "silero",
     "OVS_VAD_SILENCE_MS": "400",
     "ASR_DECODER_TYPE": "rkllm",
-    "ASR_DECODER_QUANT": "fp16",
+    "ASR_DECODER_QUANT": "w8a8",
+    "ASR_DECODER_EMBED_CACHE_REUSE": "1",
+    "ASR_DECODER_ASYNC": "1",
     "ASR_MODEL_DIR": "/opt/asr/models",
     "RKLLM_LIB_PATH": "/opt/asr/lib/librkllmrt.so",
     "QWEN3_ASR_CHUNK_CONFIRM": "0",

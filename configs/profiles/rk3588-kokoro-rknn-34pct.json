@@ -1,6 +1,6 @@
 {
   "name": "rk3588-kokoro-rknn-34pct",
-  "description": "RK3588 multilingual TTS via Kokoro 4-stage hybrid (CPU prefix ONNX + RKNN decoder-front INT8 + RKNN vocoder-front-half FP16 + CPU tail-rest ONNX). Increases NPU share from ~17% (3-stage) to ~34% by offloading the front half of the vocoder to NPU. Paired with Qwen3 ASR (RKNN encoder + RKLLM decoder fp16).",
+  "description": "RK3588 multilingual TTS via Kokoro 4-stage hybrid (CPU prefix ONNX + RKNN decoder-front INT8 + RKNN vocoder-front-half FP16 + CPU tail-rest ONNX). Increases NPU share from ~17% (3-stage) to ~34% by offloading the front half of the vocoder to NPU. Paired with Qwen3 ASR (RKNN encoder + RKLLM decoder W8A8).",
   "asr_backend": "rk.asr",
   "tts_backend": "rk.tts",
   "execution_policy": {
@@ -15,7 +15,9 @@
     "OVS_VAD_SILENCE_MS": "400",
     "ASR_DECODER_TYPE": "rkllm",
     "ASR_PLATFORM": "rk3588",
-    "ASR_DECODER_QUANT": "fp16",
+    "ASR_DECODER_QUANT": "w8a8",
+    "ASR_DECODER_EMBED_CACHE_REUSE": "1",
+    "ASR_DECODER_ASYNC": "1",
     "ASR_NPU_CORE_MASK": "NPU_CORE_AUTO",
     "ASR_ENABLED_CPUS": "4",
     "ASR_MAX_NEW_TOKENS": "64",

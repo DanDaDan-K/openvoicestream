@@ -1,6 +1,6 @@
 {
   "name": "rk3588-multilang",
-  "description": "Multilang preset on Rockchip RK3588: Qwen3 ASR (RKNN encoder + RKLLM decoder fp16) + Matcha hybrid TTS (ORT acoustic + RKNN Vocos) validated by closed-loop quality.",
+  "description": "Multilang preset on Rockchip RK3588: Qwen3 ASR (RKNN encoder + RKLLM decoder W8A8) + Matcha hybrid TTS (ORT acoustic + RKNN Vocos) validated by closed-loop quality. W8A8 is the default RK3588 decoder after the 2026-06-09 highperf short-set recheck.",
   "asr_backend": "rk.asr",
   "tts_backend": "rk.tts",
   "execution_policy": {
@@ -16,7 +16,9 @@
     "OVS_VAD_SILENCE_MS": "400",
     "ASR_DECODER_TYPE": "rkllm",
     "ASR_PLATFORM": "rk3588",
-    "ASR_DECODER_QUANT": "fp16",
+    "ASR_DECODER_QUANT": "w8a8",
+    "ASR_DECODER_EMBED_CACHE_REUSE": "1",
+    "ASR_DECODER_ASYNC": "1",
     "ASR_NPU_CORE_MASK": "NPU_CORE_AUTO",
     "ASR_ENABLED_CPUS": "4",
     "ASR_MODEL_DIR": "/opt/asr/models",

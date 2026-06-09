@@ -1,6 +1,6 @@
 {
   "name": "rk3588-zh-lowlatency",
-  "description": "Opt-in Chinese low-latency preset on Rockchip RK3588: Qwen3 ASR RKLLM W8A8 decoder plus Matcha hybrid TTS. Real /v2v/stream A/B on 2026-06-01 showed lower Chinese latency than FP16 with the same mean CER on the short zh corpus, but English WER regressed, so this profile must not replace the multilingual default.",
+  "description": "Low-latency preset on Rockchip RK3588: Qwen3 ASR RKLLM W8A8 decoder plus Matcha hybrid TTS, with a shorter true-streaming rolling window than the default profiles. W8A8 is now the RK3588 default after the 2026-06-09 highperf short-set recheck; this profile remains useful for lower-latency dialogue experiments.",
   "asr_backend": "rk.asr",
   "tts_backend": "rk.tts",
   "execution_policy": {
@@ -18,6 +18,8 @@
     "ASR_DECODER_TYPE": "rkllm",
     "ASR_PLATFORM": "rk3588",
     "ASR_DECODER_QUANT": "w8a8",
+    "ASR_DECODER_EMBED_CACHE_REUSE": "1",
+    "ASR_DECODER_ASYNC": "1",
     "ASR_NPU_CORE_MASK": "NPU_CORE_AUTO",
     "ASR_ENABLED_CPUS": "4",
     "ASR_MODEL_DIR": "/opt/asr/models",
