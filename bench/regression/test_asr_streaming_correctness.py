@@ -45,35 +45,85 @@ def _drain(ws, deadline_s: float) -> list[dict]:
     return msgs
 
 
-def run_one(url: str, wav_path: Path, ref: str, lang: str, chunk_ms: int) -> dict:
-    audio_i16, sr = load_wav_i16(wav_path)
-    chunk_n = max(1, int(sr * chunk_ms / 1000))
-    ws = websocket.create_connection(url, timeout=30)
+def _open_ws(url: str, attempts: int = 8, backoff_s: float = 0.75):
+    """Open the ASR WS, retrying on the single-slot release lag.
+
+    The qwen3-asr edgellm backend is serial (max_slots=1) and the session
+    limiter ceiling is therefore 1; a just-closed session's slot can take a
+    beat to release, so back-to-back opens may hit a closed handshake or a
+    429. Retry with backoff instead of recording a spurious gap.
+    """
+    last = None
+    for i in range(attempts):
+        try:
+            return websocket.create_connection(url, timeout=30)
+        except Exception as exc:  # noqa: BLE001 (handshake 429 / closed)
+            last = exc
+            time.sleep(backoff_s * (i + 1))
+    raise last  # type: ignore[misc]
+
+
+def _stream_once(url: str, audio_i16, chunk_n: int) -> tuple[dict | None, int]:
+    """One WS session: stream audio, send EOS, return (final_msg, n_msgs).
+
+    The serial qwen3-asr backend may accept the WS handshake yet immediately
+    raise ``session_already_active`` while the prior session releases — that
+    surfaces as a mid-stream close, leaving ``final`` None. The caller retries.
+    """
+    ws = _open_ws(url)
     ws.settimeout(0.001)
     n_msgs = 0
-    for start in range(0, len(audio_i16), chunk_n):
-        ws.send_binary(audio_i16[start:start + chunk_n].tobytes())
-        n_msgs += len(_drain(ws, time.perf_counter() + 0.001))
-
-    ws.settimeout(15)
-    eos_at = time.perf_counter()
-    ws.send_binary(b"")
     final = None
-    while True:
-        try:
-            msg = json.loads(ws.recv())
-        except (websocket.WebSocketTimeoutException,
-                websocket.WebSocketConnectionClosedException):
-            break
-        n_msgs += 1
-        if msg.get("is_final"):
-            final = msg
-            break
-    eos_to_final_ms = (time.perf_counter() - eos_at) * 1000
+    eos_to_final_ms = 0.0
+    chunk_dur = chunk_n / 16000.0  # real-time pacing (16 kHz mono corpus)
+    try:
+        for start in range(0, len(audio_i16), chunk_n):
+            ws.send_binary(audio_i16[start:start + chunk_n].tobytes())
+            # Pace in real time like bench/perf/client.py:179 — the serial
+            # qwen3-asr worker decodes streaming in real time; a tight send
+            # loop overruns it and yields truncated transcripts.
+            n_msgs += len(_drain(ws, time.perf_counter() + chunk_dur))
+
+        ws.settimeout(15)
+        eos_at = time.perf_counter()
+        ws.send_binary(b"")
+        while True:
+            try:
+                msg = json.loads(ws.recv())
+            except (websocket.WebSocketTimeoutException,
+                    websocket.WebSocketConnectionClosedException):
+                break
+            n_msgs += 1
+            if msg.get("is_final"):
+                final = msg
+                break
+        eos_to_final_ms = (time.perf_counter() - eos_at) * 1000
+    except websocket.WebSocketConnectionClosedException:
+        # Backend closed mid-stream (session_already_active) → signal retry.
+        final = None
     try:
         ws.close()
     except Exception:
         pass
+    if final is not None:
+        final = dict(final)
+        final["_eos_to_final_ms"] = eos_to_final_ms
+    return final, n_msgs
+
+
+def run_one(url: str, wav_path: Path, ref: str, lang: str, chunk_ms: int) -> dict:
+    audio_i16, sr = load_wav_i16(wav_path)
+    chunk_n = max(1, int(sr * chunk_ms / 1000))
+    final = None
+    n_msgs = 0
+    # Retry the whole session on session_already_active (serial backend slot
+    # release lag): a partial/no final means the slot wasn't free yet.
+    for attempt in range(6):
+        final, n_msgs = _stream_once(url, audio_i16, chunk_n)
+        if final is not None:
+            break
+        time.sleep(1.5 * (attempt + 1))  # back off for the slot to release
+    eos_to_final_ms = (final or {}).get("_eos_to_final_ms", 0.0)
 
     text = (final or {}).get("text", "")
     return {
@@ -106,6 +156,10 @@ def capture(base_host: str, corpus: Path, chunk_ms: int = 250) -> dict:
         print(f"[asr] {item['id']:<12} cer={row['char_error_rate']:.3f} "
               f"eos2final={row['eos_to_final_ms']:.0f}ms text={row['text'][:30]!r}",
               flush=True)
+        # Let the single ASR slot fully release before the next session opens.
+        # The serial qwen3-asr worker holds its session through full decode +
+        # teardown; a short settle isn't enough for longer clips.
+        time.sleep(3.0)
     return {
         "dimension": "asr_streaming",
         "endpoint": "/asr/stream (ws)",

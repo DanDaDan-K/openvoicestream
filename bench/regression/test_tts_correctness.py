@@ -42,9 +42,20 @@ def _tts_synthesize(base_url: str, text: str, language: str | None,
         body["language"] = language
     if extra:
         body.update(extra)
-    r = requests.post(f"{base_url}/tts", json=body, timeout=120)
-    r.raise_for_status()
-    return r.content  # WAV bytes
+    # Retry on the single-slot release lag (429): a just-closed roundtrip ASR
+    # WS can briefly hold the session ceiling on the serial edgellm profile.
+    import time as _time
+    last = None
+    for i in range(8):
+        r = requests.post(f"{base_url}/tts", json=body, timeout=120)
+        if r.status_code == 429:
+            last = r
+            _time.sleep(0.75 * (i + 1))
+            continue
+        r.raise_for_status()
+        return r.content  # WAV bytes
+    last.raise_for_status()  # type: ignore[union-attr]
+    return b""
 
 
 def _asr_roundtrip(base_url: str, wav_bytes: bytes) -> str:
@@ -108,6 +119,7 @@ def _asr_roundtrip_ws(base_url: str, wav_bytes: bytes) -> str:
         ws.close()
     except Exception:
         pass
+    _time.sleep(0.5)  # let the serial ASR slot release before next /tts
     return text
 
 
