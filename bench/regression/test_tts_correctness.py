@@ -48,7 +48,16 @@ def _tts_synthesize(base_url: str, text: str, language: str | None,
 
 
 def _asr_roundtrip(base_url: str, wav_bytes: bytes) -> str:
-    """Round-trip synthesized WAV through /asr; tolerate the offline-path 500."""
+    """Round-trip synthesized WAV back to text.
+
+    Prefers the streaming ``/asr/stream`` WS (the offline ``POST /asr`` path is
+    broken in :prod-unified-v8 — ``result.meta`` is None → 500). Falls back to
+    ``POST /asr`` only if the WS path is unavailable.
+    """
+    try:
+        return _asr_roundtrip_ws(base_url, wav_bytes)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         r = requests.post(
             f"{base_url}/asr",
@@ -60,6 +69,46 @@ def _asr_roundtrip(base_url: str, wav_bytes: bytes) -> str:
         return f"<asr_http_{r.status_code}>"
     except Exception as exc:  # noqa: BLE001
         return f"<asr_error:{exc!r}>"
+
+
+def _asr_roundtrip_ws(base_url: str, wav_bytes: bytes) -> str:
+    """Feed synthesized WAV through the streaming ASR WebSocket; return final text."""
+    import json as _json
+    import time as _time
+
+    import websocket
+
+    from _common import wav_to_pcm_s16
+
+    host = base_url.split("://", 1)[-1]
+    pcm, sr, ch = wav_to_pcm_s16(wav_bytes)
+    if ch > 1:
+        import numpy as np
+        a = np.frombuffer(pcm, dtype="<i2").reshape(-1, ch).mean(axis=1).astype("<i2")
+        pcm = a.tobytes()
+    url = f"ws://{host}/asr/stream?language=auto&sample_rate={sr}"
+    ws = websocket.create_connection(url, timeout=30)
+    chunk_n = int(sr * 0.25) * 2  # 250ms of int16
+    for i in range(0, len(pcm), chunk_n):
+        ws.send_binary(pcm[i:i + chunk_n])
+    ws.settimeout(15)
+    ws.send_binary(b"")
+    text = ""
+    while True:
+        try:
+            msg = _json.loads(ws.recv())
+        except (websocket.WebSocketTimeoutException,
+                websocket.WebSocketConnectionClosedException):
+            break
+        if msg.get("text"):
+            text = msg["text"]
+        if msg.get("is_final"):
+            break
+    try:
+        ws.close()
+    except Exception:
+        pass
+    return text
 
 
 def probe_backend(base_url: str) -> dict:

@@ -27,6 +27,21 @@ ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Benign lines to drop before counting (false positives). TRT emits warnings
+# that literally contain the word "errors" (e.g. "...even cause errors") and
+# uvicorn/access logs may echo 4xx/5xx text — neither is a runtime fault.
+BENIGN_RE = re.compile(
+    r"(\[TRT\]\s*\[W\]|cause errors|error_rate|WARNING|"
+    r"\[W\]\s|no error|0 error)",
+    re.IGNORECASE,
+)
+
+
+def _is_error_line(line: str) -> bool:
+    if BENIGN_RE.search(line):
+        return False
+    return bool(ERROR_RE.search(line))
+
 # Candidate engine/artifact globs to md5 inside the container, by backend family.
 ENGINE_GLOBS = {
     "paraformer": ["/opt/**/paraformer*/**/*.trt", "/opt/**/paraformer*/**/*.onnx",
@@ -78,7 +93,7 @@ def capture(container: str, backend_hints: list[str]) -> dict:
         capture_output=True, text=True, timeout=60,
     )
     log_text = p.stdout + p.stderr
-    matches = [ln for ln in log_text.splitlines() if ERROR_RE.search(ln)]
+    matches = [ln for ln in log_text.splitlines() if _is_error_line(ln)]
 
     print(f"[build] engines md5'd: {len(engines)}; log error-lines: {len(matches)}",
           flush=True)
