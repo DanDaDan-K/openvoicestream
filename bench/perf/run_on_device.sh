@@ -4,7 +4,7 @@
 # the compute-bound "device intrinsic" numbers.
 #
 # Usage:
-#   bench/perf/run_on_device.sh <fleet-node>  [-- perf.py args...]
+#   bench/perf/run_on_device.sh [--no-highperf] <fleet-node>  [-- perf.py args...]
 #
 # Examples:
 #   bench/perf/run_on_device.sh orin-nano -- asr --warmup 2 --runs 10
@@ -13,8 +13,14 @@
 
 set -euo pipefail
 
+HIGHPERF=1
+if [[ "${1:-}" == "--no-highperf" ]]; then
+  HIGHPERF=0
+  shift
+fi
+
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <fleet-node> [-- perf.py args...]" >&2
+  echo "Usage: $0 [--no-highperf] <fleet-node> [-- perf.py args...]" >&2
   echo "Example: $0 orin-nano -- asr --warmup 2 --runs 10" >&2
   exit 2
 fi
@@ -46,6 +52,12 @@ echo ">> Staging perf harness without historical results..."
 
 echo ">> Pushing staged harness -> $NODE:$REMOTE_DIR/"
 fleet push "$NODE" "$STAGE_DIR"/  "$REMOTE_DIR"/
+
+if [[ "$HIGHPERF" == "1" ]]; then
+  echo ">> Enabling RK high-performance mode if this is an RK3576/RK3588 target..."
+  fleet exec --sudo "$NODE" -- "sh $REMOTE_DIR/rk_set_highperf.sh" || \
+    echo ">> High-performance mode helper skipped or unsupported on this target"
+fi
 
 echo ">> Verifying corpus on device (fetch from HF if missing)..."
 fleet exec "$NODE" -- "
