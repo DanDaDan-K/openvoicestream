@@ -1534,9 +1534,9 @@ ASR_MAX_NEW_TOKENS=128
 ```
 
 `_commit_final_text()` also strips short prompt-leak suffixes such as
-`转录。` / `Transcribe:`.  This is needed once punctuation stop is disabled;
-otherwise weak EOS can leak the next prompt token after an otherwise complete
-transcript.
+`转录。`, `Transcribe:`, and `Transkribieren`.  This is needed once punctuation
+stop is disabled; otherwise weak EOS can leak the next prompt token after an
+otherwise complete transcript.
 
 RK3588 W8A8 full validation under highperf:
 
@@ -1566,6 +1566,41 @@ ko         1     5.66%       5.66%            0.3 ms
 de         1     0.00%       0.00%          386.8 ms
 fr         1    20.00%       3.41%            0.7 ms
 ```
+
+RK3576 W8A8 validation on `cat-remote` under highperf used the same dictation
+profile and the RK3576 opt0 W8A8 artifact:
+
+```text
+set/profile                         n   mean error   char error   mean eos->final   median eos->final
+fixed dictation zh/en long         10     9.80%       8.37%          735.0 ms           336.9 ms
+fixed dictation multi long          5    10.93%       5.12%          753.5 ms           375.9 ms
+```
+
+Breakdown for RK3576 fixed `manifest.json` long set:
+
+```text
+language   n   mean error   char error   mean eos->final   notes
+zh         5     9.96%       9.96%          153.2 ms        raw metric over-penalizes number format (十五 vs 15)
+en         5     9.64%       6.78%         1316.8 ms        remaining errors concentrated in en_long_02/en_long_05
+```
+
+Breakdown for RK3576 fixed multilingual long set after the German prompt-leak
+suffix patch:
+
+```text
+language   n   mean error   char error   mean eos->final
+ja         1    10.64%      10.64%         2899.1 ms
+es         1    13.33%       3.60%          375.9 ms
+ko         1     5.66%       5.66%            0.8 ms
+de         1     0.00%       0.00%          491.1 ms
+fr         1    25.00%       5.68%            0.5 ms
+```
+
+Raw cat-remote validation logs are archived locally under
+`bench/perf/results/_from_cat-remote/qwen3-long-dictation-fixed-20260609/`.
+The final multilingual log is `rk3576_w8a8_multilingual_long_all_fixed_v2.log`;
+the first multilingual rerun is intentionally not used as the final result
+because it exposed the fixed `Transkribieren` suffix leak.
 
 Remaining quality boundary:
 
