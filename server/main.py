@@ -731,6 +731,55 @@ def _default_vad_silence_ms() -> int:
         return 400
     return max(0, value)
 
+
+def _flag_or(value, env_default: bool) -> bool:
+    """Resolve an optional per-connection flag against an env default.
+
+    Mirrors the ?vad= convention: a value (when present) overrides the env
+    default; absent (None) → use the env default. Accepts a ``?flag=`` query
+    string (/asr/stream) or a JSON bool/value from the v2v ``config`` frame.
+    """
+    if value is None:
+        return env_default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+async def _augment_final_payload(payload, raw_text, seg, punct_on, spk_on, sample_rate):
+    """Apply optional punctuation + speaker embedding to a *final* payload.
+
+    Mutates ``payload`` in place: rewrites ``payload['text']`` with restored
+    punctuation, and adds {speaker_embedding, embedding_model, dim, normalized}
+    from the utterance audio in ``seg`` (a list of float32 numpy chunks). A
+    no-op (zero cost, behavior identical to before) when both flags are off.
+    Runs the CPU models in the default executor so the event loop and the ASR
+    decode executor are not blocked. Never raises to the caller.
+    """
+    if not punct_on and not spk_on:
+        return
+    loop = asyncio.get_event_loop()
+    if punct_on and raw_text:
+        try:
+            from server.core import punctuation as _punct
+            payload["text"] = await loop.run_in_executor(
+                None, _punct.add_punctuation, raw_text
+            )
+        except Exception:
+            logger.exception("punctuation on final failed; keeping raw text")
+    if spk_on and seg:
+        try:
+            import numpy as _np
+            from server.core import speaker_embedding as _spk
+            samples = _np.concatenate(seg) if len(seg) > 1 else seg[0]
+            emb = await loop.run_in_executor(
+                None, _spk.compute_embedding, samples, sample_rate
+            )
+            if emb is not None:
+                payload.update(_spk.embedding_payload(emb))
+        except Exception:
+            logger.exception("speaker embedding on final failed; skipping")
+
 @app.on_event("shutdown")
 async def shutdown_watchdog():
     """Cancel the GPU watchdog background task on app shutdown.
@@ -2365,6 +2414,8 @@ async def asr_stream(
     sample_rate: int = 16000,
     vad: Optional[str] = None,           # default from OVS_VAD_BACKEND
     vad_silence_ms: Optional[int] = None,
+    punctuate: Optional[str] = None,          # default from OVS_PUNCT
+    speaker_embedding: Optional[str] = None,  # default from OVS_SPEAKER_EMB
 ):
     """Streaming ASR via WebSocket.
 
@@ -2376,6 +2427,12 @@ async def asr_stream(
     send the empty b"" frame in open-mic dialogue mode. ``vad_silence_ms``
     controls the silence threshold (default 400 ms). Pass ?vad=none for
     legacy forced-EOS-only behavior.
+
+    Optional, default-off enrichments applied to the *final* payload only:
+    ``?punctuate=true`` inlines punctuation into final.text; ``?speaker_embedding=true``
+    adds {speaker_embedding, embedding_model, dim, normalized}. Both default to
+    their OVS_PUNCT / OVS_SPEAKER_EMB env values; the query overrides per
+    connection (same convention as ?vad=).
 
     Requires an ASR backend with STREAMING capability.
     """
@@ -2422,6 +2479,12 @@ async def asr_stream(
     vad_backend = vad if vad is not None else _default_vad_backend()
     vad_silence = _default_vad_silence_ms() if vad_silence_ms is None else max(0, int(vad_silence_ms))
 
+    # Optional final-payload enrichments: query overrides env default (off).
+    from server.core import punctuation as _punct_mod
+    from server.core import speaker_embedding as _spk_mod
+    punct_on = _flag_or(punctuate, _punct_mod.punctuation_enabled())
+    spk_on = _flag_or(speaker_embedding, _spk_mod.speaker_embedding_enabled())
+
     # Choose backend: prefer ASR backend with STREAMING, fall back to sherpa
     asr_be = _get_asr_backend()
     use_backend_stream = (
@@ -2462,7 +2525,10 @@ async def asr_stream(
         if use_backend_stream:
             from server.core.coordinator import get_coordinator
             async with get_coordinator().acquire("asr"):
-                await _asr_stream_backend(ws, asr_be, language, sample_rate, vad_session)
+                await _asr_stream_backend(
+                    ws, asr_be, language, sample_rate, vad_session,
+                    punct_on=punct_on, spk_on=spk_on,
+                )
         else:
             await ws.send_json({"error": "no streaming ASR available"})
             await ws.close()
@@ -2494,12 +2560,18 @@ async def _asr_stream_backend(
     language: str,
     sample_rate: int,
     vad_session=None,
+    punct_on: bool = False,
+    spk_on: bool = False,
 ):
     """Streaming ASR using ASR backend (accumulate-then-transcribe).
 
     Supports a ``reset`` control command: the client may send a JSON text
     message ``{"command": "reset"}`` at any time.  This discards the
     current stream and creates a fresh one without closing the WebSocket.
+
+    When ``spk_on`` is set, raw utterance audio is buffered ("one utterance,
+    cleared on each finalize") so a speaker embedding can be computed per final.
+    The buffer is NOT touched when ``spk_on`` is False (zero overhead).
     """
     import asyncio
     import json as _json
@@ -2507,6 +2579,10 @@ async def _asr_stream_backend(
 
     stream = asr_be.create_stream(language=language)
     logger.info("ASR stream opened (backend=%s)", asr_be.name)
+
+    # Per-utterance audio buffer for speaker embedding. Only populated when
+    # spk_on; cleared after every finalize / reset (see _augment_final_payload).
+    _seg: list = []
 
     # Close-frame override: set to 4429 on slot-pool saturation so the finally
     # block closes with a reject-not-queue code instead of the default 1000.
@@ -2533,6 +2609,7 @@ async def _asr_stream_backend(
                     except Exception:
                         logger.exception("ASR reset: old stream close raised")
                     stream = asr_be.create_stream(language=language)
+                    _seg.clear()
                     await ws.send_json({
                         "type": "reset",
                         "text": "",
@@ -2559,6 +2636,8 @@ async def _asr_stream_backend(
                     }
                     if detected_language:
                         payload["language"] = detected_language
+                    await _augment_final_payload(payload, final_text, _seg, punct_on, spk_on, sample_rate)
+                    _seg.clear()
                     await ws.send_json(payload)
                     logger.debug("ASR utterance endpoint forced (backend=%s)", asr_be.name)
                 continue
@@ -2583,11 +2662,15 @@ async def _asr_stream_backend(
                 }
                 if detected_language:
                     payload["language"] = detected_language
+                await _augment_final_payload(payload, final_text, _seg, punct_on, spk_on, sample_rate)
+                _seg.clear()
                 await ws.send_json(payload)
                 break
 
             # Buffer audio (run in thread to avoid blocking event loop)
             samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+            if spk_on:
+                _seg.append(samples)
             _loop = asyncio.get_event_loop()
             await _loop.run_in_executor(_get_asr_executor(), stream.accept_waveform, sample_rate, samples)
 
@@ -2612,6 +2695,7 @@ async def _asr_stream_backend(
                         }
                         if detected_language:
                             payload["language"] = detected_language
+                        await _augment_final_payload(payload, final_text, _seg, punct_on, spk_on, sample_rate)
                         await ws.send_json(payload)
                     except Exception:
                         # Client gone during a slow finalize (e.g. TRT-EdgeLLM
@@ -2630,6 +2714,7 @@ async def _asr_stream_backend(
                     except Exception:
                         logger.exception("ASR VAD endpoint: stream close raised")
                     stream = asr_be.create_stream(language=language)
+                    _seg.clear()
                     try:
                         vad_session.reset()
                     except Exception:
@@ -2640,12 +2725,15 @@ async def _asr_stream_backend(
             partial_text, is_endpoint = stream.get_partial()
             if partial_text:
                 if is_endpoint:
-                    await ws.send_json({
+                    payload = {
                         "type": "final",
                         "text": partial_text,
                         "is_final": True,
                         "is_stable": True,
-                    })
+                    }
+                    await _augment_final_payload(payload, partial_text, _seg, punct_on, spk_on, sample_rate)
+                    _seg.clear()
+                    await ws.send_json(payload)
                 else:
                     await ws.send_json({
                         "type": "partial",
@@ -3143,6 +3231,8 @@ async def v2v_stream(ws: WebSocket):
         # the exception escapes the slot-acquired region without releasing the
         # session token / decrementing the active-WS gauge / unregistering from
         # BackendManagers.
+        punct_on = False
+        spk_on = False
         try:
             asr_language    = cfg.get("asr_language")  # e.g. "zh" / "Chinese" / "en" / "auto" / None
             tts_language    = cfg.get("tts_language")  # truthy = enable TTS; "auto" = let backend detect
@@ -3178,6 +3268,11 @@ async def v2v_stream(ws: WebSocket):
             vad_backend     = cfg.get("vad", _default_vad_backend() if asr_language else "none")
             vad_silence_ms  = int(cfg.get("vad_silence_ms", _default_vad_silence_ms()))
             multi_utterance = bool(cfg.get("multi_utterance", False))
+            # Optional, default-off final-payload enrichments (config overrides env).
+            from server.core import punctuation as _punct_mod
+            from server.core import speaker_embedding as _spk_mod
+            punct_on = _flag_or(cfg.get("punctuate"), _punct_mod.punctuation_enabled())
+            spk_on   = _flag_or(cfg.get("speaker_embedding"), _spk_mod.speaker_embedding_enabled())
         except (ValueError, TypeError) as _cfg_exc:
             try:
                 await ws.send_json({"type": v2v_proto.SERVER_ERROR,
@@ -3368,6 +3463,11 @@ async def v2v_stream(ws: WebSocket):
             # and the v2v handler can unwind (releases the SessionLimiter slot,
             # preventing 4429 mute from a stuck Qwen3 inference).
             "asr_turn_started_at": None,
+            # Optional speaker-embedding: per-utterance audio buffer (only
+            # populated when spk_on; cleared after each finalize). sample_rate
+            # captured here so the finalize closure needn't reach for it.
+            "spk_seg": [],
+            "sample_rate": sample_rate,
         }
         tts_q: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_event_loop()
@@ -3636,6 +3736,8 @@ async def v2v_stream(ws: WebSocket):
                             async with coord.acquire("asr"):
                                 await asr_manager.accept_audio(samples)
                             state["asr_audio_samples_accepted"] += int(len(samples))
+                            if spk_on:
+                                state["spk_seg"].append(samples)
                         # Now safe to flag the endpoint — audio chunk that
                         # carried the speech-end has been delivered to the
                         # stream. asr_out_task will pick this up on the next
@@ -3933,6 +4035,36 @@ async def v2v_stream(ws: WebSocket):
                         )
                         continue
 
+                    # Optional, default-off final enrichments. No-op (and no
+                    # buffered audio) unless a flag is on, so the default v2v
+                    # path is byte-identical. Punctuation rewrites final_text
+                    # (also improves downstream LLM input); speaker embedding
+                    # is computed once from the per-utterance audio buffer and
+                    # merged into whichever final_payload is sent below.
+                    _spk_fields: dict = {}
+                    if punct_on and final_text:
+                        try:
+                            from server.core import punctuation as _punct
+                            final_text = await loop.run_in_executor(
+                                None, _punct.add_punctuation, final_text
+                            )
+                        except Exception:
+                            logger.exception("v2v punctuation failed; keeping raw text")
+                    if spk_on and state.get("spk_seg"):
+                        try:
+                            from server.core import speaker_embedding as _spk
+                            _seg = state["spk_seg"]
+                            _seg_all = np.concatenate(_seg) if len(_seg) > 1 else _seg[0]
+                            _emb = await loop.run_in_executor(
+                                None, _spk.compute_embedding, _seg_all,
+                                int(state.get("sample_rate", 16000)),
+                            )
+                            if _emb is not None:
+                                _spk_fields = _spk.embedding_payload(_emb)
+                        except Exception:
+                            logger.exception("v2v speaker embedding failed; skipping")
+                    state["spk_seg"] = []
+
                     # Multi-utterance: mid-session finals carry
                     # session_complete=False; close-out final on
                     # asr_session_closed carries True.
@@ -3948,6 +4080,7 @@ async def v2v_stream(ws: WebSocket):
                             }
                             if detected_language:
                                 final_payload["language"] = detected_language
+                            final_payload.update(_spk_fields)
                             await send_json(final_payload)
                             return
                         else:
@@ -3958,6 +4091,7 @@ async def v2v_stream(ws: WebSocket):
                             }
                             if detected_language:
                                 final_payload["language"] = detected_language
+                            final_payload.update(_spk_fields)
                             await send_json(final_payload)
                             last_streamed_final = final_text or ""
                             # keep the loop running for the next utterance
@@ -3968,6 +4102,7 @@ async def v2v_stream(ws: WebSocket):
                         }
                         if detected_language:
                             final_payload["language"] = detected_language
+                        final_payload.update(_spk_fields)
                         await send_json(final_payload)
                         state["client_closed"] = True
                         return
