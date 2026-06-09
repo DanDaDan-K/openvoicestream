@@ -39,7 +39,7 @@ services:
       # ── ASR ─────────────────────────────────────────────────────────
       - ASR_BACKEND=qwen3_asr_rk
       - ASR_DECODER_TYPE=rkllm
-      - ASR_DECODER_QUANT=fp16
+      - ASR_DECODER_QUANT=w8a8
       - ASR_PLATFORM=rk3588
       - ASR_ENABLED_CPUS=4
       - ASR_NPU_CORE_MASK=NPU_CORE_AUTO

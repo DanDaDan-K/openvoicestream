@@ -52,7 +52,9 @@ Validated image:
 
 Artifact sets:
 
-- `rk3588-multilang-2026-05-17` — Matcha TTS (closed-loop validated).
+- `rk3588-multilang-2026-05-17` — Matcha TTS (closed-loop validated);
+  RK3588 Qwen3 ASR defaults to the W8A8 RKLLM decoder after the 2026-06-09
+  highperf short-set recheck. FP16 remains in the artifact set for rollback.
 - `rk3576-paraformer-hybrid-rknn-decoder-2026-06-09` — Paraformer ASR
   hybrid encoder prefix RKNN + CPU suffix + RKNN decoder, paired with
   `rk3576-paraformer-hybrid-rknn-decoder-matcha`. `/v2v/stream` short-corpus

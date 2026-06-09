@@ -296,6 +296,12 @@
           "sha256": "8dfcb19073de04d5838f78b3135049af06b863e7a46dbb28c0130db5d2a3bb49"
         },
         {
+          "path": "opt/asr/models/decoder/decoder_qwen3.w8a8.rk3588.rkllm",
+          "source_path": "rk3588/opt/asr/models/decoder/decoder_qwen3.w8a8.rk3588.rkllm",
+          "size_bytes": 936052924,
+          "sha256": "ef6bf1946a3074e7828162b0da8d1deda6c4a77d7946df5bdcf4aa5375abe25b"
+        },
+        {
           "path": "opt/tts/models/matcha-s64.rknn",
           "source_path": "rk3588/opt/tts/models/matcha-s64.rknn",
           "size_bytes": 47700621,
@@ -525,6 +531,12 @@
           "source_path": "rk3588/opt/asr/models/decoder/decoder_qwen3.fp16.rk3588.rkllm",
           "size_bytes": 1529742060,
           "sha256": "8dfcb19073de04d5838f78b3135049af06b863e7a46dbb28c0130db5d2a3bb49"
+        },
+        {
+          "path": "opt/asr/models/decoder/decoder_qwen3.w8a8.rk3588.rkllm",
+          "source_path": "rk3588/opt/asr/models/decoder/decoder_qwen3.w8a8.rk3588.rkllm",
+          "size_bytes": 936052924,
+          "sha256": "ef6bf1946a3074e7828162b0da8d1deda6c4a77d7946df5bdcf4aa5375abe25b"
         }
       ]
     },
@@ -647,6 +659,12 @@
           "source_path": "rk3588/opt/asr/models/decoder/decoder_qwen3.fp16.rk3588.rkllm",
           "size_bytes": 1529742060,
           "sha256": "8dfcb19073de04d5838f78b3135049af06b863e7a46dbb28c0130db5d2a3bb49"
+        },
+        {
+          "path": "opt/asr/models/decoder/decoder_qwen3.w8a8.rk3588.rkllm",
+          "source_path": "rk3588/opt/asr/models/decoder/decoder_qwen3.w8a8.rk3588.rkllm",
+          "size_bytes": 936052924,
+          "sha256": "ef6bf1946a3074e7828162b0da8d1deda6c4a77d7946df5bdcf4aa5375abe25b"
         }
       ]
     }

@@ -20,7 +20,7 @@
           "sha256": "REPLACE_WITH_SHA256"
         },
         {
-          "path": "opt/asr/models/decoder/decoder_qwen3.fp16.rk3588.rkllm",
+          "path": "opt/asr/models/decoder/decoder_qwen3.w8a8.rk3588.rkllm",
           "sha256": "REPLACE_WITH_SHA256"
         },
         {
