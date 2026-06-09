@@ -849,6 +849,30 @@ async def startup():
             _executor = _get_asr_executor()
 
             def _warm_asr():
+                warm_target = _asr_backend
+                backend_warmup = getattr(warm_target, "warmup", None)
+                if not callable(backend_warmup):
+                    # Voxedge RK adapters wrap the concrete rkvoice-stream
+                    # backend.  After preload(), the inner backend is live and
+                    # may expose a real RKNN/RKLLM inference warmup hook.
+                    inner = getattr(_asr_backend, "_inner", None)
+                    inner_warmup = getattr(inner, "warmup", None)
+                    if callable(inner_warmup):
+                        warm_target = inner
+                        backend_warmup = inner_warmup
+
+                if callable(backend_warmup):
+                    try:
+                        backend_warmup()
+                        logger.info(
+                            "ASR backend warmup completed (%s via %s).",
+                            type(warm_target).__name__,
+                            type(_asr_backend).__name__,
+                        )
+                    except Exception as exc:
+                        logger.warning("ASR backend warm-up failed: %s", exc)
+                    return
+
                 # Some backends (e.g. SherpaASRBackend) don't expose a
                 # transcribe_audio convenience method; their warmup is
                 # implicit in preload(). Skip silently to avoid log noise.
