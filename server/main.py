@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
@@ -942,6 +943,25 @@ async def startup():
             logger.info("TTS streaming executor warmed up (1 thread, CUDA primed).")
       except Exception as exc:  # pragma: no cover
         logger.warning("TTS streaming executor warm-up skipped: %s", exc)
+
+    # ── Optional capabilities (punctuation / speaker embedding) ─────────
+    # Opt-in, default-OFF. Eager-load ONLY when enabled so the first request
+    # doesn't pay download + init latency; when disabled these are never
+    # imported beyond the cheap env check (zero memory / behavior change).
+    try:
+        from server.core import punctuation as _punct
+        if _punct.punctuation_enabled():
+            logger.info("Punctuation enabled (OVS_PUNCT); pre-loading model...")
+            await asyncio.get_event_loop().run_in_executor(None, _punct.preload)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Punctuation preload skipped: %s", exc)
+    try:
+        from server.core import speaker_embedding as _spk
+        if _spk.speaker_embedding_enabled():
+            logger.info("Speaker embedding enabled (OVS_SPEAKER_EMB); pre-loading model...")
+            await asyncio.get_event_loop().run_in_executor(None, _spk.preload)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Speaker embedding preload skipped: %s", exc)
 
     # Register backend getters with the coordinator so 'exclusive' policy can
     # call unload() on the dormant slot. Lambdas resolve lazily so they cope
@@ -2276,6 +2296,66 @@ async def _asr_impl(file: UploadFile, language: str):
             status_code=503,
             content={"error": "ASR backend not available"},
         )
+
+
+# ── Punctuation (optional, opt-in, stateless) ───────────────────────
+
+class PunctuateRequest(BaseModel):
+    text: str
+
+
+@app.post("/punctuate")
+async def punctuate(req: PunctuateRequest, _: None = Depends(_require_api_key)):
+    """Restore punctuation on a text string (CT-Transformer).
+
+    Offline counterpart to the ``?punctuate=true`` streaming flag. Stateless,
+    pure text-in / text-out. Returns the original text unchanged if the model
+    is unavailable.
+    """
+    from server.core import punctuation as _punct
+    text = await asyncio.get_running_loop().run_in_executor(
+        None, _punct.add_punctuation, req.text
+    )
+    return {"text": text, "model": _punct.PUNCT_MODEL_NAME}
+
+
+# ── Speaker embedding (optional, opt-in, stateless) ─────────────────
+
+@app.post("/speaker/embedding")
+async def speaker_embedding(
+    file: UploadFile = File(...),
+    sample_rate: int = Query(16000),
+    _: None = Depends(_require_api_key),
+):
+    """Extract a speaker-embedding vector (CAM++) from an audio blob.
+
+    Accepts a PCM16 WAV or raw int16 PCM (``?sample_rate=`` for the latter).
+    Returns ``{embedding_b64, embedding_model, dim, normalized}``. OVS only
+    emits the vector — matching / identity is the consumer's job. Returns 503
+    if the model is unavailable.
+    """
+    from server.core import speaker_embedding as _spk
+    from server.core.session_limiter import acquire_http
+
+    audio_bytes = await file.read()
+    async with acquire_http("/speaker/embedding"):
+        loop = asyncio.get_running_loop()
+
+        def _run():
+            samples = _spk.decode_audio_to_16k_mono(audio_bytes, fallback_sr=sample_rate)
+            return _spk.compute_embedding(samples, 16000)
+
+        emb = await loop.run_in_executor(None, _run)
+    if emb is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "speaker embedding unavailable (model not loaded or audio too short)"},
+        )
+    payload = _spk.embedding_payload(emb)
+    # Endpoint contract uses embedding_b64; the streaming final uses
+    # speaker_embedding for the same value (see stream handlers).
+    payload["embedding_b64"] = payload.pop("speaker_embedding")
+    return payload
 
 
 @app.websocket("/asr/stream")
