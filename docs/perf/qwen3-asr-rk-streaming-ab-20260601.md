@@ -361,6 +361,56 @@ uv run python bench/perf/compare_v2v_stream_results.py --gate \
    language-aware decoder profiles or a larger mixed-language gate before
    changing the RK3576 default.
 
+   Follow-up low-risk latency A/B then tested the two remaining cheap knobs
+   against the same RK3576 W8A8 dialogue profile:
+
+   - `QWEN3_ASR_TRUE_ROLL_SEC=4.0` instead of 5.0
+   - more aggressive punctuation stop:
+     `ASR_FINAL_STOP_MIN_CHARS=6`, `ASR_FINAL_STOP_MIN_CHUNKS=1`
+
+   Both were rejected. They did not improve quality, tail coverage, or
+   end-of-utterance latency:
+
+   | RK3576 W8A8 profile | short/zh mean total | short/zh CER | short/en mean total | short/en WER | Tail truncation | Decision |
+   | --- | ---: | ---: | ---: | ---: | ---: | --- |
+   | baseline, roll 5.0, stop 8/2 | 1614 ms | 5.1% | 1066 ms | 17.6% | 0.0% | keep |
+   | roll 4.0 | 1754 ms | 5.1% | 1091 ms | 17.6% | 0.0% | reject |
+   | stop 6/1 | 1816 ms | 5.1% | 1155 ms | 17.6% | 0.0% | reject |
+
+   The per-row signal is consistent with the decoder-timing diagnosis above:
+   shrinking the rolling window from 5s to 4s does not remove the expensive
+   final generation path on the long rows, and aggressive punctuation stop does
+   not trigger early enough to reduce generated chunks on the useful rows.
+   These knobs should stay available for future model variants, but they are
+   not RK3576 defaults for the current Qwen3 ASR artifact.
+
+   The perf harness also gained `--asr-language {corpus,auto,Chinese,English}`.
+   `corpus` remains the benchmark default so each fixture uses its manifest
+   language hint; `auto` validates the backend's automatic language path. A
+   two-row smoke on RK3576 W8A8 showed that decoder-side auto language works,
+   but it is not a latency optimization for dialogue close-out:
+
+   | RK3576 W8A8 language mode | Rows | Mean total | Error | Notes |
+   | --- | --- | ---: | ---: | --- |
+   | corpus/forced Chinese | `zh_short_01..02` | ~1883 ms | 10.0% CER | from 5-row baseline rows |
+   | auto | `zh_short_01..02` | 2159 ms | 10.0% CER | slower, same output quality |
+   | corpus/forced English | `en_short_01..02` | ~294 ms | 15.0% WER | from 5-row baseline rows |
+   | auto | `en_short_01..02` | 420 ms | 10.0% WER | accuracy ok, slower close-out |
+
+   Raw auto-language result files pulled from `cat-remote`:
+   `_from_cat-remote/_run_20260602-225205/v2v_stream_local_20260602-225205-592686-p251164-8ce056f7.json`
+   (Chinese) and
+   `_from_cat-remote/_run_20260602-225237/v2v_stream_local_20260602-225237-374022-p254562-51132e3c.json`
+   (English).
+
+   Product implication: if the target is lower stop-speech-to-response
+   latency, do not make RKLLM final decode perform language auto-detection on
+   every finalization. Detect or infer language earlier in the stream, cache
+   it for the turn, then call final decode with a forced language and
+   language-specific decoder profile. For the currently measured RK3576
+   artifacts, that means W8A8 is the stronger Chinese profile and recalibrated
+   W4A16_G128 is the stronger English profile.
+
    Historical note: an earlier punctuation-stop policy was tested as an opt-in
    decoder setting:
    `ASR_FINAL_STOP_ON_PUNCT=1`, with `ASR_FINAL_STOP_MIN_CHARS=8` and
@@ -798,18 +848,62 @@ uv run python bench/perf/compare_v2v_stream_results.py --gate \
    harming coverage, and add a model-aware endpoint/coverage signal so backend
    VAD can finish earlier only when the decoded utterance is complete.
 
-2. RK3588 W8A8 is a valid Chinese latency option, but not a multilingual default.
+2. RK3588 W8A8 was initially only a Chinese latency option; it was promoted to
+   the RK3588 Qwen3 default after the 2026-06-09 highperf recheck.
 
    W8A8 reduced Chinese total latency from 898 ms to 575 ms with the same mean
-   CER on this corpus. English WER worsened from 16.1% to 21.2%, so FP16 remains
-   the default for bilingual dialogue. This has been codified as an explicit
-   opt-in profile, `rk3588-zh-lowlatency`, which sets
-   `ASR_DECODER_QUANT=w8a8` while leaving `rk3588-default` and
-   `rk3588-multilang` on FP16. The opt-in profile also sets
+   CER on this corpus. The original 2026-06-01 gate showed English WER worsening
+   from 16.1% to 21.2%, so W8A8 was first codified as an explicit opt-in
+   profile, `rk3588-zh-lowlatency`, while `rk3588-default` and
+   `rk3588-multilang` stayed on FP16. The 2026-06-09 highperf short-set recheck
+   did not reproduce that English regression, so `rk3588-default`,
+   `rk3588-multilang`, and the Kokoro RK3588 profiles now set
+   `ASR_DECODER_QUANT=w8a8`. FP16 remains downloaded as a rollback artifact.
+   The low-latency profile also sets
    `QWEN3_ASR_TRUE_ROLL_SEC=5` to align with the true-streaming rolling-buffer
    design and reduce decoder prefill work for dialogue turns; default RK
    profiles explicitly keep `QWEN3_ASR_TRUE_ROLL_SEC=15` for behavior
    continuity until a long-utterance A/B says otherwise.
+
+   Follow-up mixed-dialogue recalibration on 2026-06-03 exported
+   `decoder_qwen3_recalib_mixed.w8a8.rk3588.rkllm` from the same prepared
+   decoder using the 60-row dialogue ASR calibration set. The artifact was
+   tested on `radxa` with a non-production container on port 8622; the existing
+   `openvoicestream-kokoro` service on 8621 was left running and healthy.
+   Runtime hash checks confirmed the A/B used different decoder artifacts:
+
+   - original W8A8:
+     `ef6bf1946a3074e7828162b0da8d1deda6c4a77d7946df5bdcf4aa5375abe25b`
+   - mixed recalib W8A8:
+     `d596e712be94ff08ee711a3364ecc9fd801e4c82f4545b6f9a183de3529eed11`
+
+   Same-image `/v2v/stream --eos client --chunk-ms 250 --realtime` short-set
+   gate, `warmup=0`, `runs=5`:
+
+   | RK3588 W8A8 decoder | short/zh mean total | short/zh CER | short/en mean total | short/en WER | Tail truncation | Decision |
+   | --- | ---: | ---: | ---: | ---: | ---: | --- |
+   | original W8A8 | 622 ms | 5.1% | 257 ms | 15.6% | 0.0% | keep for Chinese |
+   | mixed-dialogue recalib W8A8 | 672 ms | 7.4% | 230 ms | 13.4% | 0.0% | English candidate only |
+
+   Raw result files:
+   `v2v_stream_local_20260602-233217-474242-p2681267-23775f31.json`
+   (original zh),
+   `v2v_stream_local_20260602-233301-718224-p2681789-91156c7e.json`
+   (original en),
+   `v2v_stream_local_20260602-233436-877671-p2682666-730a6ec0.json`
+   (recalib zh), and
+   `v2v_stream_local_20260602-233028-835301-p2680238-707b6b06.json`
+   (recalib en).
+
+   This validates the calibration hypothesis only for English: mixed-dialogue
+   recalib improved English quality and slightly reduced English total latency.
+   It regressed Chinese quality and latency, mainly on `zh_short_05` where the
+   recalibrated decoder inserted quoted punctuation and scored `11.8%` CER
+   while the original W8A8 matched the evaluation transcript. Do not replace
+   the RK3588 Chinese low-latency profile with this artifact. The next useful
+   artifact split is language-specific: keep original W8A8 for Chinese and
+   either test the mixed recalib artifact as an English W8A8 profile or build a
+   dedicated English-heavy W8A8 recalib set.
 
    Follow-up fix on 2026-06-02: true-streaming runtime knobs are now read when
    each `Qwen3TrueStreamingASRStream` instance is created, not when
@@ -939,9 +1033,8 @@ uv run python bench/perf/compare_v2v_stream_results.py --gate \
    active backend endpoint stream, and opt-in async final. Defaults must stay
    compatible with Jetson TRT-EdgeLLM and non-RK backends.
 
-4. Keep RK3588 default on FP16 for multilingual mode. Add a Chinese-low-latency
-   profile that sets `ASR_DECODER_QUANT=w8a8` only if the product accepts the
-   English regression.
+4. Historical note: RK3588 previously kept FP16 as multilingual default and
+   exposed W8A8 through a Chinese-low-latency profile only.
 
    Implemented profile:
 
@@ -950,14 +1043,13 @@ uv run python bench/perf/compare_v2v_stream_results.py --gate \
    docker compose -f deploy/docker-compose.radxa.yml up -d
    ```
 
-   Before using it on a fresh device, confirm
+   Before using any W8A8 RK3588 profile on a fresh device, confirm
    `decoder_qwen3.w8a8.rk3588.rkllm` exists under `/opt/asr/models/decoder/`
    or `/opt/asr/models/rkllm/`, and confirm startup logs show the W8A8 artifact
-   and `model_dtype`. `deploy/docker-compose.radxa.yml` intentionally leaves
-   `ASR_DECODER_QUANT` and `QWEN3_ASR_TRUE_ROLL_SEC` empty by default so the
-   selected profile owns decoder quant and streaming rolling-buffer length. If
-   an operator sets a conflicting `ASR_DECODER_QUANT` in the shell or `.env`,
-   startup now fails loudly instead of silently shadowing the profile.
+   and `model_dtype`. `deploy/docker-compose.radxa.yml` now defaults
+   `ASR_DECODER_QUANT=w8a8`; if an operator sets a conflicting
+   `ASR_DECODER_QUANT` in the shell or `.env`, startup should fail loudly
+   instead of silently shadowing the profile.
    Profile reload/preflight also checks that the selected
    `ASR_DECODER_QUANT` has an exact-token RKLLM file in `ASR_MODEL_DIR/decoder`
    or `ASR_MODEL_DIR/rkllm`; a missing W8A8 artifact is reported as
@@ -1082,3 +1174,193 @@ Both logs contained two RKLLM load events. When `--artifact-basename` is
 provided, the verifier selects the matching basename even if other RKLLM models
 are also present in the same log; otherwise it warns and checks the last load
 event.
+
+## 2026-06-03 RK3588 W8A8 Recalib Smoke
+
+Test target: `radxa`, image `openvoicestream:rk-slim-fresh-20260603`, temporary
+container on port `8622`, ASR-only `/v2v/stream`, `client` EOS, short corpus,
+2 samples per language. The temporary container was removed after testing; the
+main `openvoicestream-kokoro` container was left running.
+
+Important harness fix: the current slim path can expose Qwen3 ASR text as a
+stringified `(text, language)` tuple on some frames. The RK Qwen3 postprocess
+and perf client now normalize tuple/list/stringified-tuple payloads to the
+transcript text before scoring. Without this, CER/WER is artificially inflated.
+
+Artifact hashes:
+
+```text
+zh_v2/built-v3-equivalent       b0c33c8340155b1372359d86c6048f2c3cd9355d984710cad9d95d3fca09e8e5
+en_v2/built-v3-equivalent       750f521d716aac63d3ef5554a569ef83e6a7a658c062ff4ef2317ba20d3f2d19
+balanced_v2/built-v3-equivalent 748d06d3048c0d6b13f08aefcceeb9b1eff96aae9161d90c0653f295e4779843
+```
+
+2-sample smoke results:
+
+```text
+decoder             zh CERs / total latency       en WERs / total latency
+original W8A8       20.0%, 0.0% / 612, 868ms      not rerun in this smoke
+zh_v2 W8A8          20.0%, 0.0% / 662, 837ms      0.0%, 30.0% / 0, 0ms
+en_v2 W8A8          20.0%, 0.0% / 605, 871ms      11.1%, 20.0% / 0, 0ms
+balanced_v2 W8A8    20.0%, 0.0% / 659, 863ms      0.0%, 30.0% / 0, 0ms
+```
+
+Interpretation:
+
+- On this small smoke, recalibration did not improve RK3588 latency or Chinese
+  accuracy over original W8A8.
+- `balanced_v2` did not solve mixed-language quality in a visible way; it
+  behaves close to `zh_v2` on the first two short English samples.
+- `en_v2` did not harm Chinese on the two short Chinese samples, but also did
+  not clearly dominate English on this smoke.
+- English total latency reports `0ms` because final arrived before client EOS
+  in these two samples (`final_before_client_eos` path); use the raw JSON flags
+  when comparing stop-to-final latency.
+- Treat this as a quick filter only. Any candidate should be expanded to the
+  5-sample short set and then RK3576 before adoption.
+
+## 2026-06-09 RKLLM v1.2.3 Highperf / Opt0 Recheck
+
+Test method: in-process `bench/perf/qwen3_asr_stream_eos_bench.py`, temporary
+`docker run --rm` with patched Qwen3 RK backend mounted into
+`openvoicestream:rk-slim-fresh-20260603`; corpus `short`, `limit=5`,
+`chunk_ms=250`, realtime feed, `ASR_DECODER_EMBED_CACHE_REUSE=1`,
+`ASR_DECODER_ASYNC=1`.
+
+Before benchmark, both RK targets were locked to high-performance mode:
+
+```text
+RK3588 radxa: NPU 1000000000, DDR 2400000000, CPU 1800000/2352000/2352000
+RK3576 cat-remote: NPU 950000000, DDR 1848000000, CPU 2016000/2208000
+```
+
+Highperf moved the result materially, especially on RK3576:
+
+```text
+target/artifact                 mean eos->final    median eos->final   CER
+RK3588 FP16 optimized ondemand  638.5 ms           802.6 ms            2.59%
+RK3588 FP16 highperf            595.9 ms           716.3 ms            2.59%
+RK3576 W8A8 optimized ondemand  934.9 ms           1121.4 ms           2.59%
+RK3576 W8A8 highperf            714.3 ms           872.6 ms            2.59%
+```
+
+`optimization_level=0` artifacts were rebuilt with RKLLM toolkit 1.2.3:
+
+```text
+decoder_qwen3_opt0.fp16.rk3588.rkllm
+  sha256 8dfcb19073de04d5838f78b3135049af06b863e7a46dbb28c0130db5d2a3bb49
+decoder_qwen3_opt0.w8a8.rk3576.rkllm
+  sha256 bb2b4d94feac13eb2307ed39c376f8bf4ea7b39e2698d3d6db24ad3256958e70
+```
+
+Opt0 did not change RK3588 FP16 meaningfully and only slightly moved RK3576
+W8A8:
+
+```text
+target/artifact              mean eos->final   median eos->final   CER
+RK3588 FP16 current          595.9 ms          716.3 ms            2.59%
+RK3588 FP16 opt0             595.7 ms          716.0 ms            2.59%
+RK3576 W8A8 current/opt0     714.3 ms          872.6 ms            2.59%
+RK3576 W8A8 opt0 bind mount  705.6 ms          861.3 ms            2.59%
+```
+
+Builder and device hashes show `decoder_qwen3.w8a8.rk3576.rkllm` already
+matches the opt0 W8A8 artifact:
+
+```text
+bb2b4d94feac13eb2307ed39c376f8bf4ea7b39e2698d3d6db24ad3256958e70
+```
+
+RK3588 W8A8 was rechecked under the same highperf/new-runtime conditions:
+
+```text
+target/artifact      lang   mean eos->final   median eos->final   error
+RK3588 FP16          zh     595.9 ms          716.3 ms            2.59% CER
+RK3588 W8A8          zh     414.5 ms          468.1 ms            2.59% CER
+RK3588 FP16          en     167.1 ms          0.8 ms              12.51% WER
+RK3588 W8A8          en     73.9 ms           0.9 ms              10.51% WER
+```
+
+Interpretation:
+
+- Benchmark/A-B runs on RK should default to highperf and record
+  `perf_mode=highperf`; ondemand runs are still useful for production power and
+  thermal characterization, but should be a separate label.
+- RK3576 W8A8 is already the opt0 artifact by hash; no further model swap is
+  required for the current probe volume.
+- RK3588 W8A8 remains a strong low-latency candidate. The 5-sample short
+  English recheck did not reproduce the earlier W8A8 English regression; on
+  2026-06-09 it was promoted to the RK3588 Qwen3 default while keeping FP16 in
+  the artifact set as rollback. Expand to long and multilingual manifests before
+  removing the FP16 rollback path.
+
+### 2026-06-09 startup warmup hook
+
+The production startup path previously only called `_asr_backend.preload()` for
+RK Qwen3. The generic ASR warmup checked `transcribe_audio()`, but the service
+sees the outer `RKASRBackend` adapter and skipped warmup:
+
+```text
+ASR warmup skipped: RKASRBackend has no transcribe_audio (preload already warmed).
+```
+
+The RK path now has two hooks:
+
+- `Qwen3ASRRKBackend.warmup()` runs a 0.8s low-amplitude synthetic streaming
+  pass through the public ASR stream/finalize path.
+- `server.main` unwraps one adapter layer after preload, so the outer
+  `RKASRBackend` can still warm the inner `Qwen3ASRRKBackend` even if the
+  voxedge wheel itself has no warmup method.
+
+Startup validation used temporary `openvoicestream:rk-slim-fresh-20260603`
+containers with patched files bind-mounted, `LAZY_TTS=1`, highperf clocks, W8A8
+decoder, `ASR_DECODER_EMBED_CACHE_REUSE=1`, and `ASR_DECODER_ASYNC=1`.
+
+```text
+RK3588 radxa:
+Qwen3-ASR RK warmup: mode=true_streaming audio=0.80s elapsed=707ms text='转录。' language=Chinese
+ASR backend warmup completed (Qwen3ASRRKBackend via RKASRBackend).
+
+RK3576 cat-remote:
+Qwen3-ASR RK warmup: mode=true_streaming audio=0.80s elapsed=998ms text='转录。' language=Chinese
+ASR backend warmup completed (Qwen3ASRRKBackend via RKASRBackend).
+```
+
+The warmup transcript is intentionally ignored; the value is only to materialize
+RKNN/RKLLM first-run state before readiness.
+
+Post-warmup short-set recheck, same in-process benchmark method as above:
+
+```text
+target/artifact      lang   mean eos->final   median eos->final   error
+RK3588 W8A8          zh     409.3 ms          458.0 ms            2.59% CER
+RK3588 W8A8          en      70.9 ms            0.8 ms            10.51% WER
+RK3576 W8A8          zh     705.9 ms          861.0 ms            2.59% CER
+RK3576 W8A8          en     222.9 ms            0.9 ms            12.51% WER
+```
+
+### 2026-06-09 RKLLM runtime knob recheck
+
+After the SDK review, two remaining RKLLM runtime knobs were rechecked on the
+same short Chinese set under highperf, W8A8, async decode, and embedding cache
+reuse. The host-side reproducer is `bench/perf/rk_qwen3_runtime_ab_host.sh`.
+
+```text
+target      variant             mean eos->final   median eos->final   CER
+RK3576      ctx512 cpus4        704.9 ms          860.9 ms            2.59%
+RK3576      ctx256 cpus4        703.9 ms          856.2 ms            2.59%
+RK3576      ctx512 cpus2        733.9 ms          900.4 ms            2.59%
+RK3588      ctx512 cpus4        412.6 ms          463.7 ms            2.59%
+RK3588      ctx256 cpus4        413.1 ms          457.7 ms            2.59%
+RK3588      ctx512 cpus2        invalid: RKLLM requires enabled CPUs >= NPU cores
+```
+
+Decision:
+
+- Keep `RKLLM_MAX_CONTEXT_LEN=512`; reducing to 256 is within noise on both
+  boards and does not justify a profile change.
+- Use `ASR_ENABLED_CPUS=4` for RK3576/RK3588 Qwen3-ASR benchmarks and defaults.
+  RK3576 2-core affinity is legal but slower in this A/B; RK3588 2-core affinity
+  is invalid with the current RKLLM/NPU-core configuration.
+- Add explicit runtime validation so unsupported CPU counts fail early instead
+  of silently falling back to the old 2-core mask.
