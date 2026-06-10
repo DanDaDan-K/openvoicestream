@@ -520,6 +520,12 @@ def _ensure_moss_artifacts() -> None:
 # SenseVoice RKNN: encoder .rknn (per SoC) + decode assets, hosted as a flat HF
 # file list so a *-sensevoice profile auto-provisions on first start.
 _SENSEVOICE_RKNN_SHARED = ("am.mvn", "embedding.npy", "chn_jpn_yue_eng_ko_spectok.bpe.model")
+# Per-SoC encoder artifact: RK3576 runs fp16; RK3588 runs int8 (fp16 overflows
+# the RK3588 NPU on Chinese activations).
+_SENSEVOICE_RKNN_FILE = {
+    "rk3576": "sense-voice-encoder.rk3576.fp16.rknn",
+    "rk3588": "sense-voice-encoder.rk3588.int8.rknn",
+}
 
 
 def _ensure_sensevoice_rknn_artifacts() -> None:
@@ -536,7 +542,8 @@ def _ensure_sensevoice_rknn_artifacts() -> None:
     endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
     base = f"{endpoint}/{repo}/resolve/main"
 
-    files = [f"sense-voice-encoder.{platform}.fp16.rknn", *_SENSEVOICE_RKNN_SHARED]
+    rknn_file = _SENSEVOICE_RKNN_FILE.get(platform, f"sense-voice-encoder.{platform}.fp16.rknn")
+    files = [rknn_file, *_SENSEVOICE_RKNN_SHARED]
     os.makedirs(dest, exist_ok=True)
     for name in files:
         path = os.path.join(dest, name)
