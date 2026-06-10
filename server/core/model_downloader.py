@@ -165,6 +165,11 @@ def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") 
         # this for the compile-fallback path; its list-shaped-manifest skip
         # (97a9b9f) is untouched.
         _ensure_moss_artifacts()
+    if asr_backend == "jetson.sensevoice_trt":
+        # SenseVoice on Jetson = standalone TRT engine. Fetch the rescaled fixed
+        # ONNX + decode assets from HF and build the engine with the host-mounted
+        # TensorRT (so it matches the runtime). Idempotent (skips if built).
+        _ensure_sensevoice_trt_artifacts()
     if os.environ.get("ASR_BACKEND") == "sensevoice_rknn":
         # SenseVoice RKNN model + decode assets are a flat HF file list; fetch
         # the RK_PLATFORM-specific .rknn + decode assets so switching to a
@@ -574,6 +579,95 @@ def _ensure_sensevoice_rknn_artifacts() -> None:
             logger.error("Failed to download SenseVoice RKNN asset %s: %s", name, exc)
             logger.error("Manually place %s under %s", name, dest)
             raise
+
+
+# SenseVoice on Jetson: the rescaled fixed ONNX (fp16-safe for Chinese) + decode
+# assets; the engine is built on-device with the host-mounted TensorRT so it
+# matches the runtime (TRT engines are version-specific — no universal .plan).
+_SENSEVOICE_TRT_ONNX = "sense-voice-encoder.scaled.fixed.onnx"
+
+
+def _ensure_sensevoice_trt_artifacts() -> None:
+    """Provision the SenseVoice Jetson TRT backend (idempotent).
+
+    Downloads the rescaled fixed ONNX + decode assets from HF into
+    ``SENSEVOICE_TRT_MODEL_DIR`` and builds the fp16 TensorRT engine with the
+    host-mounted TRT if it's missing. Honors HF_ENDPOINT; repo overridable via
+    ``SENSEVOICE_RKNN_HF_REPO`` (shared with the RK assets).
+    """
+    dest = os.environ.get("SENSEVOICE_TRT_MODEL_DIR", "/opt/models/sensevoice-trt")
+    repo = os.environ.get("SENSEVOICE_RKNN_HF_REPO", "harvestsu/sensevoice-rknn")
+    endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+    base = f"{endpoint}/{repo}/resolve/main"
+
+    os.makedirs(dest, exist_ok=True)
+    for name in (_SENSEVOICE_TRT_ONNX, *_SENSEVOICE_RKNN_SHARED):
+        path = os.path.join(dest, name)
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            logger.info("SenseVoice TRT asset OK: %s", name)
+            continue
+        url = f"{base}/{name}"
+        logger.info("Downloading SenseVoice TRT asset %s ...", url)
+        tmp = path + ".part"
+        try:
+            if shutil.which("curl"):
+                subprocess.run(
+                    ["curl", "-fSL", "--connect-timeout", "20", "--max-time", "1800",
+                     "--retry", "3", "-o", tmp, url],
+                    check=True, timeout=1900,
+                )
+            else:
+                import urllib.request
+
+                req = urllib.request.Request(url, headers={"User-Agent": "openvoicestream/1.0"})
+                with urllib.request.urlopen(req, timeout=1800) as resp, open(tmp, "wb") as fh:
+                    shutil.copyfileobj(resp, fh)
+            os.replace(tmp, path)
+            logger.info("SenseVoice TRT asset ready: %s (%d bytes)", name, os.path.getsize(path))
+        except Exception as exc:
+            logger.error("Failed to download SenseVoice TRT asset %s: %s", name, exc)
+            raise
+
+    engine = os.environ.get("SENSEVOICE_TRT_ENGINE") or os.path.join(dest, "sensevoice.plan")
+    if os.path.exists(engine) and os.path.getsize(engine) > 0:
+        logger.info("SenseVoice TRT engine present: %s", engine)
+        return
+    _build_sensevoice_trt_engine(os.path.join(dest, _SENSEVOICE_TRT_ONNX), engine)
+
+
+def _build_sensevoice_trt_engine(onnx_path: str, plan_path: str) -> None:
+    """Build the fp16 SenseVoice engine from ONNX with the host-mounted TensorRT.
+
+    One-time, cached. The host TRT matches the runtime, so the engine always
+    deserializes. The ONNX is already activation-rescaled (fp16-safe on zh).
+    """
+    import tensorrt as trt
+
+    logger.info("Building SenseVoice TRT engine (host TRT %s) from %s ...", trt.__version__, onnx_path)
+    trt_logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(trt_logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    parser = trt.OnnxParser(network, trt_logger)
+    with open(onnx_path, "rb") as f:
+        if not parser.parse(f.read()):
+            for i in range(parser.num_errors):
+                logger.error("  TRT parse error: %s", parser.get_error(i))
+            raise RuntimeError(f"SenseVoice ONNX parse failed: {onnx_path!r}")
+    config = builder.create_builder_config()
+    config.set_flag(trt.BuilderFlag.FP16)
+    ws_gib = int(os.environ.get("SENSEVOICE_TRT_WORKSPACE_GIB", "3"))
+    try:
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, ws_gib << 30)
+    except Exception:
+        config.max_workspace_size = ws_gib << 30  # older TRT
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError("SenseVoice TRT build_serialized_network returned None")
+    tmp = plan_path + ".part"
+    with open(tmp, "wb") as f:
+        f.write(bytes(plan))
+    os.replace(tmp, plan_path)
+    logger.info("SenseVoice TRT engine built: %s (%d bytes)", plan_path, os.path.getsize(plan_path))
 
 
 # Custom voice patches: replace unused speakers in voices.bin with custom voices.
