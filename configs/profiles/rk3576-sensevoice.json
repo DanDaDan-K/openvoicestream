@@ -13,6 +13,7 @@
     "ASR_PLATFORM": "rk3576",
     "SENSEVOICE_RKNN_MODEL_DIR": "/opt/asr/sensevoice-rknn",
     "ASR_NPU_CORE_MASK": "NPU_CORE_0",
-    "ASR_MODEL_DIR": "/opt/asr/models"
+    "ASR_MODEL_DIR": "/opt/asr/models",
+    "RK_ARTIFACT_AUTO_DOWNLOAD": "0"
   }
 }
