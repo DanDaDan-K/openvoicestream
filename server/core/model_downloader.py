@@ -520,11 +520,13 @@ def _ensure_moss_artifacts() -> None:
 # SenseVoice RKNN: encoder .rknn (per SoC) + decode assets, hosted as a flat HF
 # file list so a *-sensevoice profile auto-provisions on first start.
 _SENSEVOICE_RKNN_SHARED = ("am.mvn", "embedding.npy", "chn_jpn_yue_eng_ko_spectok.bpe.model")
-# Per-SoC encoder artifact: RK3576 runs fp16; RK3588 runs int8 (fp16 overflows
-# the RK3588 NPU on Chinese activations).
+# Per-SoC encoder artifact: RK3576 runs plain fp16; RK3588 runs fp16 with a
+# math-exact activation rescale on the block-48 FFN (plain fp16 overflows the
+# RK3588 NPU on Chinese activations; int8 collapses the CTC projection — scaling
+# keeps fp16 accuracy, zero quant loss).
 _SENSEVOICE_RKNN_FILE = {
     "rk3576": "sense-voice-encoder.rk3576.fp16.rknn",
-    "rk3588": "sense-voice-encoder.rk3588.int8.rknn",
+    "rk3588": "sense-voice-encoder.rk3588.fp16-scaled.rknn",
 }
 
 
