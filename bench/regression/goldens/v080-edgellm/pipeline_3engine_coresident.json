@@ -1,0 +1,86 @@
+{
+  "doc": "v080-0014 — live 3-engine ASR->GDN-LLM->MOSS pipeline, co-resident on Orin NX 16GB",
+  "device": "orin-nx (orinnx, Linux aarch64, JetPack 6.2 / TRT 10.3, 15656 MB unified)",
+  "date_utc": "2026-06-09",
+  "edgellm_version": "0.8.0",
+  "engines": {
+    "asr": {
+      "name": "Qwen3-ASR-0.6B",
+      "dir": "~/tensorrt-edgellm-workspace/Qwen3-ASR-0.6B/engines-v080",
+      "files": ["audio/audio/audio_encoder.engine", "llm/llm.engine"]
+    },
+    "llm_gdn": {
+      "name": "Qwen3.5-4B GDN (hybrid_mamba, AWQ int4 FFN)",
+      "dir": "~/edgellm-workspace/qwen35-4b-awq/engines-v080-gdn",
+      "engine_md5": "afcb055b67bbc33d3dacf5491e4719d5",
+      "engine_bytes": 1019519468,
+      "engine_mb": 972,
+      "arch": {
+        "model_type": "hybrid_mamba",
+        "num_hidden_layers": 32,
+        "num_linear_attn_layers": 24,
+        "num_attention_layers": 8,
+        "hidden_size": 2560,
+        "vocab_size": 248320,
+        "kv_cache_dtype": "fp16",
+        "recurrent_state_dtype": "fp32",
+        "conv_state_dtype": "fp16"
+      },
+      "onnx_md5": "e8cadce91a50c1c3475c17502e64b13f",
+      "build_cmd": "llm_build --onnxDir onnx/llm --engineDir engines-v080-gdn --maxBatchSize 1 --maxInputLen 4096 --maxKVCacheCapacity 4096",
+      "export_cmd": "tensorrt-edgellm-export hf_src onnx --externalize-weights int4_ffn --skip-visual --skip-audio --skip-code2wav"
+    },
+    "moss": {
+      "name": "MOSS-TTS-Nano",
+      "dir": "/opt/models/moss-tts-nano/engines",
+      "prefill_input_ids_profile": "[1,1,17]..[1,384,17]  (max 384 tokens)"
+    }
+  },
+  "pipeline_speed_single_pass": {
+    "tag": "gdn14",
+    "mel": "zh_long_01.safetensors",
+    "asr_s": 4.897,
+    "llm_load_s": 4.46,
+    "llm_ttft_s": 0.528,
+    "llm_decode_s": 0.799,
+    "llm_output_tokens": 20,
+    "llm_tokens_per_s": 25.03,
+    "moss_ttfa_ms_worker": 151,
+    "moss_ttfa_ms_wall": 152.5,
+    "moss_audio_dur_s": 4.08,
+    "moss_rtf": 0.262,
+    "moss_rms": 0.04242,
+    "moss_samples": 391680,
+    "e2e_s": 11.224,
+    "peak_ram_mb_sequential": 5606
+  },
+  "accuracy_sanity": {
+    "asr_transcript": "这并不是告别，这是一个篇章的结束，也是新篇章的开始。",
+    "asr_correct": true,
+    "llm_response": "这句话表达了旧阶段的终结与新旅程的开启。",
+    "llm_coherent": true,
+    "moss_intelligible": true,
+    "moss_rms_nonzero": true
+  },
+  "coresident_peak_memory": {
+    "method": "MOSS worker held resident + long llm_inference generation running + ASR run concurrently; tegrastats captures the true triple-overlap (not a projection)",
+    "baseline_used_mb": 3253,
+    "moss_resident_mb": 4088,
+    "moss_plus_llm_resident_mb": 6307,
+    "triple_coresident_used_mb": 9968,
+    "tegrastats_peak_mb": 11062,
+    "total_mb": 15656,
+    "headroom_vs_16gb_mb": 4594,
+    "fits_16gb": true,
+    "raw_tegrastats_peak_line": "06-09-2026 21:38:14 RAM 11029/15656MB ... GR3D_FREQ 99% gpu@58.312C",
+    "vs_estimate": "measured 11062 MB is within the ~8-11.5GB math estimate (top end); 4.5 GB headroom"
+  },
+  "verdict": "PASS — full v0.8.0 ASR->GDN-LLM->MOSS pipeline runs co-resident on Orin NX 16GB. Speed (ASR 4.9s, LLM TTFT 0.53s / 25 tok/s, MOSS TTFA 151ms RTF 0.26), accuracy (correct transcript, coherent LLM reply, intelligible audio), and memory (11062/15656 MB peak, 4.5GB headroom) all acceptable.",
+  "notes": [
+    "Prior attempt did NOT die on a network drop — the GDN export was OOM-killed by the kernel (cgroup global OOM) because the 4 running containers (notably edge-llm-chat-service ~holding several GB unified) left only 5.5 GB available vs the export's ~21 GB virtual / ~2 GB RSS peak under total memory pressure. Stopping seeed-voice + translator + edge-llm-chat-service freed RAM (avail 5.5 -> 11 GB) and the re-export/build/pipeline all completed. All 3 containers restored afterward.",
+    "Stale 0.7.1 GDN onnx/engines (the cause of the earlier 'Int4GroupwiseGemmPlugin not found' build-parse failure) were reclaimed; the fresh v0.8.0 onnx parses cleanly ('Successfully created plugin: Int4GroupwiseGemmPlugin').",
+    "MOSS produced zero audio in the first (v080-0013-style) pass only because the driver fed it the full 467-token LLM reply, exceeding MOSS's 384-token prefill profile. With a concise LLM reply (system prompt + bounded length) MOSS synthesizes normally (TTFA 151ms, RTF 0.26).",
+    "Workspace paths are under ~/edgellm-workspace/qwen35-4b-awq and ~/asr_v080_e2e (not ~/tensorrt-edgellm-workspace/qwen35-4b-awq as the task brief stated).",
+    "peak_ram_mb_sequential (5606) from the single-pass driver is max-of-stages (each stage is a separate short-lived process), NOT the co-resident sum; the 11062 MB co-resident figure is the definitive 16GB-fit proof."
+  ]
+}
