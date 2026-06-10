@@ -1,0 +1,92 @@
+[
+  {
+    "wav": "zh_long_01",
+    "K": 1,
+    "status": "OK",
+    "transcript": "language Chinese这并不是告别，这是一个篇章的结束，也是新篇章的开始。",
+    "cer_vs_golden": 0.0,
+    "cer_vs_k1": 0.0,
+    "match_k1": true
+  },
+  {
+    "wav": "zh_long_01",
+    "K": 2,
+    "status": "ENCODE_FAIL",
+    "transcript": null,
+    "probe": ""
+  },
+  {
+    "wav": "zh_long_01",
+    "K": 3,
+    "status": "ENCODE_FAIL",
+    "transcript": null,
+    "probe": ""
+  },
+  {
+    "wav": "zh_long_01",
+    "K": 5,
+    "status": "ENCODE_FAIL",
+    "transcript": null,
+    "probe": ""
+  },
+  {
+    "wav": "zh_long_02",
+    "K": 1,
+    "status": "OK",
+    "transcript": "language Chinese桥下垂直净空十五米。该项目于二零一一年八月完工，但直到二零一七年三月才开始通车。",
+    "cer_vs_golden": 0.0,
+    "cer_vs_k1": 0.0,
+    "match_k1": true
+  },
+  {
+    "wav": "zh_long_02",
+    "K": 2,
+    "status": "ENCODE_FAIL",
+    "transcript": null,
+    "probe": ""
+  },
+  {
+    "wav": "zh_long_02",
+    "K": 3,
+    "status": "ENCODE_FAIL",
+    "transcript": null,
+    "probe": ""
+  },
+  {
+    "wav": "zh_long_02",
+    "K": 5,
+    "status": "ENCODE_FAIL",
+    "transcript": null,
+    "probe": ""
+  },
+  {
+    "wav": "zh_long_03",
+    "K": 1,
+    "status": "OK",
+    "transcript": "language Chinese适当使用博客可以使学生变得更善于分析和进行思辨。通过积极回忆网络材料，学生们可以在他人的文章的上下文语境中找到自己的立场，并能够针对特定问题提出自己的观点。Work 二零零二。",
+    "cer_vs_golden": 0.0,
+    "cer_vs_k1": 0.0,
+    "match_k1": true
+  },
+  {
+    "wav": "zh_long_03",
+    "K": 2,
+    "status": "ENCODE_FAIL",
+    "transcript": null,
+    "probe": ""
+  },
+  {
+    "wav": "zh_long_03",
+    "K": 3,
+    "status": "ENCODE_FAIL",
+    "transcript": null,
+    "probe": ""
+  },
+  {
+    "wav": "zh_long_03",
+    "K": 5,
+    "status": "ENCODE_FAIL",
+    "transcript": null,
+    "probe": ""
+  }
+]
