@@ -40,18 +40,26 @@ _BUILTIN_PROFILES: list[dict[str, Any]] = [
         "match": {"input_channels": 6, "name_regex": r"(?i)C16K6Ch|Flex XVF3800"},
         "mic_channels": 6,
         "mic_channel_select": 0,
+        # ch0 of the 6ch firmware is quiet → needs heavy makeup so the server
+        # silero VAD/ASR sees its trained level range.
+        "mic_makeup_gain": 12.0,
     },
     {
         "name": "xvf3800-4mic-2ch",
         "match": {"input_channels": 2, "name_regex": r"(?i)4-Mic Array|XVF3800"},
         "mic_channels": 2,
         "mic_channel_select": 0,
+        # the 2ch firmware runs much louder; 12x clips → garbled ASR. 2x is the
+        # field-tuned value (10.8.0.170, 2026-06-10).
+        "mic_makeup_gain": 2.0,
     },
     {
         "name": "fallback",
         "match": {},
         "mic_channels": "auto",  # open the device's native channel count
         "mic_channel_select": 0,
+        # unknown mic → no makeup (1.0 no-op), let the deployment tune it.
+        "mic_makeup_gain": 1.0,
     },
 ]
 
@@ -61,6 +69,10 @@ class MicProfile:
     name: str
     mic_channels: int
     mic_channel_select: int | None
+    # Linear mic makeup gain for this firmware. None = profile has no opinion
+    # (caller keeps whatever the YAML/config set). The 6ch/2ch firmwares need
+    # very different gains, so it belongs with the profile, not a flat config.
+    mic_makeup_gain: float | None = None
 
 
 def _device_signature(device_index: int | None) -> tuple[int, str]:
@@ -125,7 +137,7 @@ def resolve_mic_profile(device_index: int | None, config_dir: str | None = None)
             "audio profile: could not query device [%s] (%s) — defaulting to mono",
             device_index, exc,
         )
-        return MicProfile("unknown", 1, None)
+        return MicProfile("unknown", 1, None, None)
 
     profiles = _load_yaml_profiles(config_dir) or _BUILTIN_PROFILES
     matched = _match_profile(profiles, max_in_ch, name)
@@ -134,7 +146,7 @@ def resolve_mic_profile(device_index: int | None, config_dir: str | None = None)
             "audio profile: no match for device [%s] %r (%d ch) — opening native count",
             device_index, name, max_in_ch,
         )
-        return MicProfile("native", max(1, max_in_ch), 0)
+        return MicProfile("native", max(1, max_in_ch), 0, None)
 
     raw_ch = matched.get("mic_channels", "auto")
     ch = max_in_ch if str(raw_ch).strip().lower() == "auto" else int(raw_ch)
@@ -157,8 +169,20 @@ def resolve_mic_profile(device_index: int | None, config_dir: str | None = None)
         )
         sel = 0
 
+    mg_raw = matched.get("mic_makeup_gain")
+    makeup = None
+    if mg_raw is not None:
+        try:
+            makeup = float(mg_raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "audio profile '%s' mic_makeup_gain=%r not a number — ignoring",
+                matched.get("name"), mg_raw,
+            )
+
     logger.info(
-        "audio profile '%s' matched device [%s] %r (%d ch) → mic_channels=%d select=%r",
+        "audio profile '%s' matched device [%s] %r (%d ch) → mic_channels=%d select=%r makeup_gain=%s",
         matched.get("name"), device_index, name, max_in_ch, ch, sel,
+        makeup if makeup is not None else "(config)",
     )
-    return MicProfile(str(matched.get("name", "?")), ch, sel)
+    return MicProfile(str(matched.get("name", "?")), ch, sel, makeup)

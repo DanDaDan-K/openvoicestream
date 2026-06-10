@@ -141,6 +141,7 @@ class VoiceArmApp(MultiModeApp):
         # ovs_agent.audio.profiles.
         mic_channels_cfg = wake_cfg.get("mic_channels", "auto")
         mic_channel_select_raw = wake_cfg.get("mic_channel_select")
+        prof = None
         if str(mic_channels_cfg).strip().lower() in ("", "auto", "none"):
             prof = resolve_mic_profile(config.audio_input_device)
             mic_channels = prof.mic_channels
@@ -170,6 +171,21 @@ class VoiceArmApp(MultiModeApp):
                 mic_channels=mic_channels,
                 mic_channel_select=mic_channel_select,
             )
+
+        # Mic makeup gain follows the firmware profile too. The 6ch and 2ch
+        # reSpeaker variants need very different gains (quiet ch0 needs ~12x;
+        # the louder 2ch firmware clips at 12x → garbled ASR, wants ~2x). When
+        # the config leaves makeup at the 1.0 no-op default, fill it from the
+        # resolved profile; an explicit non-1.0 in the YAML still wins.
+        if abs(float(getattr(config, "mic_makeup_gain", 1.0)) - 1.0) < 1e-9:
+            if prof is None:
+                prof = resolve_mic_profile(config.audio_input_device)
+            if prof is not None and prof.mic_makeup_gain is not None:
+                logger.info(
+                    "mic makeup gain from profile '%s': %.1f (config left at default)",
+                    prof.name, prof.mic_makeup_gain,
+                )
+                config.mic_makeup_gain = float(prof.mic_makeup_gain)
 
         # ArmPlugin owns the serial port + obs HTTP server. Register the
         # plugin before the wake source so tools are available the moment
