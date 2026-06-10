@@ -84,6 +84,8 @@ RUN pip install --no-cache-dir --index-url ${PIP_INDEX} \
         tokenizers \
         rknn-toolkit-lite2 \
         sherpa-onnx \
+        kaldi-native-fbank \
+        sentencepiece \
         fastapi \
         'uvicorn[standard]' \
         python-multipart \

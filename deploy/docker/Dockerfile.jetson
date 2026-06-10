@@ -74,6 +74,8 @@ RUN pip3 install --no-cache-dir --index-url ${PIP_INDEX} \
         "onnxruntime>=1.20" \
         prometheus_client \
         httpx \
+        kaldi-native-fbank \
+        sentencepiece \
         piper-phonemize
 
 ARG LANGUAGE_MODE=zh_en
