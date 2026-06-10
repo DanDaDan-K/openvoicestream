@@ -261,13 +261,17 @@ def ensure_models(language_mode: str = "zh_en", model_dir: str = "/opt/models") 
     os.makedirs(model_dir, exist_ok=True)
 
     for dir_name, cdn_file, desc in missing:
-        # Per-model URL override (lets slow-default sources be redirected to a
-        # fast mirror/CDN per deployment). SenseVoice in particular defaults to
-        # a raw GitHub release with no CDN fallback, which is impractically slow
-        # on edge devices (RPi) without good GitHub access — point
-        # SENSEVOICE_MODEL_URL at a mirror to skip it.
-        if dir_name == "sensevoice" and os.environ.get("SENSEVOICE_MODEL_URL"):
-            url = os.environ["SENSEVOICE_MODEL_URL"]
+        # SenseVoice (RPi/CPU sherpa tarball) defaults to a raw GitHub release
+        # with no CDN fallback — impractically slow on edge devices without good
+        # GitHub access. Default to the HF copy (honors HF_ENDPOINT, so RPi via
+        # hf-mirror is fast); SENSEVOICE_MODEL_URL overrides, SENSEVOICE_RKNN_HF_REPO
+        # picks the repo.
+        if dir_name == "sensevoice":
+            url = os.environ.get("SENSEVOICE_MODEL_URL")
+            if not url:
+                endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+                repo = os.environ.get("SENSEVOICE_RKNN_HF_REPO", "harvestsu/sensevoice-rknn")
+                url = f"{endpoint}/{repo}/resolve/main/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2"
         # Use GitHub releases for models not hosted on CDN
         elif cdn_file.startswith("http"):
             url = cdn_file
