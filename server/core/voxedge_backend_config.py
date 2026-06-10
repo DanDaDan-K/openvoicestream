@@ -293,6 +293,29 @@ def build_paraformer_trt_config(
     )
 
 
+def build_sensevoice_trt_config(
+    profile: Optional[dict] = None,
+    env: Optional[dict] = None,
+):
+    """Build a ``SenseVoiceTRTConfig`` from env.
+
+    env → SenseVoiceTRTConfig field map:
+      SENSEVOICE_TRT_MODEL_DIR → model_dir ("/opt/models/sensevoice-trt")
+      SENSEVOICE_TRT_ENGINE    → engine    (<model_dir>/sensevoice.plan)
+      SENSEVOICE_TRT_BPE       → bpe_model (<model_dir>/chn_jpn_yue_eng_ko_spectok.bpe.model)
+    """
+    from voxedge.backends.jetson.sensevoice_trt import SenseVoiceTRTConfig
+
+    if env is None:
+        env = os.environ
+    model_dir = env.get("SENSEVOICE_TRT_MODEL_DIR", "/opt/models/sensevoice-trt")
+    return SenseVoiceTRTConfig(
+        engine=env.get("SENSEVOICE_TRT_ENGINE") or os.path.join(model_dir, "sensevoice.plan"),
+        model_dir=model_dir,
+        bpe_model=env.get("SENSEVOICE_TRT_BPE") or None,
+    )
+
+
 def build_sherpa_asr_config(
     profile: Optional[dict] = None,
     env: Optional[dict] = None,

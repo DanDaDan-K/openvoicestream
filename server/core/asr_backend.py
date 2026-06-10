@@ -178,6 +178,7 @@ class ASRBackend(ABC):
 _ASR_REGISTRY: Dict[str, Tuple[str, str]] = {
     "jetson.trt_edge_llm":   ("voxedge.backends.jetson.trt_edge_llm_asr", "TRTEdgeLLMASRBackend"),
     "jetson.paraformer_trt": ("voxedge.backends.jetson.paraformer_trt", "ParaformerTRTBackend"),
+    "jetson.sensevoice_trt": ("voxedge.backends.jetson.sensevoice_trt", "SenseVoiceTRTBackend"),
     "cpu.sherpa_asr":        ("voxedge.backends.sherpa.asr",          "SherpaASRBackend"),
     "rk.asr":                ("voxedge.backends.rk.asr",              "RKASRBackend"),
 }
@@ -214,6 +215,10 @@ def create_asr_backend() -> ASRBackend:
     if spec == "jetson.paraformer_trt":
         from server.core.voxedge_backend_config import build_paraformer_trt_config
         config = build_paraformer_trt_config(profile=current_profile())
+        return cls(config=config)
+    if spec == "jetson.sensevoice_trt":
+        from server.core.voxedge_backend_config import build_sensevoice_trt_config
+        config = build_sensevoice_trt_config(profile=current_profile())
         return cls(config=config)
     if spec == "cpu.sherpa_asr":
         from server.core.voxedge_backend_config import build_sherpa_asr_config
