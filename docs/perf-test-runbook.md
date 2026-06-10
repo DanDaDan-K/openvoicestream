@@ -18,7 +18,7 @@ Branch: `qwen3tts-accurate-20260507` (latest commit ≥ `f3ab241`).
 | Device class | Image | Size |
 |---|---|---|
 | Jetson Orin (Nano/NX/AGX) | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:jetson-v1.12-highperf` | 3.14 GB class |
-| RK3576 / RK3588 | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-v1.4-closedloop` | 767 MB |
+| RK3576 / RK3588 | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-qwen3asr-opt-20260610` | 236 MB slim image |
 | RPi 4 / 5 (CM4 / CM5) | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rpi-v1.0-onnx` | 560 MB class |
 
 History — Jetson image patches (each fix forced a rebake):
@@ -61,7 +61,7 @@ After today's sweep:
 | Device | Container | Image | Port | Preset | /health |
 |---|---|---|---|---|---|
 | orin-nano | `seeed-local-voice` | jetson-v1.12-highperf | 8621 (host net) | jetson-multilang-highperf | ✅ both ready in latest product gate |
-| radxa | `seeed-local-voice` | rk-v1.4-closedloop | 8621 (host net) | rk3588-default / multilang | ✅ both ready in latest product gate |
+| radxa | `seeed-local-voice` | rk-qwen3asr-opt-20260610 | 8621 (host net) | rk3588-default / multilang | ✅ both ready in latest product gate |
 | harvest-pi | `seeed-local-voice` | rpi-v1.0-onnx | 8000 | rpi5-default | ✅ both ready in latest product gate |
 
 `docker ps` on each device confirms current state.
@@ -163,7 +163,7 @@ docker run -d --name seeed-rk --privileged --network host \
   -e OVS_PRESET=multilang \
   -e RK_ARTIFACT_REPO_ID=harvestsu/seeed-local-voice-rk-artifacts \
   -e RK_ARTIFACT_SET=rk3588-multilang-2026-05-17 \
-  sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-v1.4-closedloop
+  sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-qwen3asr-opt-20260610
 ```
 
 profile_selector auto-detects rk3588 (or rk3576) via `/proc/cpuinfo` and picks `rk{soc}-multilang.json`.

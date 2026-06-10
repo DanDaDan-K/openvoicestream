@@ -113,8 +113,8 @@ startup the service listens on `http://<device>:8621`.
 | Target | Compose file | Example profile | Validated image |
 |---|---|---|---|
 | **Jetson** (Orin Nano/NX/AGX) | `deploy/docker-compose.yml` | `jetson-qwen3asr-matcha-nx` (default multilang), `jetson-multilang-highperf` (heavy), `jetson-zh-en` (lightest) | `seeed-local-voice:jetson-v1.14-hotswap` |
-| **RK3588** (Radxa ROCK 5T) | `deploy/docker-compose.radxa.yml` | `rk3588-paraformer-matcha` (current Paraformer hybrid+RKNN decoder), `rk3588-kokoro-rknn` | `seeed-local-voice:rk-v1.4-closedloop` |
-| **RK3576** (BPI-M5 Pro) | `deploy/docker-compose.rk.yml` | `rk3576-paraformer-matcha` (current Paraformer hybrid+RKNN decoder) | `seeed-local-voice:rk-v1.4-closedloop` |
+| **RK3588** (Radxa ROCK 5T) | `deploy/docker-compose.radxa.yml` | `rk3588-default` (Qwen3 ASR W8A8 + Matcha), `rk3588-kokoro-rknn` | `seeed-local-voice:rk-qwen3asr-opt-20260610` |
+| **RK3576** (BPI-M5 Pro) | `deploy/docker-compose.rk.yml` | `rk3576-default` (Qwen3 ASR W8A8 + Matcha) | `seeed-local-voice:rk-qwen3asr-opt-20260610` |
 | **Raspberry Pi** (4/5) | `deploy/docker-compose.rpi.yml` | `rpi5-default` | `seeed-local-voice:rpi-v1.0-onnx` |
 
 Images live under the registry `sensecraft-missionpack.seeed.cn/solution/`.

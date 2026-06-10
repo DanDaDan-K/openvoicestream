@@ -48,7 +48,7 @@ Validated artifact:
 
 Validated image:
 
-- `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-v1.4-closedloop`
+- `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-qwen3asr-opt-20260610`
 
 Artifact sets:
 

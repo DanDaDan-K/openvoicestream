@@ -10,7 +10,7 @@ high-performance, and usable as a streaming edge voice library.
 | Target | Image | Artifact source | Release-gate result |
 |---|---|---|---|
 | Jetson Orin Nano/NX/AGX | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:jetson-v1.12-highperf` | `harvestsu/qwen3-edgellm-jetson-artifacts` for Qwen3; `harvestsu/seeed-local-voice-artifacts` for Paraformer/Matcha TRT `zh_en` engines | PASS for Matcha TRT TTS to Paraformer TRT ASR round-trip on Orin Nano |
-| RK3576/RK3588 | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-v1.4-closedloop` | `harvestsu/seeed-local-voice-rk-artifacts` plus `deploy/artifacts/rk_manifest.json` | Runtime and service PASS; hybrid Matcha TTS to ASR closed-loop PASS on RK3588 |
+| RK3576/RK3588 | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-qwen3asr-opt-20260610` | `harvestsu/seeed-local-voice-rk-artifacts` plus `deploy/artifacts/rk_manifest.json` | Runtime and service PASS; Qwen3 ASR W8A8 + hybrid Matcha TTS validated on RK3576 and RK3588 |
 | Raspberry Pi 4/5 / CM4/CM5 | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rpi-v1.0-onnx` | Official ONNX assets downloaded at first boot | PASS for CPU TTS to ASR round-trip on RPi5 |
 
 ## Reproduction Path

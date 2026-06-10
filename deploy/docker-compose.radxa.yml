@@ -11,7 +11,7 @@
 
 services:
   speech:
-    image: sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-v1.4-closedloop
+    image: sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-qwen3asr-opt-20260610
     container_name: openvoicestream
     privileged: true
     init: true
@@ -43,6 +43,10 @@ services:
       - ASR_PLATFORM=rk3588
       - ASR_ENABLED_CPUS=4
       - ASR_NPU_CORE_MASK=NPU_CORE_AUTO
+      - ASR_MAX_NEW_TOKENS=64
+      - ASR_FINAL_STOP_ON_PUNCT=1
+      - ASR_FINAL_STOP_MIN_CHARS=8
+      - ASR_FINAL_STOP_MIN_CHUNKS=2
       - ASR_MODEL_DIR=/opt/asr/models
       - RKLLM_LIB_PATH=/opt/asr/lib/librkllmrt.so
       - RK_ARTIFACT_AUTO_DOWNLOAD=${RK_ARTIFACT_AUTO_DOWNLOAD:-1}
@@ -56,8 +60,14 @@ services:
       # endpoint pre-fire → near-zero stop→final latency. Required for the
       # multi_utterance V2V path (see docs/api/v2v-stream.md).
       - QWEN3_ASR_CHUNK_CONFIRM=0
+      - QWEN3_ASR_STREAM_MODE=true_streaming
       - QWEN3_ASR_STREAM_TRUE=1
-      - QWEN3_ASR_TRUE_ROLL_SEC=15
+      - QWEN3_ASR_TRUE_ROLL_SEC=5
+      - QWEN3_ASR_TRUE_PARTIAL_TOKENS=8
+      - QWEN3_ASR_TRUE_PARTIAL_INTERVAL_MS=1500
+      - QWEN3_ASR_TRUE_PARTIAL_WARMUP=2
+      - QWEN3_ASR_VAD_FINAL_ASYNC=1
+      - QWEN3_ASR_FRONTEND_EOU_MIN_AUDIO_S=2.5
       - VAD_ENDPOINT_SILENCE_MS=800
       # ── TTS ─────────────────────────────────────────────────────────
       - TTS_BACKEND=matcha_rknn

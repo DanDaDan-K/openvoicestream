@@ -65,8 +65,8 @@ After startup, the service listens on `http://device:8621`:
 | Target | URL | Compose file | Image |
 |---|---|---|---|
 | Jetson | `http://device:8621` | `deploy/docker-compose.yml` | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:jetson-v1.14-hotswap` |
-| RK3576 | `http://device:8621` | `deploy/docker-compose.rk.yml` | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-v1.4-closedloop` |
-| RK3588 | `http://device:8621` | `deploy/docker-compose.radxa.yml` | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-v1.4-closedloop` |
+| RK3576 | `http://device:8621` | `deploy/docker-compose.rk.yml` | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-qwen3asr-opt-20260610` |
+| RK3588 | `http://device:8621` | `deploy/docker-compose.radxa.yml` | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rk-qwen3asr-opt-20260610` |
 | Raspberry Pi | `http://device:8621` | `deploy/docker-compose.rpi.yml` | `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:rpi-v1.0-onnx` |
 
 The published Docker images currently keep the previous registry namespace so
@@ -346,14 +346,14 @@ column is split `/asr/stream` plus `/tts/stream`.
 | Orin NX `jetson-qwen3asr-matcha-nx` | `jetson-v1.12-highperf` | `matcha_trt` | `trt_edgellm` | 0.018 | 0.042 | 5.3% | 162 ms |
 | Orin Nano `jetson-zh-en` | `jetson-v1.12-highperf` | `matcha_trt` | `paraformer_trt` | 0.023 | 0.077 | 13.3% | 327 ms |
 | Orin NX `jetson-zh-en` | `jetson-v1.12-highperf` | `matcha_trt` | `paraformer_trt` | 0.018 | 0.015 | 10.5% | 58 ms |
-| RK3588 `rk3588-default` | `rk-v1.4-closedloop` | `rk:matcha_rknn` | `rk:qwen3_asr_rk` | 0.124 | 0.318 | 60.7% | 394 ms |
-| RK3576 `rk3576-default` | `rk-v1.4-closedloop` | `rk:matcha_rknn` | `rk:qwen3_asr_rk` | 0.290 | 0.265 | 63.2% | 1099 ms |
+| RK3588 `rk3588-default` | `rk-qwen3asr-opt-20260610` | `rk:matcha_rknn` | `rk:qwen3_asr_rk` | 0.124 | 0.318 | 10.1% long avg | 528 ms |
+| RK3576 `rk3576-default` | `rk-qwen3asr-opt-20260610` | `rk:matcha_rknn` | `rk:qwen3_asr_rk` | 0.290 | 0.265 | 9.8% long avg | 1020 ms |
 | Raspberry Pi 5 `rpi5-default` | `rpi-v1.0-onnx` | `sherpa` | `sherpa_asr` | 0.078 | 0.000 | 20.0% | 3 ms |
 
-The previous RK rows were stale forced-EOS/chunk-confirm results. In the fixed
-rerun, standalone Matcha TTS first audio is 51 ms p50 on RK3588 and 65 ms p50
-on RK3576; split V2V is now ASR-finalize-bound at 394 ms / 1099 ms p50. The
-real `/v2v/stream` path remains about 1.27 s p50 with the current 800 ms VAD
+The RK rows use the 2026-06-10 high-performance Qwen3 ASR W8A8 + Matcha
+recheck. Forced client-EOS V2V p50 is 528 ms on RK3588 and 1020 ms on RK3576;
+long-dictation average error is 10.1% / 9.8%. The real `/v2v/stream` path still
+depends on the configured VAD endpointing delay.
 hangover.
 
 Deployment footprint from the same run:
@@ -553,7 +553,7 @@ Clone with `--recurse-submodules` to pull `third_party/*`, or run `git submodule
 ### Current Container Release
 
 - **Jetson highperf image** — `jetson-v1.13-highperf`, 2.02 GB, with host CUDA/TensorRT libraries mounted from JetPack and models/engines cached in `speech-models`. Ships the BackendManager hot-reload state machine (`POST /admin/backend/reload`, `GET /admin/backend/status`) for live profile swaps without container recreate. Image tags follow `jetson-v<MAJOR>.<MINOR>-<variant>` and are immutable once published; each release bumps the version and READMEs/compose files reference it explicitly so production upgrades require a deliberate commit rather than a floating tag.
-- **RK release image** — `rk-v1.4-closedloop`, 767 MB, with runtime-pinned RKNN dependencies and validated hybrid Matcha TTS.
+- **RK release image** — `rk-qwen3asr-opt-20260610`, 236 MB slim image, with runtime-pinned RKNN dependencies, Qwen3 ASR W8A8 defaults for RK3576/RK3588, and validated hybrid Matcha TTS.
 - **Raspberry Pi image** — `rpi-v1.0-onnx`, 568 MB, CPU-only ONNX path.
 
 See the 2026-05-18 benchmark report for image size, model volume,

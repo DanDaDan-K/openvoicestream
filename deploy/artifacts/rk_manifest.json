@@ -14,9 +14,43 @@
         "rknn_toolkit_lite2": "2.3.2"
       },
       "runtime_contract": {
+        "asr_path": "qwen3_asr_rknn_encoder_rkllm_decoder_w8a8",
         "tts_path": "matcha_ort_acoustic_rknn_vocos",
-        "closed_loop_validated": false,
+        "closed_loop_validated": true,
+        "validated_device": "cat-remote",
+        "validated_at": "2026-06-10",
+        "validated_profile": "rk3576-default",
+        "metrics": {
+          "qwen3_asr_long_dictation_highperf": {
+            "corpus": "bench/perf/corpus long zh/en n=10 plus multilingual n=5",
+            "mean_error_rate": 0.098,
+            "char_error_rate": 0.0837,
+            "mean_eos_to_final_ms": 735.0,
+            "median_eos_to_final_ms": 336.9
+          },
+          "qwen3_matcha_v2v_forced_highperf": {
+            "corpus": "bench/perf/corpus short zh/en n=3, LLM delay 0, client EOS",
+            "zh_eos_to_first_audio_mean_ms": 738.564,
+            "zh_eos_to_first_audio_p50_ms": 1020.487,
+            "en_eos_to_first_audio_mean_ms": 30.821,
+            "en_eos_to_first_audio_p50_ms": 27.714
+          }
+        },
         "env": {
+          "ASR_BACKEND": "qwen3_asr_rk",
+          "ASR_DECODER_TYPE": "rkllm",
+          "ASR_DECODER_QUANT": "w8a8",
+          "ASR_MAX_NEW_TOKENS": "64",
+          "ASR_FINAL_STOP_ON_PUNCT": "1",
+          "ASR_FINAL_STOP_MIN_CHARS": "8",
+          "ASR_FINAL_STOP_MIN_CHUNKS": "2",
+          "QWEN3_ASR_STREAM_TRUE": "1",
+          "QWEN3_ASR_TRUE_ROLL_SEC": "5",
+          "QWEN3_ASR_TRUE_PARTIAL_TOKENS": "8",
+          "QWEN3_ASR_TRUE_PARTIAL_INTERVAL_MS": "1500",
+          "QWEN3_ASR_TRUE_PARTIAL_WARMUP": "2",
+          "QWEN3_ASR_VAD_FINAL_ASYNC": "1",
+          "QWEN3_ASR_FRONTEND_EOU_MIN_AUDIO_S": "2.5",
           "TTS_BACKEND": "matcha_rknn",
           "MATCHA_USE_ORT": "1",
           "MATCHA_MODEL": "matcha-s64.rknn",
@@ -67,6 +101,12 @@
           "source_path": "rk3576/opt/asr/models/rkllm/decoder_qwen3.w4a16_g128.rk3576.rkllm",
           "size_bytes": 795088292,
           "sha256": "de7ec58ebf15811e70e4262e87aabbd66509bb1db2740d1a329b38616e8dbaf5"
+        },
+        {
+          "path": "opt/asr/models/rkllm/decoder_qwen3.w8a8.rk3576.rkllm",
+          "source_path": "rk3576/opt/asr/models/rkllm/decoder_qwen3.w8a8.rk3576.rkllm",
+          "size_bytes": 945098540,
+          "sha256": "bb2b4d94feac13eb2307ed39c376f8bf4ea7b39e2698d3d6db24ad3256958e70"
         },
         {
           "path": "opt/tts/models/matcha-s64.rknn",
@@ -234,10 +274,44 @@
         "rknn_toolkit_lite2": "2.3.2"
       },
       "runtime_contract": {
+        "asr_path": "qwen3_asr_rknn_encoder_rkllm_decoder_w8a8",
         "tts_path": "matcha_ort_acoustic_rknn_vocos",
         "closed_loop_validated": true,
         "closed_loop_phrase": "你好，今天天气真不错。",
+        "validated_device": "radxa",
+        "validated_at": "2026-06-10",
+        "validated_profile": "rk3588-default",
+        "metrics": {
+          "qwen3_asr_long_dictation_highperf": {
+            "corpus": "bench/perf/corpus long zh/en n=10 plus multilingual n=5",
+            "mean_error_rate": 0.101,
+            "char_error_rate": 0.085,
+            "mean_eos_to_final_ms": 361.1,
+            "median_eos_to_final_ms": 220.2
+          },
+          "qwen3_matcha_v2v_forced_highperf": {
+            "corpus": "bench/perf/corpus short zh/en n=3, LLM delay 0, client EOS",
+            "zh_eos_to_first_audio_mean_ms": 425.027,
+            "zh_eos_to_first_audio_p50_ms": 527.956,
+            "en_eos_to_first_audio_mean_ms": 25.45,
+            "en_eos_to_first_audio_p50_ms": 24.375
+          }
+        },
         "env": {
+          "ASR_BACKEND": "qwen3_asr_rk",
+          "ASR_DECODER_TYPE": "rkllm",
+          "ASR_DECODER_QUANT": "w8a8",
+          "ASR_MAX_NEW_TOKENS": "64",
+          "ASR_FINAL_STOP_ON_PUNCT": "1",
+          "ASR_FINAL_STOP_MIN_CHARS": "8",
+          "ASR_FINAL_STOP_MIN_CHUNKS": "2",
+          "QWEN3_ASR_STREAM_TRUE": "1",
+          "QWEN3_ASR_TRUE_ROLL_SEC": "5",
+          "QWEN3_ASR_TRUE_PARTIAL_TOKENS": "8",
+          "QWEN3_ASR_TRUE_PARTIAL_INTERVAL_MS": "1500",
+          "QWEN3_ASR_TRUE_PARTIAL_WARMUP": "2",
+          "QWEN3_ASR_VAD_FINAL_ASYNC": "1",
+          "QWEN3_ASR_FRONTEND_EOU_MIN_AUDIO_S": "2.5",
           "TTS_BACKEND": "matcha_rknn",
           "MATCHA_USE_ORT": "1",
           "MATCHA_MODEL": "matcha-s64.rknn",
