@@ -14,6 +14,7 @@
     "SENSEVOICE_RKNN_MODEL_DIR": "/opt/asr/sensevoice-rknn",
     "ASR_NPU_CORE_MASK": "NPU_CORE_0",
     "ASR_MODEL_DIR": "/opt/asr/models",
-    "RK_ARTIFACT_AUTO_DOWNLOAD": "0"
+    "RK_ARTIFACT_AUTO_DOWNLOAD": "0",
+    "RK_ENSURE_MATCHA_RESOURCES": "0"
   }
 }
