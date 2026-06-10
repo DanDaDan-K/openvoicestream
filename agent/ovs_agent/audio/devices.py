@@ -1,7 +1,40 @@
+import re
 import sys
 import time
 
 import pyaudio
+
+# Names that report input channels on Jetson/desktop but are NOT real mics:
+# HDMI/HDA capture stubs, the Jetson APE virtual nodes (16 phantom channels
+# each), digital passthrough, and the ALSA aggregate/plug devices. The mic
+# auto-detect must never fall back onto one of these — opening it yields
+# PortAudio -9998 (e.g. HDMI has 0 usable channels) or silent garbage.
+_PHANTOM_INPUT_RE = re.compile(
+    r"(?i)\bhdmi\b|\bhda\b|jetson.*\bape\b|\bape\b|spdif|sysdefault|dmix|"
+    r"surround\d|samplerate|speexrate|upmix|vdownmix|^default$|^null$"
+)
+
+
+def _is_real_mic(name: str) -> bool:
+    """A device name that looks like an actual capture mic, not a phantom
+    HDMI/HDA/APE node."""
+    return not _PHANTOM_INPUT_RE.search(name or "")
+
+
+def _best_fallback_input(
+    devices: list[tuple[int, str]],
+) -> tuple[int, str] | None:
+    """Pick the most mic-like input when the reSpeaker name match misses.
+    Prefer a USB-audio device (the reSpeaker family is USB; this catches it
+    even if the name regex flaked during a hotplug/recreate race), then any
+    non-phantom input. Never returns an HDMI/HDA/APE node."""
+    real = [(i, n) for (i, n) in devices if _is_real_mic(n)]
+    for i, n in real:
+        if "usb" in n.lower():
+            return i, n
+    if real:
+        return real[0]
+    return None
 
 
 def _log(msg: str) -> None:
@@ -69,10 +102,11 @@ def resolve_input_index(value: str | int) -> int:
         return int(value)
 
     # USB devices (the reSpeaker) sometimes enumerate a beat after pipeline
-    # startup. Try a few times before falling back to whatever is available
-    # so we don't get stuck on the Jetson APE every cold boot.
+    # startup — and during a container *recreate* the outgoing container may
+    # still hold the device for a second or two. Retry longer so we don't
+    # give up on the real mic and land on a phantom node.
     last_devices: list[tuple[int, str]] = []
-    for attempt in range(10):
+    for attempt in range(20):
         devices = _enumerate_inputs()
         last_devices = devices
         match = _find_respeaker(devices)
@@ -80,20 +114,31 @@ def resolve_input_index(value: str | int) -> int:
             index, name = match
             _log(f"[Audio] Auto-selected input device [{index}] {name}")
             return index
-        if attempt < 9:
+        if attempt < 19:
             time.sleep(1.0)
 
-    # Still no reSpeaker after 10s — log everything we did see, then
-    # fall back to the first input device. Fallback is almost certainly
-    # NOT what the user wants (probably Jetson APE which has no real mic)
-    # but it lets the rest of the pipeline boot for diagnostics.
-    _log("[Audio] reSpeaker / XVF3800 not found after 10s. Available inputs:")
+    # reSpeaker name match never hit. Don't blindly grab the first input —
+    # on Jetson that is an HDMI/HDA/APE phantom node (0 real channels →
+    # PortAudio -9998). Pick the most mic-like device instead, preferring USB
+    # (which catches the reSpeaker even if its name flaked during a hotplug).
+    _log("[Audio] reSpeaker / XVF3800 not found by name. Available inputs:")
     for index, name in last_devices:
         _log(f"[Audio]   [{index}] {name}")
+    fb = _best_fallback_input(last_devices)
+    if fb is not None:
+        index, name = fb
+        _log(
+            f"[Audio] Auto-selected fallback input device [{index}] {name} "
+            f"(skipped HDMI/HDA/APE phantom inputs)"
+        )
+        _log("[Audio] ⚠ Set MIC_INDEX env var explicitly if this is wrong.")
+        return index
+
+    # Absolute last resort: every input looked like a phantom node. Take the
+    # first one so the pipeline can at least boot for diagnostics.
     if last_devices:
         index, name = last_devices[0]
-        _log(f"[Audio] Auto-selected fallback input device [{index}] {name}")
-        _log("[Audio] ⚠ Set MIC_INDEX env var explicitly if this is wrong.")
+        _log(f"[Audio] ⚠ no mic-like input found; using [{index}] {name}")
         return index
 
     raise RuntimeError("No audio input device found")
