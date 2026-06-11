@@ -46,9 +46,14 @@ RUN if [ -n "$APT_MIRROR" ]; then \
         git \
         build-essential \
         portaudio19-dev \
+        libgl1 \
+        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 # build-essential + portaudio19-dev: pyaudio has no aarch64 wheel and is
 # compiled from source on python:3.10-slim (needs gcc + portaudio headers).
+# libgl1 + libglib2.0-0: Phase B vision needs cv2 at runtime. pyorbbecsdk2
+# pulls full opencv-python (libGL.so.1 / libgthread), which the slim base
+# lacks — without these, `import cv2` fails with "libGL.so.1: cannot open".
 
 WORKDIR /opt/slv
 
@@ -90,7 +95,13 @@ RUN pip install --no-cache-dir \
         "opencv-python-headless>=4.8" \
         "scipy>=1.10" \
         "pin>=3.9.0" \
-        "motorbridge==0.2.8"
+        "motorbridge==0.2.8" \
+        "pyorbbecsdk2"
+# pyorbbecsdk2: Orbbec Gemini2 camera SDK for Phase B vision grasp (import
+# name `pyorbbecsdk`, cp310/aarch64 wheel). Real-machine verified: box
+# detection + camera-frame grasp pose on the placed cardboard box (CPU EP).
+# It pulls full opencv-python (hence libgl1 above). The YOLOE-seg box model
+# is NOT baked — it is mounted at runtime (data artifact, kept swappable).
 # motorbridge PINNED to 0.2.8 — the version powered-validated on the device's
 # /home/seeed/venv (move_to / gripper / enable all confirmed on hardware).
 # Leaving it unpinned (>=0.2.8) is non-deterministic: builds have resolved to
