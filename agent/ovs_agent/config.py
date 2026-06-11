@@ -190,6 +190,16 @@ class Config:
     wake_command_timeout_s: float = 0.0
     wake_command_no_final_text: str = "没听清，请再说一遍。"
     wake_sources: list[str] = field(default_factory=lambda: ["http"])
+    # Opt-in TTS-output hardening (default off → no behaviour change). Apps that
+    # play audio locally and loop re-prompts (e.g. the arm) can enable these.
+    #   * tts_drop_duplicate_window_s: drop a TTS sentence identical to the
+    #     previous one within this many seconds (collapses double-acks). 0 = off.
+    #   * playback_drain_enabled: defer turn completion until local playback has
+    #     actually drained, bounded by playback_drain_timeout_s. Off = complete
+    #     the turn as soon as TTSDone arrives (legacy behaviour).
+    tts_drop_duplicate_window_s: float = 0.0
+    playback_drain_enabled: bool = False
+    playback_drain_timeout_s: float = 10.0
     # In push_to_talk mode, optionally disable the client-VAD silence
     # detector — relying entirely on the explicit ptt/end signal for EOS.
     # Default True since PTT users typically don't want VAD second-guessing.

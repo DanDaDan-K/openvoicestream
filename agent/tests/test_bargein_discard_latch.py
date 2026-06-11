@@ -99,6 +99,10 @@ def _make_app() -> BaseApp:
         sleep_timeout_s=30.0,
         barge_in_min_chars=1,
         barge_in_min_speaking_ms=0,
+        # Opt-in TTS-output hardening under test (gated off by default).
+        tts_drop_duplicate_window_s=2.0,
+        playback_drain_enabled=True,
+        playback_drain_timeout_s=10.0,
     )
     app._sleep_task = None
     app._eos_sent_this_turn = False

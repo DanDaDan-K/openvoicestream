@@ -2737,9 +2737,16 @@ class BaseApp:
             self._cancel_thinking_watchdog()
             sentence = (evt.sentence or "").strip()
             now = time.monotonic()
-            duplicate_window_s = 2.0
+            # Opt-in: drop a TTS sentence identical to the previous one within
+            # this window (collapses double-acks in tool/re-prompt loops). 0 =
+            # off (default), so the framework never silently suppresses a
+            # legitimate repeat unless an app explicitly enables it.
+            duplicate_window_s = float(
+                getattr(self.config, "tts_drop_duplicate_window_s", 0.0) or 0.0
+            )
             if (
-                sentence
+                duplicate_window_s > 0.0
+                and sentence
                 and sentence == getattr(self, "_last_tts_started_sentence", "")
                 and now - float(getattr(self, "_last_tts_started_ts", 0.0)) <= duplicate_window_s
             ):
@@ -2818,7 +2825,14 @@ class BaseApp:
                 drain_task = getattr(self, "_playback_drain_task", None)
                 if drain_task is not None and not drain_task.done():
                     drain_task.cancel()
-                if getattr(self.audio, "is_playing", False):
+                # Opt-in: defer turn completion until local TTS playback has
+                # actually drained (so the turn doesn't end — and the arm
+                # doesn't return to sleep — while audio is still playing out the
+                # speaker). Default off: complete immediately as before.
+                drain_enabled = bool(
+                    getattr(self.config, "playback_drain_enabled", False)
+                )
+                if drain_enabled and getattr(self.audio, "is_playing", False):
                     self._playback_drain_task = asyncio.create_task(
                         self._finish_assistant_turn_after_playback(),
                         name="playback-drain",

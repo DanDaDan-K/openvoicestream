@@ -201,9 +201,10 @@ def test_http_wake_source_basic_lifecycle():
     ws = HTTPWakeSource(app)
     assert ws.name == "http"
     assert ws.setup() is True
-    # start/stop are simple awaitables.
-    asyncio.get_event_loop().run_until_complete(ws.start())
-    asyncio.get_event_loop().run_until_complete(ws.stop())
+    # start/stop are simple awaitables. Use asyncio.run (get_event_loop() with
+    # no running loop raises on Python 3.12+).
+    asyncio.run(ws.start())
+    asyncio.run(ws.stop())
 
 
 @pytest.mark.asyncio
