@@ -127,9 +127,17 @@ class ArmPlugin(Plugin):
                 for old in self._registered_tool_names:
                     store.pop(old, None)
         prev_count = len(self._registered_tool_names)
-        count = register_arm_tools(registry=registry, arm_plugin=self, actions=entries)
+        disabled_actions = set(self.cfg.get("disabled_actions", []) or [])
+        count = register_arm_tools(
+            registry=registry,
+            arm_plugin=self,
+            actions=entries,
+            disabled_actions=disabled_actions,
+        )
         self._registered_tool_names = [
-            e.get("name") for e in entries if isinstance(e.get("name"), str)
+            e.get("name")
+            for e in entries
+            if isinstance(e.get("name"), str) and e.get("name") not in disabled_actions
         ]
         logger.info(
             "ArmPlugin tools synced: %d registered (was %d before)",

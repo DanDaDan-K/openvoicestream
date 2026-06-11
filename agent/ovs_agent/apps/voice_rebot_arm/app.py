@@ -57,6 +57,7 @@ def _resolve_actuator_cfg(meta: dict) -> dict:
         "required_fields",
         "clear_history_on_turn_end",
         "clear_history_on_tool_change",
+        "disabled_actions",
     ):
         if key in actuator:
             plugin_cfg[key] = actuator[key]

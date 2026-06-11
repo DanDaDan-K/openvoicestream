@@ -426,6 +426,23 @@ class DebugDashboardPlugin(Plugin):
             )
 
         app = self.app
+        cfg = getattr(app, "config", None)
+        try:
+            server_loop = bool(cfg.server_loop_enabled()) if cfg is not None else False
+        except AttributeError:
+            server_loop = bool(getattr(cfg, "server_loop", False))
+        if server_loop:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "status": "unsupported",
+                    "error": (
+                        "inject_user_text cannot exercise server-loop; use real "
+                        "mic/ASR or a server-side injection path"
+                    ),
+                },
+                status=409,
+            )
         # Reject if a prior LLM turn is still in flight — injecting a
         # second utterance mid-turn would race the FSM and confuse the
         # preamble / tool-dispatch sequencing this endpoint exists to

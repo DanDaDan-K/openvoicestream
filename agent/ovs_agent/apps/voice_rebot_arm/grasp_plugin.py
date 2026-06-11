@@ -50,6 +50,9 @@ class GraspPlugin(Plugin):
     def setup(self) -> bool:
         # Register the tool eagerly so it is advertised on the first wake,
         # exactly like ArmPlugin registers its action tools in setup().
+        if self.cfg.get("enabled", True) is False:
+            logger.info("GraspPlugin: disabled by config; not registering grasp_object")
+            return True
         self._register_tool()
         return True
 
@@ -261,6 +264,7 @@ class GraspPlugin(Plugin):
         keys = (
             "conf", "iou", "depth_quantile", "pregrasp_offset_m",
             "insertion_depth_m", "lift_height_m", "grasp_force",
+            "open_distance_m",
             "move_duration", "warm_up_frames", "release_after",
         )
         return {k: self.cfg[k] for k in keys if k in self.cfg}

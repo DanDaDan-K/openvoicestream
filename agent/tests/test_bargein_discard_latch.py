@@ -18,7 +18,14 @@ from types import SimpleNamespace
 
 from ovs_agent.app_base import BaseApp
 from ovs_agent.audio_io import AudioIO
-from ovs_agent.slv_client import ASRFinal, ASRPartial, TTSAudio
+from ovs_agent.slv_client import (
+    ASRFinal,
+    ASRPartial,
+    TTSAudio,
+    TTSDone,
+    TTSSentenceDone,
+    TTSStarted,
+)
 from ovs_agent.state import ConvState
 
 
@@ -60,6 +67,11 @@ class _FakeAudio:
     def set_output_sample_rate(self, sr: int) -> None:
         pass
 
+    def mark_playback_done(self) -> None:
+        # Remote TTS is done sending, but local buffered audio may still be
+        # draining through the speaker.
+        pass
+
 
 class _FakeSLV:
     def __init__(self) -> None:
@@ -93,6 +105,9 @@ def _make_app() -> BaseApp:
     app._asr_watchdog_task = None
     app._thinking_watchdog_task = None
     app._ptt_explicit_eos_pending = False
+    app._last_tts_started_sentence = ""
+    app._last_tts_started_ts = 0.0
+    app._drop_current_tts_sentence = False
     app._vad_state = "idle"
     app._vad_speech_ms = 0
     app._vad_silence_ms = 0
@@ -173,8 +188,6 @@ async def test_tts_done_does_not_demote_barged_in():
     state must stay BARGED_IN — VAD silence-end / ASRFinal owns the
     next transition. Demoting to IDLE here would also start the auto-
     sleep timer mid-utterance under push_to_talk mode."""
-    from ovs_agent.slv_client import TTSDone
-
     app = _make_app()
     await app._dispatch_one(TTSAudio(pcm=b"\x01\x00" * 8, sample_rate=24000))
     await app._dispatch_one(ASRPartial(text="等等"))
@@ -184,3 +197,45 @@ async def test_tts_done_does_not_demote_barged_in():
     await app._dispatch_one(TTSDone())
     assert app._state == ConvState.BARGED_IN
     assert app.audio.is_playing is False
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tts_sentence_audio_is_dropped():
+    """SLV can echo a direct send_text+tts_flush fallback twice.
+
+    The second identical TTSStarted in a short window should not replay the
+    same PCM or flip the FSM back into SPEAKING.
+    """
+    app = _make_app()
+
+    await app._dispatch_one(TTSStarted(sentence="没听清，请再说一遍。"))
+    await app._dispatch_one(TTSAudio(pcm=b"\x01\x00" * 8, sample_rate=16000))
+    await app._dispatch_one(TTSSentenceDone(sentence="没听清，请再说一遍。"))
+    await app._dispatch_one(TTSDone(session_complete=False))
+
+    first_count = len(app.audio.played)
+    assert first_count == 1
+
+    await app._dispatch_one(TTSStarted(sentence="没听清，请再说一遍。"))
+    await app._dispatch_one(TTSAudio(pcm=b"\x02\x00" * 8, sample_rate=16000))
+    await app._dispatch_one(TTSSentenceDone(sentence="没听清，请再说一遍。"))
+    await app._dispatch_one(TTSDone(session_complete=False))
+
+    assert len(app.audio.played) == first_count
+
+
+@pytest.mark.asyncio
+async def test_tts_done_waits_for_local_playback_drain_before_idle():
+    """TTSDone means SLV stopped streaming, not that local audio is silent."""
+    app = _make_app()
+    await app._dispatch_one(TTSAudio(pcm=b"\x01\x00" * 8, sample_rate=24000))
+    assert app._state == ConvState.SPEAKING
+    assert app.audio.is_playing is True
+
+    await app._dispatch_one(TTSDone())
+    assert app._state == ConvState.SPEAKING
+
+    app.audio.is_playing = False
+    task = getattr(app, "_playback_drain_task")
+    await asyncio.wait_for(task, timeout=1.0)
+    assert app._state == ConvState.IDLE

@@ -12,6 +12,7 @@ import threading
 import pytest
 
 from ovs_agent.apps.voice_rebot_arm.grasp_plugin import GraspPlugin
+from ovs_agent.tools import ToolRegistry
 
 
 # ── fakes ───────────────────────────────────────────────────────────
@@ -127,6 +128,15 @@ def test_dispatch_arm_not_connected() -> None:
     res = asyncio.run(plugin._dispatch_grasp("banana"))  # noqa: SLF001
     assert res["started"] is False
     assert res["error"] == "arm not connected"
+
+
+def test_setup_does_not_register_tool_when_disabled() -> None:
+    app = _FakeApp()
+    app.tool_registry = ToolRegistry()
+    plugin = GraspPlugin(app, {"enabled": False})
+
+    assert plugin.setup() is True
+    assert not app.tool_registry.has("grasp_object")
 
 
 # ── stop() lifecycle (item 9) ───────────────────────────────────────

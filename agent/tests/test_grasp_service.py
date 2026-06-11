@@ -34,7 +34,7 @@ class FakeArm:
         self._holding = True
 
     def open_gripper(self, distance_m: float = 0.09) -> None:
-        self.calls.append(("open_gripper",))
+        self.calls.append(("open_gripper", float(distance_m)))
 
     def move_to(self, x, y, z, roll=0.0, pitch=0.0, yaw=0.0, duration=2.0) -> bool:
         self.calls.append(("move_to", round(float(z), 4)))
@@ -155,6 +155,29 @@ def test_full_pipeline_order_and_success():
     assert grasp_call[1] == 1.2
 
 
+def test_grasp_pipeline_uses_configured_safe_open_distance():
+    color, depth, K = _scene()
+    arm = FakeArm()
+    cam = FakeCamera(color, depth, K)
+    seg = FakeSegmenter(_make_result())
+
+    res = run_grasp_once(
+        "banana",
+        arm=arm,
+        segmenter=seg,
+        camera=cam,
+        K=K,
+        T_hand_eye=np.eye(4),
+        warm_up_frames=0,
+        open_distance_m=0.06,
+        move_duration=0.02,
+    )
+
+    assert res["success"] is True
+    open_calls = [c for c in arm.calls if c[0] == "open_gripper"]
+    assert open_calls == [("open_gripper", 0.06)]
+
+
 def test_cancel_before_motion_safe_parks_gripper():
     color, depth, K = _scene()
     arm = FakeArm()
@@ -166,13 +189,15 @@ def test_cancel_before_motion_safe_parks_gripper():
 
     res = run_grasp_once(
         "banana", arm=arm, segmenter=seg, camera=cam, K=K,
-        T_hand_eye=np.eye(4), cancel_event=cancel,
+        T_hand_eye=np.eye(4), cancel_event=cancel, open_distance_m=0.06,
     )
 
     assert res["success"] is False
     assert res["cancelled"] is True
     # safe-park = gripper opened; NO grasp (clamp) issued.
     assert "open_gripper" in arm.names_of_calls()
+    open_call = next(c for c in arm.calls if c[0] == "open_gripper")
+    assert open_call == ("open_gripper", 0.06)
     assert "grasp" not in arm.names_of_calls()
 
 

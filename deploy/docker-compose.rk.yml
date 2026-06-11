@@ -25,7 +25,7 @@ services:
       - rk-asr-models:/opt/asr/models
       - rk-tts-models:/opt/tts/models
       # NPU matmul parallel helper (PYTHONPATH below)
-      - /home/cat/project/rknn-matmul-parallel:/opt/rknn-matmul-parallel:ro
+      - ${RKNN_MATMUL_DIR:-/home/cat/project/rknn-matmul-parallel}:/opt/rknn-matmul-parallel:ro
     environment:
       - OVS_PROFILE=${OVS_PROFILE:-}
       # Week 2: structured JSON logs in production.

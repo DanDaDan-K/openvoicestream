@@ -225,6 +225,34 @@ async def test_server_tool_call_handler_failure_returns_error_result():
 
 
 @pytest.mark.asyncio
+async def test_server_tool_call_trigger_guard_blocks_wrong_motion_mapping():
+    calls: list[dict] = []
+    reg = ToolRegistry()
+
+    @reg.tool(
+        name="point_at",
+        description='Point forward. Triggers: "指向", "指一下", "point at".',
+    )
+    def point_at() -> dict:
+        calls.append({"ran": True})
+        return {"started": True, "action": "point_at"}
+
+    app = _make_app(server_loop=True, registry=reg)
+    app.config.tool_trigger_guard = True
+    app._last_user_utterance_text = "请点头。"
+
+    evt = ServerToolCall(id="c_guard", name="point_at", arguments={})
+    await app._dispatch_one(evt)
+    await _drain_tool_tasks(app)
+
+    assert calls == []
+    res = app.slv.tool_results[0]
+    assert res["id"] == "c_guard"
+    assert res["ok"] is False
+    assert "no trigger phrase" in (res["error"] or "")
+
+
+@pytest.mark.asyncio
 async def test_server_tool_call_is_dispatched_in_background_non_blocking():
     """#F4: _dispatch_one must NOT block on the tool's execution — it schedules
     a tracked background task and returns immediately, so the dispatch loop keeps

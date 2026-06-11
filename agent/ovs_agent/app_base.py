@@ -117,6 +117,25 @@ def _strip_for_signal(text: str) -> str:
     return "".join(out).lower()
 
 
+def _normalize_tool_trigger_text(text: str) -> str:
+    """Normalize text for simple phrase-containment tool guards."""
+    import unicodedata
+    out: list[str] = []
+    for ch in text or "":
+        if unicodedata.category(ch)[0] in {"L", "N"}:
+            out.append(ch.lower())
+    return "".join(out)
+
+
+def _extract_tool_trigger_phrases(description: str) -> list[str]:
+    """Extract quoted trigger phrases from a tool description."""
+    import re
+    match = re.search(r"(?:Triggers?|Trigger words?)\s*:\s*(.*)", description or "", re.I | re.S)
+    if not match:
+        return []
+    return [p.strip() for p in re.findall(r"""["']([^"']+)["']""", match.group(1)) if p.strip()]
+
+
 def _build_llm(config: Config) -> LLMBackend:
     backend = config.llm_backend.lower()
     if backend == "noop":
@@ -199,6 +218,9 @@ class BaseApp:
         self._dispatch_task: asyncio.Task | None = None
         self._llm_turn_task: asyncio.Task | None = None
         self._first_tts_seen = False
+        self._last_tts_started_sentence: str = ""
+        self._last_tts_started_ts: float = 0.0
+        self._drop_current_tts_sentence: bool = False
         # Client-side VAD state machine. Drives manual asr_eos to SLV when
         # server-side VAD is disabled (slv_config.vad == "none"), so the
         # ASR model gets a chance to accumulate enough audio before being
@@ -235,6 +257,10 @@ class BaseApp:
         # after a wake-word fires, so the wake-word tail doesn't leak into the
         # command ASR. Set in wake() for audio wake sources; checked in _mic_pump.
         self._wake_mic_skip_until: float = 0.0
+        # Monotonic deadline: drop mic audio during short local notification
+        # playback, such as the wake tone, so speaker echo does not start an
+        # ASR turn while the conversation state is still IDLE.
+        self._local_output_mic_suppress_until: float = 0.0
         # #F4: in-flight SERVER_TOOL_CALL handler tasks. Dispatching a remote
         # tool in a background task keeps the dispatch loop draining events
         # (TTS audio / partials / control frames) instead of blocking on the
@@ -243,10 +269,17 @@ class BaseApp:
         self._pending_tool_tasks: set[asyncio.Task] = set()
         # Auto-sleep timer (only armed when pipeline_mode != always_on).
         self._sleep_task: asyncio.Task | None = None
+        # Wake-command timer: when enabled by a robot/control app, a wake word
+        # opens one bounded command window and then returns to SLEEPING if no
+        # usable ASR final arrives. This is separate from the general
+        # auto-sleep timer because it closes the post-wake hot-mic window.
+        self._wake_command_timeout_task: asyncio.Task | None = None
+        self._wake_command_retry_after_no_final: bool = False
         # Push-to-talk: when True, the next asr_final is the explicit
         # close of a PTT turn — used to short-circuit empty-final guards
         # that would otherwise drop a clipped PTT utterance.
         self._ptt_explicit_eos_pending: bool = False
+        self._last_user_utterance_text: str = ""
         # Per-turn EOS dedupe: VAD silence and PTT/end can both want to
         # send asr_eos. Send at most one per turn. Cleared on every
         # ASRFinal, on PTT/start (next turn), and on reconnect.
@@ -267,6 +300,7 @@ class BaseApp:
         # On fire, force state back to IDLE so the next user turn isn't
         # blocked. Configurable via ``thinking_timeout_s`` (default 20s).
         self._thinking_watchdog_task: asyncio.Task | None = None
+        self._playback_drain_task: asyncio.Task | None = None
         # silero-primary stall fallback (config.vad_stall_eos_ms): reset on
         # every real asr_partial; forces a single asr_eos if silero goes quiet
         # without finalizing, so the turn can't hang. See _stall_eos_watchdog.
@@ -593,6 +627,74 @@ class BaseApp:
             pass
         self._set_state(ConvState.IDLE)
         self._reset_sleep_timer()
+        self._arm_wake_command_timeout()
+        self._play_wake_tone()
+
+    def _play_wake_tone(self) -> None:
+        """Play a short notification tone so the user knows the wake word landed."""
+        meta = getattr(self.config, "metadata", {}) or {}
+        tone_cfg = meta.get("wake_tone", {}) or {}
+        hz = float(tone_cfg.get("hz", 0))
+        ms = float(tone_cfg.get("ms", 0))
+        suppress_tail_ms = float(tone_cfg.get("mic_suppress_tail_ms", 600))
+        if hz <= 0 or ms <= 0:
+            return
+        import math
+        sr = self.audio.output_sr or 16000
+        n = int(sr * ms / 1000)
+        amp = 20000
+        fade = min(n // 4, int(sr * 0.01))
+        pcm = bytearray(n * 2)
+        import struct
+        for i in range(n):
+            s = amp * math.sin(2 * math.pi * hz * i / sr)
+            if i < fade:
+                s *= i / fade
+            elif i >= n - fade:
+                s *= (n - 1 - i) / fade
+            struct.pack_into("<h", pcm, i * 2, max(-32768, min(32767, int(s))))
+        notify = getattr(self.audio, "play_notification", None)
+        if callable(notify):
+            notify(bytes(pcm))
+            self._local_output_mic_suppress_until = max(
+                getattr(self, "_local_output_mic_suppress_until", 0.0),
+                time.monotonic() + (ms + suppress_tail_ms) / 1000.0,
+            )
+            logger.info("wake tone: %dHz %dms", int(hz), int(ms))
+
+    def _play_sleep_tone(self) -> None:
+        """Play a descending tone so the user knows the listening window closed."""
+        meta = getattr(self.config, "metadata", {}) or {}
+        tone_cfg = meta.get("sleep_tone", {}) or {}
+        hz_start = float(tone_cfg.get("hz_start", 0))
+        hz_end = float(tone_cfg.get("hz_end", 0))
+        ms = float(tone_cfg.get("ms", 0))
+        suppress_tail_ms = float(tone_cfg.get("mic_suppress_tail_ms", 400))
+        if hz_start <= 0 or hz_end <= 0 or ms <= 0:
+            return
+        import math, struct
+        sr = self.audio.output_sr or 16000
+        n = int(sr * ms / 1000)
+        amp = 16000
+        fade = min(n // 4, int(sr * 0.01))
+        pcm = bytearray(n * 2)
+        for i in range(n):
+            t = i / max(n - 1, 1)
+            hz = hz_start + (hz_end - hz_start) * t
+            s = amp * math.sin(2 * math.pi * hz * i / sr)
+            if i < fade:
+                s *= i / fade
+            elif i >= n - fade:
+                s *= (n - 1 - i) / fade
+            struct.pack_into("<h", pcm, i * 2, max(-32768, min(32767, int(s))))
+        notify = getattr(self.audio, "play_notification", None)
+        if callable(notify):
+            notify(bytes(pcm))
+            self._local_output_mic_suppress_until = max(
+                getattr(self, "_local_output_mic_suppress_until", 0.0),
+                time.monotonic() + (ms + suppress_tail_ms) / 1000.0,
+            )
+            logger.info("sleep tone: %d→%dHz %dms", int(hz_start), int(hz_end), int(ms))
 
     async def sleep(self) -> None:
         """Forcibly transition to SLEEPING — cancel LLM turn, abort SLV,
@@ -618,6 +720,10 @@ class BaseApp:
             await self.audio.stop_playback()
         except Exception:
             pass
+        self._cancel_wake_command_timeout()
+        drain_task = getattr(self, "_playback_drain_task", None)
+        if drain_task is not None and not drain_task.done():
+            drain_task.cancel()
         self._first_tts_seen = False
         self._set_state(ConvState.SLEEPING)
         if self._sleep_task is not None and not self._sleep_task.done():
@@ -638,6 +744,148 @@ class BaseApp:
         except RuntimeError:
             # No running loop (called from sync context like tests).
             self._sleep_task = None
+
+    def _wake_command_single_turn_enabled(self) -> bool:
+        return (
+            getattr(self.config, "pipeline_mode", "always_on") == "wake_word"
+            and bool(getattr(self.config, "wake_command_single_turn", False))
+        )
+
+    def _cancel_wake_command_timeout(self) -> None:
+        task = getattr(self, "_wake_command_timeout_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._wake_command_timeout_task = None
+
+    def _arm_wake_command_timeout(self) -> None:
+        self._cancel_wake_command_timeout()
+        if not self._wake_command_single_turn_enabled():
+            return
+        timeout = float(getattr(self.config, "wake_command_timeout_s", 0.0) or 0.0)
+        if timeout <= 0:
+            return
+        try:
+            self._wake_command_timeout_task = asyncio.create_task(
+                self._wake_command_timeout(timeout),
+                name="wake-command-timeout",
+            )
+        except RuntimeError:
+            self._wake_command_timeout_task = None
+
+    async def _wake_command_timeout(self, timeout: float) -> None:
+        try:
+            await asyncio.sleep(timeout)
+        except asyncio.CancelledError:
+            return
+        if not self._wake_command_single_turn_enabled():
+            return
+        if getattr(self, "_state", ConvState.IDLE) in (
+            ConvState.IDLE,
+            ConvState.LISTENING,
+        ):
+            logger.info(
+                "wake command timeout %.1fs with no valid final; forcing asr_eos",
+                timeout,
+            )
+            self._set_state(ConvState.THINKING)
+            try:
+                await self.send_asr_eos_once()
+            except Exception:
+                logger.exception("wake command timeout asr_eos failed")
+                await self._return_to_sleep_after_command_turn()
+
+    async def _return_to_sleep_after_command_turn(self) -> None:
+        """Close a wake-command listening window without cancelling tools.
+
+        This is intentionally NOT ``sleep()``. User/admin sleep is a cancel
+        action and broadcasts ``on_sleep``; GraspPlugin listens to that hook to
+        abort an in-flight grasp. Command-mode post-turn sleep only stops the
+        mic from accepting another command until the next wake word.
+        """
+        self._cancel_wake_command_timeout()
+        if getattr(self, "_state", ConvState.IDLE) == ConvState.SLEEPING:
+            return
+        if self._sleep_task is not None and not self._sleep_task.done():
+            self._sleep_task.cancel()
+        self._sleep_task = None
+        self._first_tts_seen = False
+        self._eos_sent_this_turn = False
+        self._wake_command_retry_after_no_final = False
+        self._play_sleep_tone()
+        self._set_state(ConvState.SLEEPING)
+
+    async def _open_wake_command_retry_window(self) -> None:
+        """Keep the post-wake command window open after a no-final prompt."""
+        self._cancel_wake_command_timeout()
+        if self._sleep_task is not None and not self._sleep_task.done():
+            self._sleep_task.cancel()
+        self._sleep_task = None
+        self._first_tts_seen = False
+        self._eos_sent_this_turn = False
+        self._wake_command_retry_after_no_final = False
+        if getattr(self, "_state", ConvState.IDLE) != ConvState.BARGED_IN:
+            self._set_state(ConvState.IDLE)
+            self._arm_wake_command_timeout()
+
+    async def _complete_assistant_turn(self) -> None:
+        if (
+            self._state != ConvState.BARGED_IN
+            and self._wake_command_single_turn_enabled()
+            and getattr(self, "_wake_command_retry_after_no_final", False)
+        ):
+            await self._open_wake_command_retry_window()
+            await self._broadcast("on_assistant_done")
+            return
+        if (
+            self._state != ConvState.BARGED_IN
+            and self._wake_command_single_turn_enabled()
+        ):
+            await self._return_to_sleep_after_command_turn()
+        elif self._state != ConvState.BARGED_IN:
+            self._set_state(ConvState.IDLE)
+            self._reset_sleep_timer()
+        await self._broadcast("on_assistant_done")
+
+    async def _finish_assistant_turn_after_playback(self) -> None:
+        """Complete a TTS turn after locally buffered PCM has drained."""
+        timeout_s = float(getattr(self.config, "playback_drain_timeout_s", 10.0))
+        deadline = time.monotonic() + max(0.1, timeout_s)
+        try:
+            while (
+                self._state != ConvState.BARGED_IN
+                and getattr(self.audio, "is_playing", False)
+                and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(0.02)
+            await self._complete_assistant_turn()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("playback drain completion failed")
+
+    async def _speak_wake_command_no_final_feedback(self) -> bool:
+        """Tell the user a wake-command turn heard no usable ASR final."""
+        text = str(
+            getattr(
+                self.config,
+                "wake_command_no_final_text",
+                "没听清，请再说一遍。",
+            )
+            or ""
+        ).strip()
+        if not text:
+            return False
+        try:
+            self._wake_command_retry_after_no_final = True
+            logger.info("wake command no-final feedback: %s", text)
+            await self._broadcast("on_assistant_sentence_start", text)
+            await self.slv.send_text(text)
+            await self.slv.flush_tts()
+            return True
+        except Exception:
+            self._wake_command_retry_after_no_final = False
+            logger.exception("wake command no-final feedback failed")
+            return False
 
     async def _sleep_after(self, timeout: float) -> None:
         try:
@@ -845,6 +1093,7 @@ class BaseApp:
             except (asyncio.CancelledError, Exception):
                 pass
         self._sleep_task = None
+        self._cancel_wake_command_timeout()
         mic_watchdog_task = getattr(self, "_mic_watchdog_task", None)
         if mic_watchdog_task is not None and not mic_watchdog_task.done():
             mic_watchdog_task.cancel()
@@ -1135,18 +1384,31 @@ class BaseApp:
             makeup_gain = float(getattr(self.config, "mic_makeup_gain", 1.0))
             drive_eos = bool(getattr(self.config, "gate_drive_eos", False))
             eos_min_speech_ms = float(getattr(self.config, "gate_eos_min_speech_ms", 250.0))
+            gate_eos_delay_ms = float(getattr(self.config, "gate_eos_delay_ms", 0.0) or 0.0)
             drop_while_speaking = bool(getattr(self.config, "mic_drop_while_speaking", False))
             need_rms = gate_enabled or makeup_gain != 1.0
             _gate_open_state = False
             _gate_opened_at = 0.0
             _gate_last_loud_ts = 0.0
             _gate_zeros: bytes | None = None
+            _diag_fwd_real = 0  # DIAG: real (non-zero) chunks forwarded to SLV
+
+            def _reset_energy_gate(reason: str) -> None:
+                nonlocal _gate_open_state, _gate_opened_at
+                nonlocal _gate_last_loud_ts, _diag_fwd_real
+                if _gate_open_state:
+                    logger.info("DIAG mic-gate RESET reason=%s", reason)
+                _gate_open_state = False
+                _gate_opened_at = 0.0
+                _gate_last_loud_ts = 0.0
+                _diag_fwd_real = 0
+
             if gate_enabled or makeup_gain != 1.0 or drop_while_speaking:
                 logger.info(
                     "mic-pump enhancements: gate=%s open=%.4f close=%.4f hangover=%.0fms "
-                    "makeup_gain=%.1f drive_eos=%s drop_while_speaking=%s",
+                    "makeup_gain=%.1f drive_eos=%s eos_delay=%.0fms drop_while_speaking=%s",
                     gate_enabled, gate_open, gate_close, gate_hangover_ms,
-                    makeup_gain, drive_eos, drop_while_speaking,
+                    makeup_gain, drive_eos, gate_eos_delay_ms, drop_while_speaking,
                 )
             async for chunk in self.audio.start_capture():
                 self._last_mic_chunk_ts = time.monotonic()
@@ -1164,6 +1426,7 @@ class BaseApp:
                     # Also clear pre-roll so we don't leak pre-sleep / TTS-echo
                     # audio into the next user utterance.
                     preroll.clear()
+                    _reset_energy_gate(_st.value)
                     continue
                 # Race #3: while SLV is reconnecting, drop chunks and
                 # clear pre-roll. Carrying pre-reconnect audio into the
@@ -1173,6 +1436,7 @@ class BaseApp:
                 is_reconn = getattr(self.slv, "is_reconnecting", None)
                 if callable(is_reconn) and is_reconn():
                     preroll.clear()
+                    _reset_energy_gate("slv_reconnecting")
                     continue
                 # Skip the wake-word tail: for a brief window after a wake-word
                 # fires, drop mic audio so the trailing "Hey Jarvis" + reverb
@@ -1181,6 +1445,11 @@ class BaseApp:
                 # preroll too so none of it is carried over.
                 if time.monotonic() < getattr(self, "_wake_mic_skip_until", 0.0):
                     preroll.clear()
+                    _reset_energy_gate("wake_mic_skip")
+                    continue
+                if time.monotonic() < getattr(self, "_local_output_mic_suppress_until", 0.0):
+                    preroll.clear()
+                    _reset_energy_gate("local_output")
                     continue
                 # (#38) Hold audio until boot-time tool advertise finished.
                 # Set immediately in client-loop mode (advertise is a no-op),
@@ -1190,6 +1459,7 @@ class BaseApp:
                 _adv_ready = getattr(self, "_advertise_ready", None)
                 if _adv_ready is not None and not _adv_ready.is_set():
                     preroll.clear()
+                    _reset_energy_gate("advertise_not_ready")
                     continue
                 # Per-chunk mic RMS. The energy gate / makeup gain need it
                 # EVERY chunk; otherwise it's only needed for the rate-limited
@@ -1230,25 +1500,41 @@ class BaseApp:
                     # the gate's open→close edge (server finalizes immediately
                     # instead of relying on its own VAD endpoint, which wedges).
                     out_chunk = chunk
+                    pending_gate_eos = False
                     now_mono = time.monotonic()
                     if gate_enabled:
                         if rms >= gate_open:
                             if not _gate_open_state:
                                 _gate_opened_at = now_mono
+                                _diag_fwd_real = 0
+                                # DIAG: gate edge — closed→open (speech onset)
+                                logger.info(
+                                    "DIAG mic-gate OPEN rms=%.4f convstate=%s",
+                                    rms, getattr(self, "_state", ConvState.IDLE).value,
+                                )
                             _gate_open_state = True
                             _gate_last_loud_ts = now_mono
                         elif rms < gate_close:
                             if (now_mono - _gate_last_loud_ts) * 1000.0 >= gate_hangover_ms:
+                                if _gate_open_state:
+                                    # DIAG: gate edge — open→closed (speech end)
+                                    logger.info(
+                                        "DIAG mic-gate CLOSE speech_ms=%.0f fwd_real=%d convstate=%s",
+                                        (_gate_last_loud_ts - _gate_opened_at) * 1000.0,
+                                        _diag_fwd_real,
+                                        getattr(self, "_state", ConvState.IDLE).value,
+                                    )
                                 if _gate_open_state and drive_eos and (
                                     (_gate_last_loud_ts - _gate_opened_at) * 1000.0 >= eos_min_speech_ms
                                 ):
-                                    # open→close edge after real speech: force
-                                    # the server to finalize this utterance now.
-                                    try:
-                                        await self.send_asr_eos_once()
-                                    except Exception:
-                                        logger.exception("gate-edge asr_eos failed")
+                                    # Defer EOS until after this close/silence
+                                    # chunk has been written to SLV. Sending
+                                    # asr_eos before the boundary chunk can make
+                                    # the server finalize a short command before
+                                    # it has consumed the tail audio.
+                                    pending_gate_eos = True
                                 _gate_open_state = False
+                                _diag_fwd_real = 0
                         if not _gate_open_state:
                             if _gate_zeros is None or len(_gate_zeros) != len(chunk):
                                 _gate_zeros = b"\x00" * len(chunk)
@@ -1259,7 +1545,23 @@ class BaseApp:
                             out_chunk = _np.clip(_g, -32768.0, 32767.0).astype(_np.int16).tobytes()
                         except Exception:  # pragma: no cover - defensive
                             pass
+                    if out_chunk is not _gate_zeros:
+                        _diag_fwd_real += 1
                     await self._send_audio_nonblocking(out_chunk)
+                    if pending_gate_eos:
+                        if gate_eos_delay_ms > 0:
+                            await asyncio.sleep(gate_eos_delay_ms / 1000.0)
+                        try:
+                            sent_eos = await self.send_asr_eos_once()
+                            if sent_eos:
+                                self._cancel_wake_command_timeout()
+                                self._set_state(ConvState.THINKING)
+                                logger.info(
+                                    "DIAG mic-gate EOS sent; state=thinking delay_ms=%.0f",
+                                    gate_eos_delay_ms,
+                                )
+                        except Exception:
+                            logger.exception("gate-edge asr_eos failed")
                     continue
 
                 # Update VAD first; it may transition idle→speech this chunk.
@@ -1687,6 +1989,16 @@ class BaseApp:
         registry = getattr(self, "tool_registry", None)
         if registry is None:
             from .tools import default_registry as registry  # type: ignore
+        guard_error = self._server_tool_trigger_guard_error(evt, registry)
+        if guard_error is not None:
+            logger.warning(
+                "server tool_call %r blocked by trigger guard: %s",
+                evt.name, guard_error,
+            )
+            await self.slv.send_tool_result(
+                evt.id, evt.name, ok=False, error=guard_error
+            )
+            return
         # Build a tool ctx mirroring the local-loop path (app_mode builds the
         # same shape). session/event_bus/config let arm handlers reach state.
         try:
@@ -1719,6 +2031,29 @@ class BaseApp:
             await self.slv.send_tool_result(
                 evt.id, evt.name, ok=False, error=err or "tool execution failed"
             )
+
+    def _server_tool_trigger_guard_error(self, evt: "ServerToolCall", registry) -> str | None:  # noqa: ANN001
+        if not bool(getattr(self.config, "tool_trigger_guard", False)):
+            return None
+        user_text = str(getattr(self, "_last_user_utterance_text", "") or "")
+        if not user_text.strip():
+            return None
+        tools = getattr(registry, "_tools", {}) or {}
+        tool_meta = tools.get(evt.name)
+        if tool_meta is None:
+            return None
+        phrases = _extract_tool_trigger_phrases(getattr(tool_meta, "description", ""))
+        if not phrases:
+            return None
+        normalized_text = _normalize_tool_trigger_text(user_text)
+        for phrase in phrases:
+            normalized_phrase = _normalize_tool_trigger_text(phrase)
+            if normalized_phrase and normalized_phrase in normalized_text:
+                return None
+        return (
+            f"no trigger phrase for tool {evt.name!r} in current user text "
+            f"{user_text!r}"
+        )
 
     async def _interrupt_current_turn_for_barge_in(self) -> None:
         """Stop the audible assistant turn before accepting barge-in audio.
@@ -1861,7 +2196,12 @@ class BaseApp:
             "assuming empty/dropped final — resetting to IDLE", timeout,
         )
         self._eos_sent_this_turn = False
-        self._set_state(ConvState.IDLE)
+        if self._wake_command_single_turn_enabled():
+            if not await self._speak_wake_command_no_final_feedback():
+                await self._return_to_sleep_after_command_turn()
+                await self._broadcast("on_assistant_done")
+        else:
+            self._set_state(ConvState.IDLE)
 
     async def _update_vad(self, chunk: bytes, chunk_ms: int) -> None:
         """Client-side speech-end detector. Sends asr_eos to SLV after a
@@ -2298,8 +2638,13 @@ class BaseApp:
                         "empty asr_final after pending EOS while THINKING; "
                         "resetting to IDLE (race #2)"
                     )
-                    self._set_state(ConvState.IDLE)
-                    self._reset_sleep_timer()
+                    if self._wake_command_single_turn_enabled():
+                        if not await self._speak_wake_command_no_final_feedback():
+                            await self._return_to_sleep_after_command_turn()
+                            await self._broadcast("on_assistant_done")
+                    else:
+                        self._set_state(ConvState.IDLE)
+                        self._reset_sleep_timer()
                 elif cur_state in (ConvState.THINKING, ConvState.SPEAKING):
                     logger.debug(
                         "low-signal final arrived during %s; FSM left alone "
@@ -2310,6 +2655,8 @@ class BaseApp:
             logger.info(
                 "asr_final received: %r (language=%r)", evt.text, evt.language
             )
+            self._last_user_utterance_text = evt.text or ""
+            self._cancel_wake_command_timeout()
             # Re-enable speaker playback for the next turn. stop_playback
             # latched discard=True on the prior barge-in / sleep so SLV's
             # tail-end TTS didn't keep playing; clear that now so the new
@@ -2388,10 +2735,30 @@ class BaseApp:
         if isinstance(evt, TTSStarted):
             # Real TTS started — thinking watchdog can stand down.
             self._cancel_thinking_watchdog()
+            sentence = (evt.sentence or "").strip()
+            now = time.monotonic()
+            duplicate_window_s = 2.0
+            if (
+                sentence
+                and sentence == getattr(self, "_last_tts_started_sentence", "")
+                and now - float(getattr(self, "_last_tts_started_ts", 0.0)) <= duplicate_window_s
+            ):
+                self._drop_current_tts_sentence = True
+                logger.warning(
+                    "dropping duplicate TTS sentence within %.1fs: %r",
+                    duplicate_window_s,
+                    sentence,
+                )
+                return
+            self._drop_current_tts_sentence = False
+            self._last_tts_started_sentence = sentence
+            self._last_tts_started_ts = now
             await self._broadcast("on_assistant_sentence_start", evt.sentence)
             return
 
         if isinstance(evt, TTSAudio):
+            if getattr(self, "_drop_current_tts_sentence", False):
+                return
             # If we're in BARGED_IN, the tail of SLV's prior-turn TTS is
             # still draining over the WS. Don't reset state to SPEAKING or
             # play the audio (audio.play() also drops it via the discard
@@ -2421,6 +2788,9 @@ class BaseApp:
             return
 
         if isinstance(evt, TTSSentenceDone):
+            if getattr(self, "_drop_current_tts_sentence", False):
+                self._drop_current_tts_sentence = False
+                return
             await self._broadcast("on_assistant_sentence", evt.sentence)
             return
 
@@ -2445,9 +2815,16 @@ class BaseApp:
             # Forcing IDLE here would also kick the auto-sleep timer in
             # push_to_talk mode while the user is still speaking.
             if self._state != ConvState.BARGED_IN:
-                self._set_state(ConvState.IDLE)
-                self._reset_sleep_timer()
-            await self._broadcast("on_assistant_done")
+                drain_task = getattr(self, "_playback_drain_task", None)
+                if drain_task is not None and not drain_task.done():
+                    drain_task.cancel()
+                if getattr(self.audio, "is_playing", False):
+                    self._playback_drain_task = asyncio.create_task(
+                        self._finish_assistant_turn_after_playback(),
+                        name="playback-drain",
+                    )
+                    return
+            await self._complete_assistant_turn()
             # NO proactive reconnect on tts_done. SLV server v1.15+ added
             # an ASR turn wall-clock timeout that force-releases the
             # SessionLimiter slot even when Qwen3-ASR worker wedges, so
