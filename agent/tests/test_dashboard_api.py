@@ -190,6 +190,30 @@ async def test_agent_settings_post_validates_pipeline_mode(unused_tcp_port):
 
 
 @pytest.mark.asyncio
+async def test_inject_user_text_rejects_server_loop(unused_tcp_port):
+    cfg = Config(metadata={"dashboard_port": unused_tcp_port}, server_loop=True)
+    app = _mk_app(unused_tcp_port, cfg)
+    app._dispatch_one = AsyncMock()
+    plugin = DebugDashboardPlugin(app)
+    plugin.setup()
+    await plugin.start()
+    try:
+        base = f"http://127.0.0.1:{unused_tcp_port}"
+        async with aiohttp.ClientSession() as s:
+            r = await s.post(
+                base + "/api/control/inject_user_text",
+                json={"text": "请点头。", "language": "zh"},
+            )
+            data = await r.json()
+        assert r.status == 409
+        assert data["status"] == "unsupported"
+        assert "server-loop" in data["error"]
+        app._dispatch_one.assert_not_awaited()
+    finally:
+        await plugin.stop()
+
+
+@pytest.mark.asyncio
 async def test_mode_manager_register_silent_before_start():
     """Registering modes before start() must NOT broadcast on_mode_registered."""
     broadcasts: list = []

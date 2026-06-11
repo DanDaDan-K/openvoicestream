@@ -107,6 +107,10 @@ class Config:
     # open. Only fires after >= eos_min_speech_ms of real speech.
     gate_drive_eos: bool = False
     gate_eos_min_speech_ms: float = 250.0
+    # Optional grace after the gate close chunk is forwarded before sending
+    # explicit asr_eos. This preserves WS ordering for the speech tail/silence
+    # boundary and gives SLV a short processing window on very short commands.
+    gate_eos_delay_ms: float = 0.0
     # silero-primary stall fallback. When >0, let the SERVER silero VAD own
     # the endpoint decision (set gate_drive_eos=false), but guard against
     # silero wedging on a noisy mic (no endpoint → command never finalizes →
@@ -176,6 +180,15 @@ class Config:
     #                   sends asr_eos + sleeps.
     pipeline_mode: str = "always_on"
     sleep_timeout_s: float = 30.0
+    # Wake-command mode: for robot/control apps a wake word should open one
+    # bounded command window, not a long hot-mic chat session. When enabled,
+    # a successful wake arms wake_command_timeout_s; if no valid command final
+    # arrives before the timeout, the app returns to SLEEPING. After a normal
+    # assistant reply completes, it also returns to SLEEPING without invoking
+    # sleep() hooks, so physical tools already in flight are not cancelled.
+    wake_command_single_turn: bool = False
+    wake_command_timeout_s: float = 0.0
+    wake_command_no_final_text: str = "没听清，请再说一遍。"
     wake_sources: list[str] = field(default_factory=lambda: ["http"])
     # In push_to_talk mode, optionally disable the client-VAD silence
     # detector — relying entirely on the explicit ptt/end signal for EOS.
@@ -282,6 +295,12 @@ class Config:
     # Maximum number of LLM ↔ tool round trips per user turn. After this
     # the runner rolls the partial round back and returns empty text.
     tools_max_iterations: int = 5
+    # Safety backstop for server-loop remote tool calls. When enabled, a tool
+    # whose description declares quoted trigger phrases ("Triggers: ...") is
+    # only executed if the current ASR final contains one of those phrases.
+    # This preserves the LLM as the semantic selector, but prevents unsupported
+    # motions such as "点头" from being mapped onto a nearby physical action.
+    tool_trigger_guard: bool = False
     # ── Server-loop client mode (#37 Phase 2-product, spec §5/§6) ──
     # When False (default), the agent runs the LLM + tool loop locally
     # (current behaviour, byte-for-byte unchanged). When True, the agent
@@ -408,6 +427,51 @@ def _expand_env(value: Any) -> Any:
     return value
 
 
+def _coerce_slv_value(key: str, value: Any, target_type: type, default: Any) -> Any:
+    if value is None or value == "":
+        return default
+    if target_type is bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            v = _normalize_env_flag(value)
+            if v in ("1", "true", "yes", "on"):
+                return True
+            if v in ("0", "false", "no", "off", ""):
+                return False
+        raise ValueError(f"slv_config.{key} must be a bool; got {value!r}")
+    if target_type is int:
+        if isinstance(value, bool):
+            raise ValueError(f"slv_config.{key} must be an int; got {value!r}")
+        return int(value)
+    if target_type is float:
+        if isinstance(value, bool):
+            raise ValueError(f"slv_config.{key} must be a float; got {value!r}")
+        return float(value)
+    if target_type is str:
+        return str(value)
+    return value
+
+
+def _coerce_slv_config_types(slv_cfg: dict[str, Any]) -> dict[str, Any]:
+    defaults = _default_slv_config()
+    type_overrides = {
+        # Default is None to mean "use model default", but configured values
+        # are speaker IDs and must be sent to SLV as integers.
+        "tts_speaker_id": int,
+    }
+    for key, default in defaults.items():
+        if key not in slv_cfg:
+            continue
+        target_type = type_overrides.get(key)
+        if target_type is None and default is not None:
+            target_type = type(default)
+        if target_type is None:
+            continue
+        slv_cfg[key] = _coerce_slv_value(key, slv_cfg[key], target_type, default)
+    return slv_cfg
+
+
 def load_config(path: str | Path) -> Config:
     """Load YAML config, apply env substitution, return a Config."""
     p = Path(path).expanduser()
@@ -423,6 +487,7 @@ def load_config(path: str | Path) -> Config:
     slv_cfg.update(raw.get("slv_config", {}) or {})
     # Force the framework invariant: persistent WS across utterances.
     slv_cfg["multi_utterance"] = True
+    slv_cfg = _coerce_slv_config_types(slv_cfg)
 
     fields = {k: v for k, v in raw.items() if k != "slv_config"}
     # Tolerate template ↔ Config drift: a base-image ``agent.yaml.tmpl`` may

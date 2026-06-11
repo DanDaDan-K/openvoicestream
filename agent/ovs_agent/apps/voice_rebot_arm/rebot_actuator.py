@@ -39,13 +39,18 @@ env-free at construction (the builder translates config → ctor kwargs).
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
+import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from ovs_agent.actuators.base import Actuator
 from ovs_agent.actuators.factory import register_actuator
+
+logger = logging.getLogger(__name__)
 
 # Deferred import: the RebotArm constructor touches the C-extension SDK, so we
 # only construct it inside connect(). Importing the *class* is SDK-free (its
@@ -446,10 +451,55 @@ class RebotArmActuator(Actuator):
         return self._torque_state == "on"
 
 
+_B601_DM_USB_KEYWORDS = ("hdsc", "damiao", "b601", "dm-serial")
+
+
+def _resolve_channel(channel: str) -> str:
+    """Resolve ``'auto'`` to the B601-DM serial port by scanning by-id links.
+
+    When *channel* is ``'auto'``:
+      1. Scan ``/dev/serial/by-id/`` for a symlink whose name contains a
+         B601-DM keyword (damiao, b601, dm-serial). Return its realpath.
+      2. Fall back to the first ``/dev/ttyACM*`` device.
+      3. Raise if nothing found.
+
+    Any other value is returned as-is (``normalize_channel`` in rebot_arm.py
+    handles realpath resolution and validation downstream).
+    """
+    if channel.lower() != "auto":
+        return channel
+
+    by_id = Path("/dev/serial/by-id")
+    if by_id.is_dir():
+        for link in sorted(by_id.iterdir()):
+            if any(kw in link.name.lower() for kw in _B601_DM_USB_KEYWORDS):
+                resolved = os.path.realpath(str(link))
+                logger.info(
+                    "Auto-detected B601-DM: %s → %s", link.name, resolved
+                )
+                return resolved
+
+    candidates = sorted(Path("/dev").glob("ttyACM*"))
+    if candidates:
+        picked = str(candidates[0])
+        logger.warning(
+            "No B601-DM by-id match; falling back to %s "
+            "(set REBOT_CHANNEL explicitly if this is wrong)",
+            picked,
+        )
+        return picked
+
+    raise RuntimeError(
+        "REBOT_CHANNEL=auto but no /dev/serial/by-id match and no "
+        "/dev/ttyACM* found. Set REBOT_CHANNEL explicitly."
+    )
+
+
 def _make_rebot_arm(config: dict) -> Actuator:
     """Build a :class:`RebotArmActuator` from the actuator config dict.
 
-    Required: ``channel`` (the B601-DM serial realpath, e.g. /dev/ttyACM1).
+    *channel* can be ``'auto'`` (scans ``/dev/serial/by-id/`` for the B601-DM),
+    a ``/dev/serial/by-id/...`` symlink, or a direct ``/dev/ttyACM*`` realpath.
     Optional: repo_root, config_path, urdf_path, gripper_cfg_path,
     move_duration, and the gripper-amplitude SAFETY CLAMPS:
       * ``open_distance_m`` — max open width (m); a frame's +gripper is clamped
@@ -472,12 +522,13 @@ def _make_rebot_arm(config: dict) -> Actuator:
         s = _opt_str(key)
         return None if s is None else float(s)
 
-    channel = _opt_str("channel")
-    if not channel:
+    raw_channel = _opt_str("channel")
+    if not raw_channel:
         raise ValueError(
             "rebot_arm actuator requires a 'channel' in config "
-            "(the B601-DM serial realpath, e.g. /dev/ttyACM1)"
+            "(e.g. 'auto', '/dev/ttyACM1', or a /dev/serial/by-id/... path)"
         )
+    channel = _resolve_channel(raw_channel)
     return RebotArmActuator(
         channel=channel,
         repo_root=_opt_str("repo_root"),

@@ -132,7 +132,7 @@ from server.core.logging_config import (  # noqa: E402  (must precede app creati
 setup_logging()
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Jetson Speech Service", version="2.0.0")
+app = FastAPI(title="OpenVoiceStream", version="2.0.0")
 
 
 # Week 2: HTTP middleware injects/propagates X-Request-ID and stores it

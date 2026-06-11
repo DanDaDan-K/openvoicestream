@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 
 from ovs_agent.apps.multi_mode.app import MultiModeApp
+from ovs_agent.audio.devices import resolve_input_index, resolve_output_index
 from ovs_agent.audio.tapped_audio_io import TappedAudioIO
 from ovs_agent.plugins.actuator_actions import ArmPlugin
 from ovs_agent.wake_sources.openwakeword import OpenWakeWordSource
@@ -56,6 +57,7 @@ def _resolve_actuator_cfg(meta: dict) -> dict:
         "required_fields",
         "clear_history_on_turn_end",
         "clear_history_on_tool_change",
+        "disabled_actions",
     ):
         if key in actuator:
             plugin_cfg[key] = actuator[key]
@@ -66,6 +68,16 @@ def _resolve_actuator_cfg(meta: dict) -> dict:
 
 class VoiceRebotArmApp(MultiModeApp):
     def __init__(self, config) -> None:  # noqa: ANN001
+        raw_input_device = getattr(config, "audio_input_device", None) or "reSpeaker"
+        raw_output_device = getattr(config, "audio_output_device", None) or "reSpeaker"
+        input_device = resolve_input_index(raw_input_device)
+        output_device = resolve_output_index(raw_output_device)
+        logger.info(
+            "VoiceRebotArmApp: resolved audio devices input=%s output=%s",
+            input_device, output_device,
+        )
+        config.audio_input_device = input_device
+        config.audio_output_device = output_device
         super().__init__(config)
 
         # Swap BaseApp's plain AudioIO for the tap-capable variant before

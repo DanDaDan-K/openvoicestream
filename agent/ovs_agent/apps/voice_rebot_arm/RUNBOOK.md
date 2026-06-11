@@ -114,9 +114,9 @@
 - 唤醒词模型不在镜像、运行时也不下（无 entrypoint）→ Dockerfile `openwakeword.utils.download_models()` 构建时烧入。
 
 **运行 config**
-- SDK 默认 `channel=/dev/ttyACM0`（SO-ARM 口！）→ 必须传 **realpath `/dev/ttyACM1`**（不能 by-id 软链，SDK 用 `startswith("/dev/tty")` 判串口/CAN）。
+- SDK 默认 `channel=/dev/ttyACM0`（SO-ARM 口！）→ 设 `REBOT_CHANNEL=auto` 自动检测 B601-DM（扫描 `/dev/serial/by-id/`），或传 realpath / by-id 路径（`normalize_channel` 会 realpath 解析）。
 - `grasp_force`/`open_distance_m` 等空串（`${VAR:-}` 未设）→ 旧代码 `float('')` 崩 → ArmPlugin 禁用。已修：空串当未设。
-- `MIC_INDEX=auto` 是**死代码**（`audio/devices.py:resolve_input_index` 从没被调用）→ 用名称子串 `MIC_INDEX=reSpeaker`。
+- `MIC_INDEX=auto` 或 `MIC_INDEX=reSpeaker` 均可（`resolve_input_index` 在 app.py 中已接线）。
 - 缺 `OVS_AGENT_SERVER_LOOP=1` → 跑 legacy client-loop（skip advertise）。生产用 server-loop（SLV 跑 LLM+工具循环）。已设为镜像默认。
 - 夹爪“只动夹爪”的帧要**省略位姿字段**（带 x/y/z 会先 move_to 让臂乱动）。
 

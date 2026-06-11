@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import threading
 from typing import Any, Optional
 
@@ -55,13 +56,31 @@ def _motion_lock(actuator: Any):
     return contextlib.nullcontext()
 
 
-def _check_cancel(cancel_event: Optional[threading.Event], arm: Any) -> None:
+def _safe_open_distance(value: float) -> float:
+    dist = float(value)
+    if not math.isfinite(dist) or dist < 0.0:
+        raise ValueError(
+            "open_distance_m must be a non-negative finite number; "
+            f"got {value!r}"
+        )
+    return dist
+
+
+def _open_gripper_safe(arm: Any, open_distance_m: float) -> None:
+    arm.open_gripper(open_distance_m)
+
+
+def _check_cancel(
+    cancel_event: Optional[threading.Event],
+    arm: Any,
+    open_distance_m: float,
+) -> None:
     """Raise :class:`GraspCancelled` (after parking the gripper safe) if the
     cancel event is set. Safe-park = open the gripper so we never leave it
     clamped on a half-finished grasp."""
     if cancel_event is not None and cancel_event.is_set():
         try:
-            arm.open_gripper()
+            _open_gripper_safe(arm, open_distance_m)
         except Exception:
             logger.exception("grasp cancel: open_gripper (safe-park) failed")
         raise GraspCancelled()
@@ -100,6 +119,7 @@ def run_grasp_once(
     insertion_depth_m: float = 0.015,
     lift_height_m: float = 0.12,
     grasp_force: Optional[float] = None,
+    open_distance_m: float = 0.06,
     move_duration: float = 2.0,
     warm_up_frames: int = 5,
     release_after: bool = False,
@@ -122,6 +142,9 @@ def run_grasp_once(
         depth_quantile/pregrasp_offset_m/insertion_depth_m: grasp geometry.
         lift_height_m: how far up to retreat after the compliant grasp.
         grasp_force: compliant-close force (Nm); ``None`` → arm default.
+        open_distance_m: safe jaw opening distance (m) for pre-grasp and
+            cancellation safe-park. The SDK mechanical max is 0.09m; this
+            default intentionally stays at the validated 0.06m action width.
         move_duration: per-waypoint duration (s).
         warm_up_frames: frames to discard for exposure/AWB stability.
         release_after: open the gripper at the end (drop the object).
@@ -132,6 +155,7 @@ def run_grasp_once(
     """
     result: dict[str, Any] = {"success": False, "target": target, "cancelled": False}
     stage = "init"
+    safe_open_m = _safe_open_distance(open_distance_m)
     try:
         if segmenter is None:
             return {**result, "error": "no segmenter configured"}
@@ -140,7 +164,7 @@ def run_grasp_once(
 
         # ── 1. acquire a stable frame ───────────────────────────────────
         stage = "capture"
-        _check_cancel(cancel_event, arm)
+        _check_cancel(cancel_event, arm, safe_open_m)
         if warm_up_frames > 0:
             try:
                 camera.warm_up(warm_up_frames)
@@ -155,7 +179,7 @@ def run_grasp_once(
 
         # ── 2. detect + grasp estimation (target class only) ────────────
         stage = "detect"
-        _check_cancel(cancel_event, arm)
+        _check_cancel(cancel_event, arm, safe_open_m)
         from .perception.ordinary_grasp import estimate_grasps, select_best_grasp
 
         results = segmenter.predict(
@@ -180,7 +204,7 @@ def run_grasp_once(
 
         # ── 3. camera → base transform ──────────────────────────────────
         stage = "transform"
-        _check_cancel(cancel_event, arm)
+        _check_cancel(cancel_event, arm, safe_open_m)
         if T_hand_eye is None:
             return {**result, "stage": stage, "error": "no hand-eye calibration"}
         from .perception.transforms import transform_grasp_pose_to_base
@@ -205,22 +229,22 @@ def run_grasp_once(
         # concurrent action / gripper thread / cache read); the blocking
         # settle wait runs OUTSIDE the lock and is cancellable.
         stage = "open"
-        _check_cancel(cancel_event, arm)
+        _check_cancel(cancel_event, arm, safe_open_m)
         with _motion_lock(actuator):
-            arm.open_gripper()
+            _open_gripper_safe(arm, safe_open_m)
 
         stage = "pregrasp"
-        _check_cancel(cancel_event, arm)
+        _check_cancel(cancel_event, arm, safe_open_m)
         xp, yp, zp, rxp, ryp, rzp = pre6d
         with _motion_lock(actuator):
             pregrasp_ok = arm.move_to(xp, yp, zp, rxp, ryp, rzp, duration=move_duration)
         if not pregrasp_ok:
             return {**result, "stage": stage, "error": "pregrasp IK failed"}
         if not _wait_motion_cancellable(arm, move_duration, cancel_event):
-            _check_cancel(cancel_event, arm)  # safe-park + raise
+            _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
 
         stage = "grasp_move"
-        _check_cancel(cancel_event, arm)
+        _check_cancel(cancel_event, arm, safe_open_m)
         xg, yg, zg, rxg, ryg, rzg = grasp6d
         grasp_dur = max(1.0, move_duration * 0.75)
         with _motion_lock(actuator):
@@ -228,32 +252,32 @@ def run_grasp_once(
         if not grasp_move_ok:
             return {**result, "stage": stage, "error": "grasp-pose IK failed"}
         if not _wait_motion_cancellable(arm, grasp_dur, cancel_event):
-            _check_cancel(cancel_event, arm)  # safe-park + raise
+            _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
 
         stage = "grasp"
-        _check_cancel(cancel_event, arm)
+        _check_cancel(cancel_event, arm, safe_open_m)
         with _motion_lock(actuator):
             held = bool(arm.grasp(force=grasp_force))
         result["grasp_closed"] = held
 
         # ── 5. lift (retreat straight up along base Z) ──────────────────
         stage = "lift"
-        _check_cancel(cancel_event, arm)
+        _check_cancel(cancel_event, arm, safe_open_m)
         zl = zg + float(lift_height_m)
         with _motion_lock(actuator):
             lift_ok = arm.move_to(xg, yg, zl, rxg, ryg, rzg, duration=move_duration)
         if lift_ok:
             if not _wait_motion_cancellable(arm, move_duration, cancel_event):
-                _check_cancel(cancel_event, arm)  # safe-park + raise
+                _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
         else:
             logger.warning("lift IK failed; leaving arm at grasp height")
 
         # ── 6. optional release ─────────────────────────────────────────
         if release_after:
             stage = "release"
-            _check_cancel(cancel_event, arm)
+            _check_cancel(cancel_event, arm, safe_open_m)
             with _motion_lock(actuator):
-                arm.release_gripper()
+                _open_gripper_safe(arm, safe_open_m)
 
         # holding check (best-effort). On the real RebotArm this is a
         # PROPERTY (not a method); only call it when it's actually callable so
@@ -276,7 +300,7 @@ def run_grasp_once(
         logger.exception("grasp pipeline failed at stage=%s", stage)
         # Best-effort safe-park on any unexpected failure.
         try:
-            arm.open_gripper()
+            _open_gripper_safe(arm, safe_open_m)
         except Exception:
             pass
         return {**result, "stage": stage, "error": str(exc)}

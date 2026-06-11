@@ -1,40 +1,7 @@
-import re
 import sys
 import time
 
 import pyaudio
-
-# Names that report input channels on Jetson/desktop but are NOT real mics:
-# HDMI/HDA capture stubs, the Jetson APE virtual nodes (16 phantom channels
-# each), digital passthrough, and the ALSA aggregate/plug devices. The mic
-# auto-detect must never fall back onto one of these — opening it yields
-# PortAudio -9998 (e.g. HDMI has 0 usable channels) or silent garbage.
-_PHANTOM_INPUT_RE = re.compile(
-    r"(?i)\bhdmi\b|\bhda\b|jetson.*\bape\b|\bape\b|spdif|sysdefault|dmix|"
-    r"surround\d|samplerate|speexrate|upmix|vdownmix|^default$|^null$"
-)
-
-
-def _is_real_mic(name: str) -> bool:
-    """A device name that looks like an actual capture mic, not a phantom
-    HDMI/HDA/APE node."""
-    return not _PHANTOM_INPUT_RE.search(name or "")
-
-
-def _best_fallback_input(
-    devices: list[tuple[int, str]],
-) -> tuple[int, str] | None:
-    """Pick the most mic-like input when the reSpeaker name match misses.
-    Prefer a USB-audio device (the reSpeaker family is USB; this catches it
-    even if the name regex flaked during a hotplug/recreate race), then any
-    non-phantom input. Never returns an HDMI/HDA/APE node."""
-    real = [(i, n) for (i, n) in devices if _is_real_mic(n)]
-    for i, n in real:
-        if "usb" in n.lower():
-            return i, n
-    if real:
-        return real[0]
-    return None
 
 
 def _log(msg: str) -> None:
@@ -87,6 +54,17 @@ def _default_output_index() -> int | None:
         audio.terminate()
 
 
+def _default_input_index() -> int | None:
+    audio = pyaudio.PyAudio()
+    try:
+        info = audio.get_default_input_device_info()
+        return int(info.get("index")) if info else None
+    except Exception:
+        return None
+    finally:
+        audio.terminate()
+
+
 def _find_respeaker(devices: list[tuple[int, str]]) -> tuple[int, str] | None:
     for index, name in devices:
         lo = name.lower()
@@ -95,56 +73,82 @@ def _find_respeaker(devices: list[tuple[int, str]]) -> tuple[int, str] | None:
     return None
 
 
-def resolve_input_index(value: str | int) -> int:
+def _find_name(devices: list[tuple[int, str]], needle: str) -> tuple[int, str] | None:
+    if needle.lower() == "respeaker":
+        return _find_respeaker(devices)
+    needle = needle.lower()
+    for index, name in devices:
+        if needle in name.lower():
+            return index, name
+    return None
+
+
+def _requested_name(value: str | int | None) -> str | None:
+    if isinstance(value, int):
+        return None
+    raw = "" if value is None else str(value).strip()
+    if not raw or raw.lower() == "auto":
+        return "reSpeaker"
+    if raw.lower() in ("default", "system", "system_default"):
+        return None
+    try:
+        int(raw)
+    except ValueError:
+        return raw
+    return None
+
+
+def _explicit_index(value: str | int | None) -> int | None:
     if isinstance(value, int):
         return value
-    if value and str(value).strip().lower() != "auto":
-        return int(value)
+    raw = "" if value is None else str(value).strip()
+    if not raw or raw.lower() in ("auto", "default", "system", "system_default"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def resolve_input_index(value: str | int | None) -> int:
+    explicit = _explicit_index(value)
+    if explicit is not None:
+        return explicit
+    raw = "" if value is None else str(value).strip().lower()
+    requested = None if raw in ("default", "system", "system_default") else (
+        _requested_name(value) or "reSpeaker"
+    )
 
     # USB devices (the reSpeaker) sometimes enumerate a beat after pipeline
-    # startup — and during a container *recreate* the outgoing container may
-    # still hold the device for a second or two. Retry longer so we don't
-    # give up on the real mic and land on a phantom node.
+    # startup. Try a few times before falling back to whatever is available
+    # so we don't get stuck on the Jetson APE every cold boot.
     last_devices: list[tuple[int, str]] = []
-    for attempt in range(20):
-        devices = _enumerate_inputs()
-        last_devices = devices
-        match = _find_respeaker(devices)
-        if match is not None:
-            index, name = match
-            _log(f"[Audio] Auto-selected input device [{index}] {name}")
-            return index
-        if attempt < 19:
-            time.sleep(1.0)
+    if requested is not None:
+        for attempt in range(10):
+            devices = _enumerate_inputs()
+            last_devices = devices
+            match = _find_name(devices, requested)
+            if match is not None:
+                index, name = match
+                _log(f"[Audio] Auto-selected input device [{index}] {name}")
+                return index
+            if attempt < 9:
+                time.sleep(1.0)
 
-    # reSpeaker name match never hit. Don't blindly grab the first input —
-    # on Jetson that is an HDMI/HDA/APE phantom node (0 real channels →
-    # PortAudio -9998). Pick the most mic-like device instead, preferring USB
-    # (which catches the reSpeaker even if its name flaked during a hotplug).
-    _log("[Audio] reSpeaker / XVF3800 not found by name. Available inputs:")
-    for index, name in last_devices:
-        _log(f"[Audio]   [{index}] {name}")
-    fb = _best_fallback_input(last_devices)
-    if fb is not None:
-        index, name = fb
-        _log(
-            f"[Audio] Auto-selected fallback input device [{index}] {name} "
-            f"(skipped HDMI/HDA/APE phantom inputs)"
-        )
-        _log("[Audio] ⚠ Set MIC_INDEX env var explicitly if this is wrong.")
-        return index
+        _log(f"[Audio] input device matching {requested!r} not found after 10s. Available inputs:")
+        for index, name in last_devices:
+            _log(f"[Audio]   [{index}] {name}")
+    default_index = _default_input_index()
+    if default_index is not None:
+        _log(f"[Audio] Falling back to system default input device [{default_index}]")
+        _log("[Audio] ⚠ Set MIC_INDEX env var explicitly if ASR is silent.")
+        return default_index
 
-    # Absolute last resort: every input looked like a phantom node. Take the
-    # first one so the pipeline can at least boot for diagnostics.
-    if last_devices:
-        index, name = last_devices[0]
-        _log(f"[Audio] ⚠ no mic-like input found; using [{index}] {name}")
-        return index
-
-    raise RuntimeError("No audio input device found")
+    _log("[Audio] No default input device; letting sounddevice choose.")
+    return -1
 
 
-def resolve_output_index(value: str | int) -> int:
+def resolve_output_index(value: str | int | None) -> int:
     """Resolve the TTS playback device index by reSpeaker name, mirroring
     resolve_input_index. Returns -1 to mean "let sounddevice use its default".
 
@@ -154,26 +158,30 @@ def resolve_output_index(value: str | int) -> int:
     TTS plays into the void. Resolve by name the same way the mic is, so the
     speaker tracks the reSpeaker wherever it enumerates.
     """
-    if isinstance(value, int):
-        return value
-    if value and str(value).strip().lower() != "auto":
-        return int(value)
+    explicit = _explicit_index(value)
+    if explicit is not None:
+        return explicit
+    raw = "" if value is None else str(value).strip().lower()
+    requested = None if raw in ("default", "system", "system_default") else (
+        _requested_name(value) or "reSpeaker"
+    )
 
     last_devices: list[tuple[int, str]] = []
-    for attempt in range(10):
-        devices = _enumerate_outputs()
-        last_devices = devices
-        match = _find_respeaker(devices)
-        if match is not None:
-            index, name = match
-            _log(f"[Audio] Auto-selected output device [{index}] {name}")
-            return index
-        if attempt < 9:
-            time.sleep(1.0)
+    if requested is not None:
+        for attempt in range(10):
+            devices = _enumerate_outputs()
+            last_devices = devices
+            match = _find_name(devices, requested)
+            if match is not None:
+                index, name = match
+                _log(f"[Audio] Auto-selected output device [{index}] {name}")
+                return index
+            if attempt < 9:
+                time.sleep(1.0)
 
-    _log("[Audio] reSpeaker / XVF3800 output not found after 10s. Available outputs:")
-    for index, name in last_devices:
-        _log(f"[Audio]   [{index}] {name}")
+        _log(f"[Audio] output device matching {requested!r} not found after 10s. Available outputs:")
+        for index, name in last_devices:
+            _log(f"[Audio]   [{index}] {name}")
     default_index = _default_output_index()
     if default_index is not None:
         _log(f"[Audio] Falling back to system default output device [{default_index}]")

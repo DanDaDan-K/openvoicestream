@@ -219,6 +219,52 @@ def test_list_openai_tools_allow_filter():
     assert {t["function"]["name"] for t in r.list_openai_tools(None)} == {"a", "b"}
 
 
+def test_register_arm_tools_skips_disabled_actions():
+    from ovs_agent.tools.action_tools import register_arm_tools
+
+    r = ToolRegistry()
+
+    class _Arm:
+        pass
+
+    count = register_arm_tools(
+        registry=r,
+        arm_plugin=_Arm(),
+        actions=[
+            {"name": "wave", "description": "Wave"},
+            {"name": "open_gripper", "description": "Open gripper"},
+            {"name": "close_gripper", "description": "Close gripper"},
+        ],
+        disabled_actions={"open_gripper", "close_gripper"},
+    )
+
+    assert count == 1
+    assert r.list_names() == ["wave"]
+
+
+def test_register_arm_tools_defaults_to_single_template_ack():
+    from ovs_agent.tools.action_tools import register_arm_tools
+
+    r = ToolRegistry()
+
+    class _Arm:
+        pass
+
+    count = register_arm_tools(
+        registry=r,
+        arm_plugin=_Arm(),
+        actions=[
+            {"name": "wave", "description": "Wave"},
+        ],
+    )
+
+    assert count == 1
+    meta = r._tools["wave"]
+    assert meta.preamble_text == ""
+    assert meta.response_mode == "template"
+    assert meta.completion_text == "好的。"
+
+
 def test_tool_response_mode_and_completion_text_defaults():
     """New metadata fields default to ``await`` + empty string so existing
     callers behave exactly as before."""

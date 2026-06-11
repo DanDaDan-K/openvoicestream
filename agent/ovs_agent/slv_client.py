@@ -710,7 +710,7 @@ class SLVClient:
                 )
             )
         elif t == SERVER_TTS_STARTED:
-            logger.debug("SLV tts_started sentence=%r", evt.get("sentence", "")[:80])
+            logger.info("SLV tts_started sentence=%r", evt.get("sentence", "")[:80])
             await self._queue.put(TTSStarted(sentence=evt.get("sentence", "")))
         elif t == SERVER_TTS_SENTENCE_DONE:
             await self._queue.put(TTSSentenceDone(sentence=evt.get("sentence", "")))

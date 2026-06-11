@@ -431,6 +431,17 @@ class AudioIO:
         """
         self._is_playing = False
 
+    def play_notification(self, pcm: bytes) -> None:
+        """Play a short audio clip without affecting _is_playing state.
+
+        Used for non-TTS feedback (wake beep, error tone) that must not
+        trigger barge-in checks or block mic via drop_while_speaking.
+        """
+        self._ensure_output()
+        self._ensure_playback_buffer()
+        with self._playback_lock:
+            self._playback_buffer.extend(pcm)
+
     async def play(self, pcm: bytes) -> None:
         # After barge-in (or sleep / stop-intent), SLV may keep streaming
         # the rest of the in-flight TTS for several hundred ms. Drop those

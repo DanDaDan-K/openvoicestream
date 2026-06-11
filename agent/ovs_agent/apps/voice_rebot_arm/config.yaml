@@ -7,7 +7,9 @@
 slv_url: "ws://${VOICE_SERVICE_HOST:-localhost}:${VOICE_SERVICE_PORT:-8621}/v2v/stream"
 
 slv_config:
-  asr_language: "${STT_LANGUAGE:-auto}"
+  # For Mandarin-only robot-arm demos, set STT_LANGUAGE=zh. "auto" is kept
+  # configurable but can mis-detect very short commands.
+  asr_language: "${STT_LANGUAGE:-zh}"
   tts_language: "zh"
   tts_speaker_id: ${TTS_SID:-52}
   tts_speed: ${TTS_SPEED:-1.0}
@@ -21,6 +23,10 @@ pipeline_mode: "wake_word"
 default_mode: "chat"
 wake_sources: []
 sleep_timeout_s: 30.0
+wake_command_single_turn: true
+wake_command_timeout_s: ${WAKE_COMMAND_TIMEOUT_S:-4.0}
+wake_command_no_final_text: "没听清，请再说一遍。"
+asr_final_timeout_s: ${ASR_FINAL_TIMEOUT_S:-1.0}
 
 # VAD: server-only (agent forwards raw mic audio; SLV segments + finalises).
 client_vad_backend: "off"
@@ -32,12 +38,13 @@ client_vad_drive_eos: false
 # ── continuous-dialogue mic-pump (reSpeaker Flex XVF3800 ch1). Same
 # calibrated defaults as voice_arm.
 energy_gate_enabled: true
-energy_gate_open_rms: 0.002
-energy_gate_close_rms: 0.001
+energy_gate_open_rms: 0.010
+energy_gate_close_rms: 0.004
 energy_gate_hangover_ms: 300
 mic_makeup_gain: 12.0
-gate_drive_eos: false
+gate_drive_eos: true
 gate_eos_min_speech_ms: 250
+gate_eos_delay_ms: 200
 vad_stall_eos_ms: 1500
 mic_drop_while_speaking: true
 reconnect_on_wake: true
@@ -54,6 +61,7 @@ llm_stream_idle_timeout_s: 30.0
 tools_enabled: true
 tools_default_allowlist: []
 tools_max_iterations: 3
+tool_trigger_guard: true
 
 # System prompt — imperative robotic-arm controller.
 system_prompt: |
@@ -61,27 +69,33 @@ system_prompt: |
   The user speaks commands aloud and you reply via TTS.
 
   Behaviour:
-  - When the user clearly requests a motion, FIRST emit a brief
-    spoken acknowledgement, THEN call the matching tool function.
-    The acknowledgement is ONE OR TWO words in the user's language
-    ("好的，" / "OK," / "Sure,") and gets spoken immediately while
-    the robot executes the motion. Examples:
-      User: "挥手"       → Emit "好的" → call wave()
-      User: "回到原位"   → Emit "好的" → call go_home()
-      User: "张开夹爪"   → Emit "好的" → call open_gripper()
-    AFTER the tool returns, emit a short confirmation ("已挥手" /
-    "Done" / "已回到原位"), 1 short sentence max.
-  - To pick the right tool, read each tool's description and match the
-    user's exact phrase against the trigger words listed there. Chinese
-    triggers are LITERAL: '挥手' MUST call wave; '张开夹爪' MUST call
-    open_gripper; '闭合夹爪' MUST call close_gripper; '回到原位' MUST
-    call go_home; '指向' MUST call point_at. Never substitute a
-    semantically-similar tool — if no description literally contains the
-    user's phrase, reply that you don't have that action.
-  - HARD RULE — only call a tool when the user's text contains the
-    EXACT trigger phrase listed in that tool's description. If the
-    phrase is not literally present, DO NOT call any tool — reply
-    "没听清，请再说一次。" / "Sorry, I didn't catch that." instead.
+  - When the user clearly requests a supported motion, call the matching
+    tool function directly. Do not speak a separate acknowledgement before
+    the tool call; after the tool dispatch starts successfully, the tool
+    layer emits exactly one short "好的。" automatically and skips the
+    post-tool LLM reply. Examples:
+      User: "挥手"       → call wave()
+      User: "回到原位"   → call go_home()
+      User: "张开夹爪"   → call open_gripper()
+    Do not repeat "好的" before or after the tool call.
+  - To pick the right tool, read each tool's description. Trigger words
+    are examples, not the only valid wording. Preserve semantic
+    generalisation: "帮我挥一下手" / "跟大家打个招呼" should call wave,
+    and "把夹爪打开" should call open_gripper.
+  - Only call a motion tool when the user clearly asks the robot arm to
+    do that physical action. If the transcript is clear but conversational,
+    lacks a concrete motion/grasp intent, or asks for an unsupported action,
+    do not guess and do not say you failed to hear it. Reply in the user's
+    language with the distinction, for example:
+      Chinese: "我听到的是：<用户原话>。这不是当前支持的动作。"
+      English: "I heard: <user words>. That action is not available."
+  - Only say "没听清，请再说一次。" / "Sorry, I didn't catch that." when the ASR
+    transcript is empty, garbled, or not recognizable as words.
+  - Head/body motions such as "点头", "摇头", and "甩头" are unsupported by
+    the current arm tool set. Never map them to point_at, wave, or gripper
+    tools; reply that this action is not available.
+  - Safety: never substitute a different physical action just because a
+    nearby object or direction was mentioned.
 
   /no_think
 
@@ -97,6 +111,18 @@ audio_output_sample_rate: 16000
 log_level: "INFO"
 
 metadata:
+  # Wake word feedback tone (880Hz A5, 150ms).
+  wake_tone:
+    hz: 880
+    ms: 150
+    mic_suppress_tail_ms: 600
+  # Descending tone when the listening window closes.
+  sleep_tone:
+    hz_start: 880
+    hz_end: 440
+    ms: 200
+    mic_suppress_tail_ms: 400
+
   wakeword:
     model: "${WAKEWORD_MODEL:-hey jarvis}"
     threshold: ${WAKEWORD_THRESHOLD:-0.5}
@@ -109,15 +135,12 @@ metadata:
   actuator:
     backend: rebot_arm
     config:
-      # ① The SDK default channel is /dev/ttyACM0 — that is the SO-ARM's
-      #    port. The B601-DM is on ttyACM1, so we MUST override it here.
-      # ② The SDK decides serial-vs-SocketCAN with
-      #    channel.startswith("/dev/tty"), so this MUST be the REALPATH
-      #    (/dev/ttyACM1), NOT a /dev/serial/by-id/... symlink (a by-id
-      #    link would be misread as a CAN interface → SocketCAN error).
-      # ③ The container must run with `--device /dev/ttyACM1` and as root
-      #    (root bypasses the dialout-group permission requirement).
-      channel: "${REBOT_CHANNEL:-/dev/ttyACM1}"
+      # 'auto' scans /dev/serial/by-id/ for the B601-DM, falling back to
+      # the first /dev/ttyACM*. Explicit paths (/dev/ttyACM1 or
+      # /dev/serial/by-id/...) also work — normalize_channel() resolves
+      # symlinks before the SDK's serial-vs-CAN check.
+      # Container must run as root (dialout bypass) with --device access.
+      channel: "${REBOT_CHANNEL:-auto}"
       # reBotArm_control_py SDK location (parent dir that CONTAINS
       # reBotArm_control_py/). Falls back to $REBOT_REPO_ROOT then the
       # container default /opt/rebot.
@@ -130,11 +153,20 @@ metadata:
       gripper_cfg_path: "${REBOT_GRIPPER_CFG:-}"
       # Default per-waypoint move duration (seconds) when a frame omits it.
       move_duration: ${REBOT_MOVE_DURATION:-2.0}
-      # Compliant-grasp force (Nm). null → plain torque close on close cmds.
-      grasp_force: "${REBOT_GRASP_FORCE:-}"
+      # Compliant-grasp force clamp (N·m). The SDK hard limit is 1.5; default
+      # to its own gentle holding force so voice actions cannot over-command.
+      grasp_force: "${REBOT_GRASP_FORCE:-0.30}"
+      # Max jaw opening for action frames. B601-DM SDK maps 0.09m to the
+      # mechanical full-open angle; individual shipped actions use 0.06m.
       open_distance_m: ${REBOT_OPEN_DIST:-0.09}
     actions_yaml_path: "${CONFIG_DIR:-/opt/seeed/voice_rebot_arm/config}/actions.yaml"
     # Distinct from voice_arm's 8765 so both can coexist on one host.
     observation_port: ${OBSERVATION_PORT:-8775}
     clear_history_on_tool_change: ${ARM_CLEAR_HISTORY_ON_TOOL_CHANGE:-false}
     clear_history_on_turn_end: ${ARM_CLEAR_HISTORY_ON_TURN_END:-true}
+  grasp:
+    # Safety defaults for camera-guided grasp_object. Keep the tool available
+    # but never open the jaw to the SDK's full 0.09m default during pre-grasp,
+    # cancellation safe-park, or release.
+    open_distance_m: ${REBOT_GRASP_OPEN_DIST:-0.06}
+    grasp_force: ${REBOT_GRASP_FORCE:-0.30}

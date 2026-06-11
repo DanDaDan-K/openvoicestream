@@ -14,6 +14,7 @@ import pytest
 from ovs_agent.app_base import BaseApp
 from ovs_agent.config import Config
 from ovs_agent.event_bus import EventBus
+from ovs_agent.slv_client import ASRFinal
 from ovs_agent.state import ConvState
 from ovs_agent.wake_sources import HTTPWakeSource
 
@@ -46,19 +47,26 @@ def _fresh_app(pipeline_mode: str = "always_on", sleep_timeout_s: float = 30.0) 
     app.config = SimpleNamespace(
         pipeline_mode=pipeline_mode,
         sleep_timeout_s=sleep_timeout_s,
+        wake_command_single_turn=False,
+        wake_command_timeout_s=0.0,
+        asr_final_timeout_s=3.0,
     )
     if pipeline_mode == "always_on":
         app._state = ConvState.IDLE
     else:
         app._state = ConvState.SLEEPING
     app._sleep_task = None
+    app._wake_command_timeout_task = None
     app._slv_reconnect_count = 0
     app._llm_turn_task = None
     app._first_tts_seen = False
+    app._wake_command_retry_after_no_final = False
     # Stub slv + audio with async no-ops.
     slv = MagicMock()
     slv.abort = AsyncMock()
     slv.asr_eos = AsyncMock()
+    slv.send_text = AsyncMock()
+    slv.flush_tts = AsyncMock()
     slv.reconnect = AsyncMock()
     slv.is_healthy = MagicMock(return_value=True)
     # Default: just had activity → no idle-based reconnect on wake.
@@ -229,6 +237,147 @@ async def test_on_sleep_hook_fires():
     app.plugins.append(P())
     await app.sleep()
     assert seen == [None]
+
+
+@pytest.mark.asyncio
+async def test_wake_command_mode_sleeps_after_assistant_done_without_sleep_hook():
+    """Command-mode wake should stop listening after the reply, without
+    broadcasting on_sleep that would cancel an in-flight physical tool."""
+    app = _fresh_app("wake_word")
+    app.config.wake_command_single_turn = True
+    app._state = ConvState.SPEAKING
+    sleep_events: list = []
+    done_events: list = []
+
+    class P:
+        name = "p"
+
+        async def on_sleep(self, data):  # noqa: ANN001
+            sleep_events.append(data)
+
+        async def on_assistant_done(self):
+            done_events.append(True)
+
+    app.plugins.append(P())
+
+    await app._complete_assistant_turn()
+
+    assert app._state == ConvState.SLEEPING
+    assert sleep_events == []
+    assert done_events == [True]
+
+
+@pytest.mark.asyncio
+async def test_wake_command_timeout_returns_to_sleep_when_no_command_final():
+    app = _fresh_app("wake_word")
+    app.config.wake_command_single_turn = True
+    app.config.wake_command_timeout_s = 0.05
+    app.config.asr_final_timeout_s = 0.05
+
+    await app.wake(source="test")
+    assert app._state == ConvState.IDLE
+
+    await asyncio.sleep(0.08)
+    app.slv.asr_eos.assert_awaited_once()
+    assert app._state == ConvState.THINKING
+
+    await asyncio.sleep(0.12)
+
+    app.slv.send_text.assert_awaited_once_with("没听清，请再说一遍。")
+    assert app._state == ConvState.THINKING
+    assert app._wake_command_retry_after_no_final is True
+
+    app._state = ConvState.SPEAKING
+    await app._complete_assistant_turn()
+
+    assert app._state == ConvState.IDLE
+    assert app._wake_command_timeout_task is not None
+    app._wake_command_timeout_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_wake_command_no_final_speaks_feedback_then_opens_retry_window():
+    app = _fresh_app("wake_word")
+    app.config.wake_command_single_turn = True
+    app.config.wake_command_timeout_s = 5.0
+    app.config.asr_final_timeout_s = 0.01
+    app.config.wake_command_no_final_text = "没听清，请再说一遍。"
+    app._state = ConvState.THINKING
+    app._eos_sent_this_turn = True
+    sleep_events: list = []
+    done_events: list = []
+
+    class P:
+        name = "p"
+
+        async def on_sleep(self, data):  # noqa: ANN001
+            sleep_events.append(data)
+
+        async def on_assistant_done(self):
+            done_events.append(True)
+
+    app.plugins.append(P())
+
+    await app._asr_final_watchdog()
+
+    app.slv.send_text.assert_awaited_once_with(
+        "没听清，请再说一遍。"
+    )
+    app.slv.flush_tts.assert_awaited_once()
+    assert app._state == ConvState.THINKING
+    assert app._wake_command_retry_after_no_final is True
+    assert sleep_events == []
+    assert done_events == []
+
+    app._state = ConvState.SPEAKING
+    await app._complete_assistant_turn()
+
+    assert app._state == ConvState.IDLE
+    assert app._wake_command_timeout_task is not None
+    assert sleep_events == []
+    assert done_events == [True]
+    app._wake_command_timeout_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_wake_command_empty_final_speaks_feedback_then_opens_retry_window():
+    app = _fresh_app("wake_word")
+    app.config.wake_command_single_turn = True
+    app.config.wake_command_timeout_s = 5.0
+    app.config.wake_command_no_final_text = "没听清，请再说一遍。"
+    app._state = ConvState.THINKING
+    app._eos_sent_this_turn = True
+    sleep_events: list = []
+    done_events: list = []
+
+    class P:
+        name = "p"
+
+        async def on_sleep(self, data):  # noqa: ANN001
+            sleep_events.append(data)
+
+        async def on_assistant_done(self):
+            done_events.append(True)
+
+    app.plugins.append(P())
+
+    await app._dispatch_one(ASRFinal(text="", session_complete=False))
+
+    app.slv.send_text.assert_awaited_once_with("没听清，请再说一遍。")
+    app.slv.flush_tts.assert_awaited_once()
+    assert app._state == ConvState.THINKING
+    assert app._wake_command_retry_after_no_final is True
+    assert sleep_events == []
+    assert done_events == []
+
+    app._state = ConvState.SPEAKING
+    await app._complete_assistant_turn()
+
+    assert app._state == ConvState.IDLE
+    assert app._wake_command_timeout_task is not None
+    assert sleep_events == []
+    assert done_events == [True]
+    app._wake_command_timeout_task.cancel()
 
 
 # ── PTT double-EOS dedupe ------------------------------------------
