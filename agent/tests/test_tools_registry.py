@@ -242,7 +242,11 @@ def test_register_arm_tools_skips_disabled_actions():
     assert r.list_names() == ["wave"]
 
 
-def test_register_arm_tools_defaults_to_single_template_ack():
+def test_register_arm_tools_defaults_to_parallel_with_preamble():
+    # We deliberately KEEP the parallel + spoken-preamble default for arm tools
+    # (an immediate "好的。" then LLM round 2 overlapping the motion). The
+    # template/no-preamble variant was rejected: it changes the spoken
+    # behaviour of every arm app (incl. SO-ARM) that relies on this default.
     from ovs_agent.tools.action_tools import register_arm_tools
 
     r = ToolRegistry()
@@ -260,9 +264,8 @@ def test_register_arm_tools_defaults_to_single_template_ack():
 
     assert count == 1
     meta = r._tools["wave"]
-    assert meta.preamble_text == ""
-    assert meta.response_mode == "template"
-    assert meta.completion_text == "好的。"
+    assert meta.preamble_text == "好的。"
+    assert meta.response_mode == "parallel"
 
 
 def test_tool_response_mode_and_completion_text_defaults():

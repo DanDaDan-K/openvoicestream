@@ -5,15 +5,17 @@ Each action becomes a no-argument tool whose description is the
 function-calling; the tool dispatches into ArmPlugin.dispatch_action,
 which returns as soon as the serial bus has accepted the first frame
 (~200ms) — the remaining frames continue on a worker thread while the
-server-loop template response is spoken.
+LLM streams its acknowledgement and TTS plays out.
 
 Response mode model (framework-level, see ovs-agent registry):
-  * ``template`` (DEFAULT for arm actions): tool body returns fast,
-    runner SKIPS LLM round 2 and synthesises a fixed ``completion_text``
-    instead. This keeps the LLM responsible for semantic tool selection
-    while preventing duplicate acknowledgements after the tool result.
-  * ``parallel``: tool body returns fast after dispatch, LLM round 2 runs
-    in parallel with the physical motion.
+  * ``parallel`` (DEFAULT for arm actions): tool body returns fast
+    after dispatch, LLM round 2 runs in parallel with the physical
+    motion. Best for "wave" / "go home" style commands.
+  * ``template``: tool body returns fast, runner SKIPS LLM round 2
+    and synthesises a fixed ``completion_text`` instead — zero LLM
+    latency between preamble and reply. Use when the action has a
+    canonical verbal confirmation ("挥完了。") and creative LLM
+    output adds nothing.
   * ``await``: tool body blocks until the motion completes, then LLM
     round 2 runs. Legacy behaviour — only useful if the LLM should
     reason over the post-motion observation cache.
@@ -22,8 +24,8 @@ actions.yaml schema (additions on top of the existing description):
   sequences:
     <name>:
       description: "..."
-      response_mode: template | parallel | await   # optional
-      completion_text: "好的。"                   # optional, used by template
+      response_mode: parallel | template | await   # optional
+      completion_text: "挥完了。"                  # optional, used by template
 
 Why closures-with-default-args: ``for entry in actions: def _tool(): ...``
 captures ``entry`` by reference, so EVERY registered tool would dispatch
@@ -37,12 +39,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Default response mode for arm actions when actions.yaml is silent. We keep
-# the LLM in the loop for choosing the tool, then use a fixed template response
-# after the fast dispatch result so voxedge does not run a second LLM round that
-# can repeat "好的。".
-_DEFAULT_ARM_RESPONSE_MODE = "template"
-_DEFAULT_ARM_COMPLETION_TEXT = "好的。"
+# Default response mode for arm actions when actions.yaml is silent.
+# We override the framework-level default of "await" because every
+# pre-recorded SO-ARM motion is a "fire-and-forget" physical gesture —
+# the user wants to hear "挥完了。" while the arm is still moving, not
+# 1.8s of dead air waiting for the LLM to compose a fresh sentence.
+_DEFAULT_ARM_RESPONSE_MODE = "parallel"
 
 
 def register_arm_tools(
@@ -58,9 +60,13 @@ def register_arm_tools(
     ``ActionsManager.list_with_descriptions()`` — at minimum
     ``{"name", "description"}``, optionally with ``"response_mode"``
     and ``"completion_text"`` overrides parsed from actions.yaml.
+
+    ``disabled_actions`` names actions to skip registering entirely (e.g. a
+    motion the LLM should never be able to trigger on this deployment). Absent /
+    empty → register everything (backward compatible).
     """
+    disabled = disabled_actions or set()
     count = 0
-    disabled = set(disabled_actions or set())
     for entry in actions:
         action_name = entry.get("name")
         if not isinstance(action_name, str) or not action_name:
@@ -71,14 +77,12 @@ def register_arm_tools(
         description = (entry.get("description") or "").strip() or (
             f"Execute the pre-recorded arm motion named {action_name!r}."
         )
-        # Per-action response mode override, else "template" (arm default).
+        # Per-action response mode override, else "parallel" (arm default).
         rmode = entry.get("response_mode") or _DEFAULT_ARM_RESPONSE_MODE
-        # completion_text only meaningful in template mode, but harmless to
-        # thread through for parallel too (registry stores it; the runner just
-        # ignores it when not in template mode).
-        ctext = entry.get("completion_text") or (
-            _DEFAULT_ARM_COMPLETION_TEXT if rmode == "template" else ""
-        )
+        # completion_text only meaningful in template mode, but harmless
+        # to thread through for parallel too (registry stores it; the
+        # runner just ignores it when not in template mode).
+        ctext = entry.get("completion_text") or ""
 
         def _make(
             name: str = action_name,
@@ -103,15 +107,18 @@ def register_arm_tools(
 
             _tool.__name__ = name
             _tool.__doc__ = desc
-            # Do not use ``preamble_text="好的。"`` here. The server-loop
-            # engine also speaks after successful tool dispatch; preamble +
-            # LLM/template response is how one voice command produced two
-            # separate "好的。" TTS sentences.
+            # ``preamble_text="好的。"`` — period terminates the SLV
+            # sentence buffer so synthesis fires immediately while the
+            # 2-5s arm motion is still mid-dispatch. Qwen3-4B in
+            # no-think/function-calling mode emits ``content=None +
+            # tool_calls`` atomically, ignoring any "say OK first then
+            # call the tool" prompt rule; this metadata is the
+            # structural workaround.
             registry.tool(
                 name=name,
                 description=desc,
                 timeout_s=timeout_s,
-                preamble_text="",
+                preamble_text="好的。",
                 completion_text=comp,
                 response_mode=mode,
             )(_tool)
