@@ -41,14 +41,13 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
-import os
 import threading
 import time
-from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from ovs_agent.actuators.base import Actuator
 from ovs_agent.actuators.factory import register_actuator
+from ovs_agent.actuators.serial_resolve import resolve_serial_port
 
 logger = logging.getLogger(__name__)
 
@@ -451,47 +450,36 @@ class RebotArmActuator(Actuator):
         return self._torque_state == "on"
 
 
-_B601_DM_USB_KEYWORDS = ("hdsc", "damiao", "b601", "dm-serial")
+# Default USB-identity match for the B601-DM (Damiao DM-serial bus, which uses
+# an HDSC HC32 USB-CDC bridge). VID:PID 2e88:4603 was read off the real device
+# (ID_VENDOR=HDSC). This is the stable primary key; ``vendor`` is a belt-and-
+# braces fallback. ``exclude`` is intentionally empty until the SO-ARM's USB
+# signature is captured with both arms plugged in (see project memory) — the
+# VID:PID match alone already excludes the SO-ARM unless it is the same chip.
+_B601_DM_MATCH = {"usb_id": ["2e88:4603"], "vendor": ["hdsc"]}
 
 
-def _resolve_channel(channel: str) -> str:
-    """Resolve ``'auto'`` to the B601-DM serial port by scanning by-id links.
+def _resolve_channel(
+    channel: str,
+    *,
+    match: dict | None = None,
+    exclude: dict | None = None,
+    ambiguous: str = "error",
+) -> str:
+    """Resolve the B601-DM serial channel.
 
-    When *channel* is ``'auto'``:
-      1. Scan ``/dev/serial/by-id/`` for a symlink whose name contains a
-         B601-DM keyword (damiao, b601, dm-serial). Return its realpath.
-      2. Fall back to the first ``/dev/ttyACM*`` device.
-      3. Raise if nothing found.
-
-    Any other value is returned as-is (``normalize_channel`` in rebot_arm.py
-    handles realpath resolution and validation downstream).
+    An explicit ``/dev/tty*`` path or ``/dev/serial/by-id/...`` symlink is
+    returned as a realpath (operator escape hatch). ``'auto'`` matches by stable
+    USB identity via :func:`serial_resolve.resolve_serial_port` — never by
+    ``ttyACMx`` number, and never a blind "first port" fallback (that risks
+    grabbing the neighbouring SO-ARM). See that module for the safety contract.
     """
-    if channel.lower() != "auto":
-        return channel
-
-    by_id = Path("/dev/serial/by-id")
-    if by_id.is_dir():
-        for link in sorted(by_id.iterdir()):
-            if any(kw in link.name.lower() for kw in _B601_DM_USB_KEYWORDS):
-                resolved = os.path.realpath(str(link))
-                logger.info(
-                    "Auto-detected B601-DM: %s → %s", link.name, resolved
-                )
-                return resolved
-
-    candidates = sorted(Path("/dev").glob("ttyACM*"))
-    if candidates:
-        picked = str(candidates[0])
-        logger.warning(
-            "No B601-DM by-id match; falling back to %s "
-            "(set REBOT_CHANNEL explicitly if this is wrong)",
-            picked,
-        )
-        return picked
-
-    raise RuntimeError(
-        "REBOT_CHANNEL=auto but no /dev/serial/by-id match and no "
-        "/dev/ttyACM* found. Set REBOT_CHANNEL explicitly."
+    return resolve_serial_port(
+        channel,
+        match=match or _B601_DM_MATCH,
+        exclude=exclude,
+        ambiguous=ambiguous,
+        log=logger.info,
     )
 
 
@@ -528,7 +516,15 @@ def _make_rebot_arm(config: dict) -> Actuator:
             "rebot_arm actuator requires a 'channel' in config "
             "(e.g. 'auto', '/dev/ttyACM1', or a /dev/serial/by-id/... path)"
         )
-    channel = _resolve_channel(raw_channel)
+    # Optional USB-identity match overrides from config (metadata.actuator).
+    # When channel == 'auto', these drive serial_resolve; explicit paths ignore
+    # them. A bare dict in YAML arrives as a dict; tolerate None.
+    match = config.get("channel_match") or None
+    exclude = config.get("channel_exclude") or None
+    ambiguous = (_opt_str("channel_ambiguous") or "error").lower()
+    channel = _resolve_channel(
+        raw_channel, match=match, exclude=exclude, ambiguous=ambiguous
+    )
     return RebotArmActuator(
         channel=channel,
         repo_root=_opt_str("repo_root"),

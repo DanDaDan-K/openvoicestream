@@ -1,19 +1,54 @@
+"""Tests for the /proc/asound/cards-based audio device resolver.
+
+The resolver reads ALSA-native card identity (immune to PortAudio dropping a
+busy/late USB device) and hands sounddevice a stable NAME SUBSTRING (e.g.
+``XVF3800``) rather than a pinned index. So ``resolve_*`` returns either an int
+index (explicit/numeric input) or a name-token string.
+"""
+from __future__ import annotations
+
 from ovs_agent.audio import devices
 
+# A realistic Jetson Orin NX card list: reSpeaker (real) + HDA/APE (phantom).
+_CARDS_WITH_RESPEAKER = [
+    (0, "C16K6Ch", "USB-Audio - reSpeaker Flex XVF3800 C16K6Ch"),
+    (1, "HDA", "tegra-hda - NVIDIA Jetson Orin NX HDA"),
+    (2, "APE", "tegra-ape - NVIDIA Jetson Orin NX APE"),
+]
+_CARDS_NO_RESPEAKER = [
+    (1, "HDA", "tegra-hda - NVIDIA Jetson Orin NX HDA"),
+    (2, "APE", "tegra-ape - NVIDIA Jetson Orin NX APE"),
+    (3, "Generic", "USB-Audio - Some Generic USB Mic"),
+]
 
-def test_resolve_output_index_accepts_respeaker_name(monkeypatch):
-    monkeypatch.setattr(devices, "_enumerate_outputs", lambda: [
-        (2, "NVIDIA Jetson APE"),
-        (24, "reSpeaker XVF3800"),
-    ])
-    monkeypatch.setattr(devices.time, "sleep", lambda _seconds: None)
 
-    assert devices.resolve_output_index("reSpeaker") == 24
+def test_explicit_int_index_passthrough():
+    assert devices.resolve_input_index(24) == 24
 
 
-def test_resolve_input_index_falls_back_to_system_default(monkeypatch):
-    monkeypatch.setattr(devices, "_enumerate_inputs", lambda: [(5, "Jetson APE Input")])
-    monkeypatch.setattr(devices, "_default_input_index", lambda: 3)
-    monkeypatch.setattr(devices.time, "sleep", lambda _seconds: None)
+def test_numeric_string_resolves_to_index():
+    assert devices.resolve_input_index("24") == 24
 
-    assert devices.resolve_input_index("reSpeaker") == 3
+
+def test_explicit_name_substring_passthrough():
+    # A non-"auto", non-numeric value is handed straight to sounddevice.
+    assert devices.resolve_input_index("reSpeaker") == "reSpeaker"
+
+
+def test_auto_finds_respeaker_and_returns_stable_token(monkeypatch):
+    monkeypatch.setattr(devices, "_read_sound_cards", lambda: _CARDS_WITH_RESPEAKER)
+    monkeypatch.setattr(devices.time, "sleep", lambda _s: None)
+    # Both directions resolve to the stable USB product token, not a card index.
+    assert devices.resolve_input_index("auto") == "XVF3800"
+    assert devices.resolve_output_index("auto") == "XVF3800"
+
+
+def test_auto_never_falls_back_to_a_phantom_card(monkeypatch):
+    # No reSpeaker present: must pick the real Generic card, never HDA/APE.
+    monkeypatch.setenv("MIC_RESOLVE_TIMEOUT_S", "1")
+    monkeypatch.setattr(devices, "_read_sound_cards", lambda: _CARDS_NO_RESPEAKER)
+    monkeypatch.setattr(devices.time, "sleep", lambda _s: None)
+    resolved = devices.resolve_input_index("auto")
+    assert "HDA" not in str(resolved)
+    assert "APE" not in str(resolved)
+    assert "Generic" in str(resolved)
