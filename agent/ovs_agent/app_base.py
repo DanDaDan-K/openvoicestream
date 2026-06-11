@@ -130,7 +130,7 @@ def _normalize_tool_trigger_text(text: str) -> str:
 def _extract_tool_trigger_phrases(description: str) -> list[str]:
     """Extract quoted trigger phrases from a tool description."""
     import re
-    match = re.search(r"(?:Triggers?|Trigger words?)\s*:\s*(.*)", description or "", re.I | re.S)
+    match = re.search(r"(?:Triggers?|Trigger words?)\s*:\s*([^.。]*)", description or "", re.I | re.S)
     if not match:
         return []
     return [p.strip() for p in re.findall(r"""["']([^"']+)["']""", match.group(1)) if p.strip()]

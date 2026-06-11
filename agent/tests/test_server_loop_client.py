@@ -231,7 +231,10 @@ async def test_server_tool_call_trigger_guard_blocks_wrong_motion_mapping():
 
     @reg.tool(
         name="point_at",
-        description='Point forward. Triggers: "指向", "指一下", "point at".',
+        description=(
+            'Point forward. Triggers: "指向", "指一下", "point at". '
+            'Do not use for head nodding: "点头" is unsupported.'
+        ),
     )
     def point_at() -> dict:
         calls.append({"ran": True})
