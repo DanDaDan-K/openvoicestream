@@ -322,6 +322,126 @@ def run_grasp_once(
         return {**result, "stage": stage, "error": str(exc)}
 
 
+def run_search_once(
+    target: str,
+    *,
+    arm: Any,
+    actuator: Any = None,
+    segmenter: Any = None,
+    camera: Any = None,
+    T_hand_eye: Optional[np.ndarray] = None,
+    scan_poses: Optional[list] = None,
+    home_pose: tuple = (0.27, 0.0, 0.24, 0.0, 0.0, 0.0),
+    cancel_event: Optional[threading.Event] = None,
+    conf: float = 0.20,
+    move_duration: float = 2.0,
+    warm_up_frames: int = 3,
+    frames: int = 6,
+    indicate: bool = True,
+) -> dict:
+    """Sweep the eye-in-hand camera across ``scan_poses`` to find ``target``.
+
+    Unlike :func:`run_grasp_once` (which only looks from the current pose), this
+    moves the arm through a list of observation poses, runs multi-frame
+    detection at each, and stops at the first pose where the target is found —
+    optionally reaching toward it ("pointing") without grasping. If no pose sees
+    the target, the arm returns home. The gripper is never closed.
+
+    Returns ``{"found": bool, "target": str, "scan_index": int,
+    "position_base": [x,y,z], "conf": float, "indicated": bool, ...}``.
+    """
+    result: dict[str, Any] = {"found": False, "target": target, "cancelled": False}
+    try:
+        if segmenter is None or camera is None:
+            return {**result, "error": "perception not configured"}
+        poses = list(scan_poses) if scan_poses else [home_pose]
+        K = np.asarray(camera.K, dtype=np.float32)
+        scanned = 0
+        for idx, pose in enumerate(poses):
+            if cancel_event is not None and cancel_event.is_set():
+                return {**result, "cancelled": True, "scan_index": idx}
+            # move to the observation pose
+            with _motion_lock(actuator):
+                ok = arm.move_to(*pose, duration=move_duration)
+            if not ok:
+                logger.info("search: scan pose %d IK failed; skipping", idx)
+                continue
+            if not _wait_motion_cancellable(arm, move_duration, cancel_event):
+                return {**result, "cancelled": True, "scan_index": idx}
+            scanned += 1
+            # multi-frame detection at this view
+            try:
+                camera.warm_up(warm_up_frames)
+            except Exception:
+                logger.debug("camera.warm_up failed (continuing)", exc_info=True)
+            best = None
+            for _ in range(max(1, frames)):
+                color_bgr, depth_mm = camera.get_frame()
+                if color_bgr is None or depth_mm is None:
+                    continue
+                from .perception.ordinary_grasp import estimate_grasps, select_best_grasp
+                results = segmenter.predict(color_bgr, conf=conf, only_names={target})
+                results = _filter_results_to_target(results, target)
+                cand = select_best_grasp(estimate_grasps(results, depth_mm, K))
+                if cand is not None and (best is None or cand.conf > best.conf):
+                    best = cand
+            if best is None:
+                continue
+            # found — compute the target's base-frame position for reporting
+            result["found"] = True
+            result["scan_index"] = idx
+            result["conf"] = float(best.conf)
+            result["center_px"] = list(best.center_px)
+            if T_hand_eye is not None:
+                from .perception.transforms import transform_grasp_pose_to_base
+                with _motion_lock(actuator):
+                    tcp_pose = np.asarray(arm.get_tcp_pose(), dtype=np.float64)
+                T_cam2base = tcp_pose @ np.asarray(T_hand_eye, dtype=np.float64)
+                # Use the SAME transform the (validated) grasp path uses so the
+                # reported/pointed position matches reality. grasp6d[:3] is the
+                # box's base-frame xyz; we only point near it (no grasp).
+                grasp6d, _pre = transform_grasp_pose_to_base(
+                    best.position, best.tcp_rotation, T_cam2base,
+                    pregrasp_offset_m=0.08, insertion_depth_m=0.0,
+                )
+                p_base = [float(v) for v in grasp6d[:3]]
+                result["position_base"] = p_base
+                # A single depth pixel from a far/high scan pose can yield a
+                # physically impossible position (e.g. z below the base plane),
+                # so only POINT at it when the computed location is plausible for
+                # a box on the table AND IK-reachable. Otherwise we simply stay
+                # at this scan pose — the camera is already centered on the box,
+                # which is itself a natural "found it" indication. Never grasps.
+                bx, by, bz = p_base
+                plausible = (0.15 <= bx <= 0.50 and -0.25 <= by <= 0.25 and 0.0 <= bz <= 0.30)
+                result["position_plausible"] = plausible
+                if (indicate and plausible
+                        and not (cancel_event is not None and cancel_event.is_set())):
+                    px = min(0.34, max(0.20, bx))
+                    py = min(0.14, max(-0.14, by))
+                    pz = 0.20
+                    try:
+                        ik_ok, _ = arm.check_ik(px, py, pz, 0.0, 0.0, 0.0)
+                    except Exception:
+                        ik_ok = False
+                    if ik_ok:
+                        with _motion_lock(actuator):
+                            arm.move_to(px, py, pz, 0.0, 0.0, 0.0, duration=move_duration)
+                        _wait_motion_cancellable(arm, move_duration, cancel_event)
+                        result["indicated"] = True
+            result["scanned_poses"] = scanned
+            return result
+        # nothing found anywhere → return home
+        if cancel_event is None or not cancel_event.is_set():
+            with _motion_lock(actuator):
+                arm.move_to(*home_pose, duration=move_duration)
+        result["scanned_poses"] = scanned
+        return result
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.exception("search pipeline failed")
+        return {**result, "error": str(exc)}
+
+
 def _filter_results_to_target(results: list[Any], target: str) -> list[Any]:
     """Drop detections whose label != ``target`` so the grasp estimator only
     considers the requested object. Rebuilds each result's ``boxes`` / ``masks``
@@ -365,4 +485,4 @@ def _filter_results_to_target(results: list[Any], target: str) -> list[Any]:
     return out
 
 
-__all__ = ["run_grasp_once", "GraspCancelled"]
+__all__ = ["run_grasp_once", "run_search_once", "GraspCancelled"]

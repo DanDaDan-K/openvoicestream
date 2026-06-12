@@ -154,6 +154,31 @@ class GraspPlugin(Plugin):
         async def grasp_object(object_name: str) -> dict:  # noqa: ANN001
             return await plugin._dispatch_grasp(object_name)
 
+        # search_object — sweep the arm-mounted camera across observation poses
+        # to FIND an object that may be outside the current view, then point at
+        # it WITHOUT grasping. Separate from grasp_object so a demo can show
+        # "find" and "grasp" as distinct steps.
+        search_desc = (
+            "Search for / locate an object by sweeping the camera around when "
+            "the user asks to FIND or LOOK FOR something but not (yet) pick it "
+            "up ('找一下','找找','搜索','看看有没有','find','look for','search "
+            "for'). The arm scans several viewpoints, stops when it sees the "
+            "object and points at it WITHOUT grasping. "
+            f"object_name MUST be exactly one of these catalog labels: [{catalog_str}]. "
+            "Map the user's spoken object to the closest catalog label "
+            "(e.g. '找一下盒子' -> object_name='box')."
+        )
+
+        @registry.tool(
+            name="search_object",
+            description=search_desc,
+            timeout_s=2.0,
+            preamble_text="好的。",
+            response_mode="parallel",
+        )
+        async def search_object(object_name: str) -> dict:  # noqa: ANN001
+            return await plugin._dispatch_search(object_name)
+
         self._registered = True
         # Tool list changed → invalidate the warmed prefix cache (mirrors
         # ArmPlugin._reregister_tools).
@@ -241,6 +266,82 @@ class GraspPlugin(Plugin):
         # spoken ack overlaps the physical motion (parallel mode).
         self._grasp_task.add_done_callback(self._on_grasp_done)
         return {"started": True, "target": target}
+
+    async def _dispatch_search(self, object_name: str) -> dict:
+        """Fast-return dispatch for search_object (sweep + locate, no grasp)."""
+        target = (object_name or "").strip()
+        catalog = list(self.cfg.get("yolo_classes", []))
+        if catalog and target:
+            tl = target.lower()
+            target = (
+                next((c for c in catalog if c.lower() == tl), None)
+                or next((c for c in catalog if c.lower() in tl or tl in c.lower()), None)
+                or catalog[0]
+            )
+        elif not target and catalog:
+            target = catalog[0]
+        if not target:
+            return {"started": False, "error": "empty object_name"}
+        if self._arm_plugin is None or getattr(self._arm_plugin, "arm", None) is None:
+            return {"started": False, "target": target, "error": "arm not available"}
+        actuator = self._arm_plugin.arm
+        arm = getattr(actuator, "robot", None)
+        if arm is None:
+            return {"started": False, "target": target, "error": "arm not connected"}
+        if not getattr(actuator, "torque_enabled", False):
+            return {"started": False, "target": target, "error": "torque disabled"}
+        # Single arm-motion slot shared with grasp: refuse if one is in flight.
+        if self._grasp_task is not None and not self._grasp_task.done():
+            return {"started": False, "target": target, "error": "already_running"}
+        self._cancel_event = threading.Event()
+        cancel_event = self._cancel_event
+        try:
+            self._ensure_perception()
+        except Exception as exc:
+            logger.exception("GraspPlugin: perception init failed (search)")
+            return {"started": False, "target": target, "error": str(exc)}
+
+        async def _runner() -> dict:
+            from .grasp_service import run_search_once
+
+            return await asyncio.to_thread(
+                run_search_once,
+                target,
+                arm=arm,
+                actuator=actuator,
+                segmenter=self._segmenter,
+                camera=self._camera,
+                T_hand_eye=self._hand_eye,
+                cancel_event=cancel_event,
+                **self._search_params(),
+            )
+
+        self._grasp_task = asyncio.create_task(_runner(), name=f"search-{target}")
+        self._grasp_task.add_done_callback(self._on_grasp_done)
+        return {"started": True, "target": target}
+
+    def _search_params(self) -> dict:
+        params: dict[str, Any] = {}
+        sp = self.cfg.get("scan_poses")
+        if sp:
+            # each pose is a list/tuple [x,y,z,roll,pitch,yaw]
+            params["scan_poses"] = [tuple(float(v) for v in p) for p in sp]
+        for k in ("conf", "move_duration", "warm_up_frames", "frames", "indicate"):
+            if k in self.cfg:
+                v = self.cfg[k]
+                if k == "indicate":
+                    params[k] = v if isinstance(v, bool) else str(v).strip().lower() in {"1", "true", "yes"}
+                elif k in ("warm_up_frames", "frames"):
+                    try:
+                        params[k] = int(float(str(v).strip()))
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    try:
+                        params[k] = float(str(v).strip())
+                    except (TypeError, ValueError):
+                        pass
+        return params
 
     def _on_grasp_done(self, task: asyncio.Task) -> None:
         try:

@@ -83,7 +83,7 @@ tool_trigger_guard: true
 # Tools exempt from the trigger guard (semantic tools with no fixed trigger
 # vocabulary). grasp_object maps any spoken object to a catalog label, so its
 # intent legitimately has no literal trigger phrase.
-tool_trigger_guard_exempt: ["grasp_object"]
+tool_trigger_guard_exempt: ["grasp_object", "search_object"]
 
 # System prompt — imperative robotic-arm controller.
 system_prompt: |
@@ -214,6 +214,16 @@ metadata:
     # Eye-in-hand hand-eye calibration (TSAI, 16 samples). npz key is T_result;
     # the loader falls back to the first key, so no rename needed.
     hand_eye_path: "${REBOT_HAND_EYE:-/opt/rebot-models/hand_eye.npz}"
+    # search_object: observation poses [x,y,z,roll,pitch,yaw] the arm sweeps to
+    # FIND an object outside the current view (the eye-in-hand camera pans with
+    # the arm). Stops at the first pose that sees the target and points at it
+    # (no grasp). All poses sit inside the IK-validated workspace box
+    # (x∈[0.20,0.34], y∈[-0.14,0.14], z∈[0.12,0.34], |rpy|≤0.5). Tune on the real
+    # arm so the views overlap and cover the tabletop. First pose = home-ish.
+    scan_poses:
+      - [0.27, 0.00, 0.26, 0.0, 0.0, 0.0]
+      - [0.25, 0.10, 0.26, 0.0, 0.0, 0.35]
+      - [0.25, -0.10, 0.26, 0.0, 0.0, -0.35]
     # Safety: never open the jaw to the SDK full 0.09m during pre-grasp,
     # cancellation safe-park, or release; gentle compliant grasp force.
     open_distance_m: ${REBOT_GRASP_OPEN_DIST:-0.06}

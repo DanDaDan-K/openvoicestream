@@ -115,6 +115,8 @@ def main() -> int:
                     help="Capture+detect only; camera-frame pose; NO arm.")
     ap.add_argument("--pose-only", action="store_true",
                     help="Connect+read TCP, compute base pose; arm does NOT move.")
+    ap.add_argument("--search", action="store_true",
+                    help="Sweep scan_poses to FIND the target + point at it (no grasp).")
     ap.add_argument("--frames", type=int, default=8,
                     help="Frames to scan for the best detection (detect/pose).")
     ap.add_argument("--open-dist", type=float, default=None,
@@ -231,6 +233,37 @@ def main() -> int:
                 }
                 print("RESULT", json.dumps(out, ensure_ascii=False))
                 return 0 if (pre_ok and gr_ok) else 2
+            finally:
+                actuator.disconnect()
+
+        # ── search: sweep scan_poses to FIND + point at (no grasp) ───
+        if args.search:
+            from ovs_agent.apps.voice_rebot_arm.rebot_actuator import _make_rebot_arm
+            from ovs_agent.apps.voice_rebot_arm.grasp_service import run_search_once
+
+            scan_poses = [
+                (0.27, 0.00, 0.26, 0.0, 0.0, 0.0),
+                (0.25, 0.10, 0.26, 0.0, 0.0, 0.35),
+                (0.25, -0.10, 0.26, 0.0, 0.0, -0.35),
+            ]
+            log.info("building actuator (connect + torque on) — ARM WILL SWEEP")
+            actuator = _make_rebot_arm(_actuator_cfg())
+            actuator.connect()
+            cancel = threading.Event()
+            try:
+                res = run_search_once(
+                    args.target,
+                    arm=actuator.robot,
+                    actuator=actuator,
+                    segmenter=seg,
+                    camera=cam,
+                    T_hand_eye=hand_eye,
+                    scan_poses=scan_poses,
+                    cancel_event=cancel,
+                    conf=args.conf,
+                )
+                print("RESULT", json.dumps(res, ensure_ascii=False, default=str))
+                return 0 if res.get("found") else 1
             finally:
                 actuator.disconnect()
 
