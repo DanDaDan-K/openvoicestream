@@ -285,6 +285,11 @@ def main() -> int:
                 segmenter=seg,
                 camera=cam,
                 T_hand_eye=hand_eye,
+                scan_poses=[
+                    (0.27, 0.00, 0.26, 0.0, 0.0, 0.0),
+                    (0.25, 0.10, 0.26, 0.0, 0.0, 0.35),
+                    (0.25, -0.10, 0.26, 0.0, 0.0, -0.35),
+                ],
                 cancel_event=cancel,
                 conf=args.conf,
                 open_distance_m=args.open_dist if args.open_dist is not None else gcfg["open_distance_m"],

@@ -117,6 +117,7 @@ def run_grasp_once(
     camera: Any = None,
     K: Optional[np.ndarray] = None,
     T_hand_eye: Optional[np.ndarray] = None,
+    scan_poses: Optional[list] = None,
     cancel_event: Optional[threading.Event] = None,
     conf: float = 0.25,
     iou: float = 0.45,
@@ -168,41 +169,57 @@ def run_grasp_once(
         if camera is None:
             return {**result, "error": "no camera configured"}
 
-        # ── 1. acquire a stable frame ───────────────────────────────────
-        stage = "capture"
-        _check_cancel(cancel_event, arm, safe_open_m)
-        if warm_up_frames > 0:
-            try:
-                camera.warm_up(warm_up_frames)
-            except Exception:
-                logger.debug("camera.warm_up failed (continuing)", exc_info=True)
-        color_bgr, depth_mm = camera.get_frame()
-        if color_bgr is None or depth_mm is None:
-            return {**result, "stage": stage, "error": "camera returned no frame"}
-        if K is None:
-            K = np.asarray(camera.K, dtype=np.float32)
-        K = np.asarray(K, dtype=np.float32)
-
-        # ── 2. detect + grasp estimation (target class only) ────────────
-        stage = "detect"
-        _check_cancel(cancel_event, arm, safe_open_m)
+        # ── 1+2. detect from the current view; if nothing is seen AND
+        # scan_poses are configured, sweep the camera across them until the
+        # target appears (auto-search), so grasp_object does not silently fail
+        # just because the object is not perfectly centered. ────────────
         from .perception.ordinary_grasp import estimate_grasps, select_best_grasp
 
-        results = segmenter.predict(
-            color_bgr, conf=conf, iou=iou, only_names={target}
-        )
-        # only_names already drops non-target rows in-graph; the filter below is
-        # a cheap belt-and-braces fallback (matches the same target口径).
-        results = _filter_results_to_target(results, target)
-        grasps = estimate_grasps(results, depth_mm, K, depth_quantile=depth_quantile)
-        best = select_best_grasp(grasps)
+        def _capture_and_detect():
+            if warm_up_frames > 0:
+                try:
+                    camera.warm_up(warm_up_frames)
+                except Exception:
+                    logger.debug("camera.warm_up failed (continuing)", exc_info=True)
+            color_bgr, depth_mm = camera.get_frame()
+            if color_bgr is None or depth_mm is None:
+                return None, None, 0
+            Kl = np.asarray(K if K is not None else camera.K, dtype=np.float32)
+            results = segmenter.predict(color_bgr, conf=conf, iou=iou, only_names={target})
+            results = _filter_results_to_target(results, target)
+            nd = sum(len(getattr(r, "boxes", []) or []) for r in results)
+            b = select_best_grasp(
+                estimate_grasps(results, depth_mm, Kl, depth_quantile=depth_quantile)
+            )
+            return b, Kl, nd
+
+        stage = "capture"
+        _check_cancel(cancel_event, arm, safe_open_m)
+        best, K_local, num_det = _capture_and_detect()
+        if best is None and scan_poses:
+            stage = "scan"
+            for pose in scan_poses:
+                _check_cancel(cancel_event, arm, safe_open_m)
+                with _motion_lock(actuator):
+                    mok = arm.move_to(*pose, duration=move_duration)
+                if not mok:
+                    continue
+                if not _wait_motion_cancellable(arm, move_duration, cancel_event):
+                    _check_cancel(cancel_event, arm, safe_open_m)
+                best, K_local, num_det = _capture_and_detect()
+                if best is not None:
+                    logger.info("grasp: target found while scanning at pose %r", pose)
+                    break
+
+        stage = "detect"
         if best is None:
             return {
                 **result,
                 "stage": stage,
                 "error": f"no valid grasp for target {target!r}",
-                "num_detections": sum(len(getattr(r, "boxes", []) or []) for r in results),
+                "num_detections": int(num_det),
             }
+        K = K_local
         result["grasp_class"] = best.class_name
         result["grasp_conf"] = float(best.conf)
         result["center_px"] = list(best.center_px)
@@ -276,17 +293,47 @@ def run_grasp_once(
             held = bool(arm.grasp(force=grasp_force))
         result["grasp_closed"] = held
 
-        # ── 5. lift (retreat straight up along base Z) ──────────────────
+        # ── 5. lift — actually pick the object UP ───────────────────────
+        # First try a straight-up lift at the grasp x/y. If the object was
+        # grasped near the reach limit (large x), "far + up" is often IK-
+        # unreachable, so a naive straight-up lift silently fails and the arm
+        # just stays clamped at table height ("只夹住不拿起来"). Fall back to a
+        # guaranteed-reachable holding pose that pulls the object back + up to a
+        # visible carry position, so it is genuinely lifted regardless of where
+        # it was grasped.
         stage = "lift"
         _check_cancel(cancel_event, arm, safe_open_m)
+        lifted = False
         zl = zg + float(lift_height_m)
         with _motion_lock(actuator):
             lift_ok = arm.move_to(xg, yg, zl, rxg, ryg, rzg, duration=move_duration)
         if lift_ok:
             if not _wait_motion_cancellable(arm, move_duration, cancel_event):
                 _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
+            lifted = True
         else:
-            logger.warning("lift IK failed; leaving arm at grasp height")
+            # Fallback: a safe holding pose well inside the reachable box.
+            hx = min(0.30, max(0.22, xg))
+            hy = min(0.12, max(-0.12, yg))
+            hz = 0.26
+            hold_ok = False
+            try:
+                hold_ok, _ = arm.check_ik(hx, hy, hz, 0.0, 0.0, 0.0)
+            except Exception:
+                hold_ok = False
+            if hold_ok:
+                logger.info("lift: straight-up IK failed; lifting to holding pose "
+                            "(%.2f,%.2f,%.2f)", hx, hy, hz)
+                with _motion_lock(actuator):
+                    moved = arm.move_to(hx, hy, hz, 0.0, 0.0, 0.0, duration=move_duration)
+                if moved:
+                    if not _wait_motion_cancellable(arm, move_duration, cancel_event):
+                        _check_cancel(cancel_event, arm, safe_open_m)
+                    lifted = True
+            if not lifted:
+                logger.warning("lift IK failed (both straight-up and holding pose); "
+                               "leaving arm at grasp height")
+        result["lifted"] = lifted
 
         # ── 6. optional release ─────────────────────────────────────────
         if release_after:

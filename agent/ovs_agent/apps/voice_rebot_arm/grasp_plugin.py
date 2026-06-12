@@ -410,6 +410,15 @@ class GraspPlugin(Plugin):
         int_keys = {"warm_up_frames"}
         bool_keys = {"release_after"}
         out: dict[str, Any] = {}
+        # Auto-search: pass the configured scan_poses so grasp_object sweeps to
+        # find the object when it is not in the immediate view (same poses
+        # search_object uses).
+        sp = self.cfg.get("scan_poses")
+        if sp:
+            try:
+                out["scan_poses"] = [tuple(float(v) for v in p) for p in sp]
+            except (TypeError, ValueError):
+                logger.warning("GraspPlugin: ignoring malformed scan_poses")
         for k in float_keys | int_keys | bool_keys:
             if k not in self.cfg:
                 continue
