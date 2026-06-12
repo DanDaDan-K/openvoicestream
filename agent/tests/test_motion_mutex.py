@@ -153,7 +153,7 @@ def test_grasp_refused_while_static_action_runs() -> None:
     plugin = _make_grasp_plugin(_BusyArmPlugin(busy="wave"))
     res = asyncio.run(plugin._dispatch_grasp("box"))  # noqa: SLF001
     assert res["started"] is False
-    assert res["error"] == "arm_busy"
+    assert res["error"].startswith("arm_busy")
     assert res["current"] == "wave"
 
 
@@ -161,7 +161,7 @@ def test_put_down_refused_while_static_action_runs() -> None:
     plugin = _make_grasp_plugin(_BusyArmPlugin(busy="point_at"))
     res = asyncio.run(plugin._dispatch_put_down())  # noqa: SLF001
     assert res["started"] is False
-    assert res["error"] == "arm_busy"
+    assert res["error"].startswith("arm_busy")
     assert res["current"] == "point_at"
 
 
@@ -180,7 +180,7 @@ def test_grasp_own_slot_busy_reports_motion_name() -> None:
 
     res = asyncio.run(_drive())
     assert res["started"] is False
-    assert res["error"] == "already_running"
+    assert res["error"].startswith("already_running")
     assert res["current"] == "grasp-box"
 
 

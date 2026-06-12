@@ -373,7 +373,10 @@ class ArmPlugin(Plugin):
             return {
                 "started": False,
                 "action": name,
-                "error": f"arm busy: '{busy}' still running",
+                "error": (
+                    f"arm busy: '{busy}' still running. Do NOT call any "
+                    "motion tool again this turn — tell the user to wait."
+                ),
             }
 
         async def _runner() -> bool:

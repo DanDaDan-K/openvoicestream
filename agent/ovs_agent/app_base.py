@@ -2019,7 +2019,15 @@ class BaseApp:
                 evt.id, evt.name, ok=False, error=str(e)
             )
             return
-        ok = not (isinstance(result, dict) and result.get("success") is False)
+        # A refusal/dispatch-failure is NOT ok: parallel-mode tools ack with
+        # {"started": True}; guards refuse with {"started": False, "error":
+        # ...} and NO "success" key. Reporting those ok=True made the
+        # server-loop LLM retry the same motion tool every round until the
+        # iteration cap — the arm visibly "looped" (real machine 2026-06-12).
+        ok = not (
+            isinstance(result, dict)
+            and (result.get("success") is False or result.get("started") is False)
+        )
         if ok:
             await self.slv.send_tool_result(
                 evt.id, evt.name, ok=True, result=result
