@@ -38,6 +38,12 @@ class GraspCancelled(Exception):
     """Raised internally when ``cancel_event`` fires mid-pipeline."""
 
 
+# SDK mechanical max jaw opening (m) and the clearance added over the detected
+# object width so the open jaw clears the object before the approach.
+_GRIPPER_MAX_M = 0.09
+_OPEN_MARGIN_M = 0.012
+
+
 def _motion_lock(actuator: Any):
     """Return a context manager that holds the actuator's bus lock for one
     arm motion, or a null context when no actuator is supplied.
@@ -201,6 +207,16 @@ def run_grasp_once(
         result["grasp_conf"] = float(best.conf)
         result["center_px"] = list(best.center_px)
         result["jaw_width_m"] = float(best.jaw_width_m)
+
+        # Auto-size the pre-grasp open width to the detected object: a fixed
+        # safe-open (e.g. 0.06m) is NARROWER than a wide box (e.g. 0.077m) and
+        # the jaw would collide instead of going around it. Widen to
+        # object_width + margin, clamped to the mechanical max. Never shrink
+        # below the configured safe-open. The safe-park (cancel) open uses the
+        # same widened value so a release always clears the object.
+        widened = float(best.jaw_width_m) + _OPEN_MARGIN_M
+        safe_open_m = min(_GRIPPER_MAX_M, max(safe_open_m, widened))
+        result["open_distance_m"] = safe_open_m
 
         # ── 3. camera → base transform ──────────────────────────────────
         stage = "transform"

@@ -70,8 +70,10 @@ tools_default_allowlist: []
 tools_max_iterations: 3
 # Block a server-loop tool call whose ASR text contains none of the tool's
 # declared trigger phrases (guards against the LLM firing a motion the user
-# never asked for). Opt-in; default off in the framework.
-tool_trigger_guard: true
+# never asked for). Opt-in; env-toggleable. Currently OFF: it was blocking
+# valid semantic grasp intent ("取一下盒子") since grasp_object's literal
+# trigger list didn't carry that phrasing — semantic grasp should trust the LLM.
+tool_trigger_guard: false
 
 # System prompt — imperative robotic-arm controller.
 system_prompt: |
@@ -181,8 +183,28 @@ metadata:
     clear_history_on_tool_change: ${ARM_CLEAR_HISTORY_ON_TOOL_CHANGE:-false}
     clear_history_on_turn_end: ${ARM_CLEAR_HISTORY_ON_TURN_END:-true}
   grasp:
-    # Safety defaults for camera-guided grasp_object (Phase B). Keep the tool
-    # available but never open the jaw to the SDK full 0.09m during pre-grasp,
-    # cancellation safe-park, or release.
+    # Phase B camera-guided grasp_object. Perception + calibration artifacts are
+    # mounted at /opt/rebot-models (host /home/seeed/rebot-models).
+    enabled: true
+    yolo_model_path: "${REBOT_GRASP_MODEL:-/opt/rebot-models/yoloe-26s-seg-box.onnx}"
+    yolo_classes: ["box", "cardboard box", "carton", "package"]
+    # CPU EP: production voice stack leaves <300MB GPU free → TRT/CUDA OOMs.
+    onnx_providers: ["CPUExecutionProvider"]
+    # Detection confidence floor. A tall/vertical cardboard box detects at only
+    # ~0.16-0.20 with the open-vocab YOLOE box head (real-machine 2026-06-12),
+    # so the 0.25 default would miss it. 0.15 is low enough to catch the box;
+    # the grasp filters to the box class only so a false positive is unlikely.
+    conf: ${REBOT_GRASP_CONF:-0.15}
+    # Orbbec Gemini2 (color+depth+intrinsics via SDK at open time).
+    camera:
+      type: "orbbec_gemini2"
+      color_width: 1280
+      color_height: 720
+      fps: 30
+    # Eye-in-hand hand-eye calibration (TSAI, 16 samples). npz key is T_result;
+    # the loader falls back to the first key, so no rename needed.
+    hand_eye_path: "${REBOT_HAND_EYE:-/opt/rebot-models/hand_eye.npz}"
+    # Safety: never open the jaw to the SDK full 0.09m during pre-grasp,
+    # cancellation safe-park, or release; gentle compliant grasp force.
     open_distance_m: ${REBOT_GRASP_OPEN_DIST:-0.06}
     grasp_force: ${REBOT_GRASP_FORCE:-0.30}

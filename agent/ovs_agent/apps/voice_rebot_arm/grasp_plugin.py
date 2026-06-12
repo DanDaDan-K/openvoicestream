@@ -126,14 +126,27 @@ class GraspPlugin(Plugin):
 
         plugin = self
 
+        # The vision model only recognises a fixed catalog of class labels (the
+        # configured ``yolo_classes``). The detector filters its results by the
+        # ``object_name`` we pass, so the LLM MUST fill object_name with one of
+        # these EXACT labels — not the user's spoken word. The LLM maps the
+        # user's intent ("抓盒子"/"把那个箱子拿起来") to the closest catalog label.
+        catalog = list(self.cfg.get("yolo_classes", []))
+        catalog_str = ", ".join(repr(c) for c in catalog) or "'box'"
+        grasp_desc = (
+            "Pick up / grasp an object using the camera-guided arm when the "
+            "user asks to grab/pick something up ('抓','拿起','夹起','抓取',"
+            "'grab','pick up'). "
+            f"object_name MUST be exactly one of these catalog labels: [{catalog_str}]. "
+            "Map the user's spoken object to the closest catalog label and pass "
+            "that English label verbatim (e.g. user says '抓盒子'/'把箱子拿起来' "
+            "-> object_name='box'). Do NOT pass the user's Chinese words; the "
+            "detector only knows the catalog labels above."
+        )
+
         @registry.tool(
             name="grasp_object",
-            description=(
-                "Pick up / grasp an object by name using the camera-guided "
-                "arm. Trigger words: '抓', '抓起', '拿起', '夹起', '抓取', "
-                "'grasp', 'pick up', 'grab'. The object_name is the thing to "
-                "pick up (e.g. 'banana', 'bottle', 'cup', '香蕉', '瓶子')."
-            ),
+            description=grasp_desc,
             timeout_s=2.0,
             preamble_text="好的。",
             response_mode="parallel",
@@ -154,6 +167,28 @@ class GraspPlugin(Plugin):
         target = (object_name or "").strip()
         if not target:
             return {"started": False, "error": "empty object_name"}
+        # Safety net: the detector filters by class label, which only knows the
+        # configured catalog (English). If the LLM passed the user's word
+        # instead (e.g. '盒子'), remap to a catalog label so detections aren't
+        # silently filtered out. Exact or substring match against the catalog is
+        # honoured; otherwise fall back to the first catalog class (the model
+        # only knows box-like classes here, so any is the box).
+        catalog = list(self.cfg.get("yolo_classes", []))
+        if catalog:
+            tl = target.lower()
+            # Resolve to an EXACT catalog label (the detector filters by exact
+            # class name). Prefer exact match, then substring either way, else
+            # the first catalog class. Guarantees the filter can match.
+            resolved = (
+                next((c for c in catalog if c.lower() == tl), None)
+                or next((c for c in catalog if c.lower() in tl or tl in c.lower()), None)
+                or catalog[0]
+            )
+            if resolved != target:
+                logger.info(
+                    "GraspPlugin: object_name %r → catalog label %r", target, resolved
+                )
+                target = resolved
         if self._arm_plugin is None or getattr(self._arm_plugin, "arm", None) is None:
             return {"started": False, "target": target, "error": "arm not available"}
 
@@ -261,13 +296,37 @@ class GraspPlugin(Plugin):
             return None
 
     def _grasp_params(self) -> dict:
-        keys = (
+        # Numeric grasp params often arrive as "${VAR:-default}" → an env-
+        # substituted STRING (e.g. conf "0.15"), which would break the numpy
+        # `c < conf` gate in predict and float maths downstream. Coerce floats
+        # here so run_grasp_once always receives real numbers. Empty string →
+        # treat as unset (drop the key, fall back to the function default).
+        float_keys = {
             "conf", "iou", "depth_quantile", "pregrasp_offset_m",
             "insertion_depth_m", "lift_height_m", "grasp_force",
-            "open_distance_m",
-            "move_duration", "warm_up_frames", "release_after",
-        )
-        return {k: self.cfg[k] for k in keys if k in self.cfg}
+            "open_distance_m", "move_duration",
+        }
+        int_keys = {"warm_up_frames"}
+        bool_keys = {"release_after"}
+        out: dict[str, Any] = {}
+        for k in float_keys | int_keys | bool_keys:
+            if k not in self.cfg:
+                continue
+            v = self.cfg[k]
+            try:
+                if k in bool_keys:
+                    out[k] = v if isinstance(v, bool) else str(v).strip().lower() in {"1", "true", "yes"}
+                elif k in int_keys:
+                    s = str(v).strip()
+                    if s:
+                        out[k] = int(float(s))
+                else:  # float
+                    s = str(v).strip()
+                    if s:
+                        out[k] = float(s)
+            except (TypeError, ValueError):
+                logger.warning("GraspPlugin: ignoring non-numeric %s=%r", k, v)
+        return out
 
 
 __all__ = ["GraspPlugin"]
