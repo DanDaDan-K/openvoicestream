@@ -83,7 +83,7 @@ def test_dispatch_rejects_reentry_while_running() -> None:
 
     second, _ = asyncio.run(_drive())
     assert second["started"] is False
-    assert second["error"] == "already_running"
+    assert second["error"].startswith("already_running")
 
 
 def test_dispatch_allows_after_previous_done() -> None:
@@ -313,3 +313,77 @@ def test_put_down_uses_recorded_pose_and_clears_it_on_success() -> None:
     assert seen["open_distance_m"] == 0.089
     # consumed on success → next put_down falls back to place_pose.
     assert plugin._last_grasp is None  # noqa: SLF001
+
+
+# ── per-class force policy (Level 1) + adaptive flag (Level 2) ──────
+
+
+def _capture_run_kwargs(plugin, actuator, target="box"):
+    """Dispatch a grasp with run_grasp_once stubbed; return its kwargs."""
+    import ovs_agent.apps.voice_rebot_arm.grasp_service as gs
+
+    seen = {}
+
+    def _fake_run(tgt, **kwargs):
+        seen["target"] = tgt
+        seen.update(kwargs)
+        return {"success": True, "grasp_pose": [0.4, 0, 0.1, 0, 0, 0]}
+
+    orig = gs.run_grasp_once
+    gs.run_grasp_once = _fake_run
+    try:
+        async def _drive():
+            res = await plugin._dispatch_grasp(target)  # noqa: SLF001
+            await plugin._grasp_task  # noqa: SLF001
+            return res
+
+        res = asyncio.run(_drive())
+    finally:
+        gs.run_grasp_once = orig
+    return res, seen
+
+
+def test_configured_class_uses_fixed_force_no_adaptive() -> None:
+    app = _FakeApp()
+    plugin = GraspPlugin(app, {
+        "yolo_classes": ["box", "apple"],
+        "grasp_force": 0.8,
+        "grasp_force_by_class": {"box": 0.65},
+    })
+    actuator = _FakeActuator(torque=True)
+    plugin._arm_plugin = _FakeArmPlugin(actuator)  # noqa: SLF001
+    plugin._ensure_perception = lambda: None  # type: ignore[assignment]
+
+    res, seen = _capture_run_kwargs(plugin, actuator, target="box")
+    assert res["started"] is True
+    assert seen["grasp_force"] == 0.65
+    assert seen["adaptive_force"] is False
+
+
+def test_unconfigured_class_gets_adaptive_with_global_cap() -> None:
+    app = _FakeApp()
+    plugin = GraspPlugin(app, {
+        "yolo_classes": ["box", "apple"],
+        "grasp_force": 0.8,
+        "grasp_force_by_class": {"box": 0.65},
+    })
+    actuator = _FakeActuator(torque=True)
+    plugin._arm_plugin = _FakeArmPlugin(actuator)  # noqa: SLF001
+    plugin._ensure_perception = lambda: None  # type: ignore[assignment]
+
+    res, seen = _capture_run_kwargs(plugin, actuator, target="apple")
+    assert res["started"] is True
+    assert seen["adaptive_force"] is True
+    # ceiling comes from the global grasp_force config
+    assert seen["grasp_force"] == 0.8
+
+
+def test_no_by_class_config_means_adaptive_for_everything() -> None:
+    app = _FakeApp()
+    plugin = GraspPlugin(app, {"yolo_classes": ["box"], "grasp_force": 0.7})
+    actuator = _FakeActuator(torque=True)
+    plugin._arm_plugin = _FakeArmPlugin(actuator)  # noqa: SLF001
+    plugin._ensure_perception = lambda: None  # type: ignore[assignment]
+
+    _, seen = _capture_run_kwargs(plugin, actuator, target="box")
+    assert seen["adaptive_force"] is True

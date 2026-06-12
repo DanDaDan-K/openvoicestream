@@ -53,6 +53,11 @@ class GraspPose:
     short_edge_points: np.ndarray
     valid_depth_pixels: int
     rejected_reason: Optional[str] = None
+    # which estimator produced this pose: "top_face" (3D plane fit — only
+    # possible when the camera can actually SEE the top) or "legacy"
+    # (silhouette short-axis). grasp_service uses this to pick the
+    # re-observation strategy: no top face visible → go HIGH and tilt down.
+    method: str = "legacy"
 
     @property
     def is_valid(self) -> bool:
@@ -79,12 +84,17 @@ def estimate_grasps(
     depth_mm: np.ndarray,
     K: np.ndarray,
     depth_quantile: float = 0.75,
+    up_hint_cam: Optional[np.ndarray] = None,
 ) -> list[GraspPose]:
     grasps: list[GraspPose] = []
     for result in results:
         for index in range(detection_count(result)):
             grasps.append(
-                estimate_grasp(result, index, depth_mm, K, depth_quantile=depth_quantile)
+                estimate_grasp(
+                    result, index, depth_mm, K,
+                    depth_quantile=depth_quantile,
+                    up_hint_cam=up_hint_cam,
+                )
             )
     return grasps
 
@@ -102,12 +112,66 @@ def estimate_grasp(
     depth_mm: np.ndarray,
     K: np.ndarray,
     depth_quantile: float = 0.75,
+    up_hint_cam: Optional[np.ndarray] = None,
 ) -> GraspPose:
     class_name, conf, bbox_xyxy = _detection_meta(result, index)
     rect_points = _rect_points(result, index, depth_mm.shape, bbox_xyxy)
     center = rect_points.mean(axis=0).astype(np.float32)
 
     mask = _depth_mask(result, index, depth_mm.shape, rect_points)
+
+    # ── TOP-FACE plane grasp (preferred when an up-hint is available) ──
+    # The 2D-silhouette family (min-area-rect below) merges the box's top and
+    # side faces under oblique views, so the "short axis" can measure the
+    # wrong physical dimension entirely. Fitting the TOP plane in 3D (RANSAC,
+    # candidate whose normal best matches "up") and doing PCA inside that
+    # plane measures the real graspable face: metric width, true angle, and
+    # a face-normal approach. Falls back to the legacy estimators whenever
+    # the fit is not confident (curved objects, sparse depth, no hint).
+    if up_hint_cam is not None:
+        top = _top_face_grasp(mask, depth_mm, K, np.asarray(up_hint_cam, dtype=np.float64))
+        if top is not None:
+            position_t, open_axis_t, _face_normal_t, width_t, length_t, n_in = top
+            # APPROACH stays the legacy camera-ray (pointing TOWARD the
+            # camera — grasp_axes_to_rebot_tcp_rotation negates it into the
+            # tool-forward). Two reasons: (1) sign convention — the transform
+            # assumes a toward-camera approach; (2) kinematics — the real
+            # B601-DM's validated grasps all use the forward-tilted camera-ray
+            # approach (pitch 0.3-0.6), a pure face-normal down-press lands
+            # outside the comfortable IK envelope. The TOP-FACE fit therefore
+            # contributes only what the silhouette could not measure: the true
+            # metric width/length and the in-plane open-axis direction.
+            approach_t = _normalize(-position_t)
+            if approach_t is None:
+                approach_t = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+            grip_t = _normalize(np.cross(open_axis_t, approach_t))
+            open_t = _normalize(np.cross(approach_t, grip_t))
+            if grip_t is not None and open_t is not None:
+                rotation = np.column_stack([grip_t, open_t, approach_t]).astype(np.float32)
+                tcp_rotation = grasp_axes_to_rebot_tcp_rotation(
+                    rotation[:, 0], rotation[:, 1], rotation[:, 2]
+                ).astype(np.float32)
+                u, v = _project(position_t, K)
+                short_uv = _line_from_center(
+                    np.array([u, v], dtype=np.float32),
+                    np.array([open_t[0], open_t[1]], dtype=np.float32) * 40.0,
+                )
+                return GraspPose(
+                    class_name=class_name,
+                    conf=conf,
+                    bbox_xyxy=bbox_xyxy,
+                    center_px=(int(round(u)), int(round(v))),
+                    position=position_t.astype(np.float32),
+                    rotation=rotation,
+                    tcp_rotation=tcp_rotation,
+                    jaw_width_m=float(width_t),
+                    object_length_m=float(length_t),
+                    angle_deg=float(np.degrees(np.arctan2(open_t[1], open_t[0]))),
+                    rect_points=rect_points,
+                    short_edge_points=short_uv,
+                    valid_depth_pixels=int(n_in),
+                    method="top_face",
+                )
     # One pass over the 4 rect edges: gather vectors/norms, then derive the
     # longest edge (object length) and the shortest edge (grasp short-axis).
     edge_vecs = [rect_points[(i + 1) % 4] - rect_points[i] for i in range(4)]
@@ -146,7 +210,24 @@ def estimate_grasp(
     if approach is None:
         approach = np.array([0.0, 0.0, -1.0], dtype=np.float32)
 
-    open_axis = _pixel_vec_to_3d(short_dir_uv, z_m, K)
+    # 3D short-axis measurement (2026-06-12): the legacy path turned the 2D
+    # pixel direction into 3D with a z=0 assumption (_pixel_vec_to_3d), i.e.
+    # "the grasped face is fronto-parallel to the camera". For an OBLIQUE box
+    # that skews the open-axis DIRECTION and inflates the WIDTH — the real
+    # machine then gripped across the wrong edge ("不对着短边夹"). Sample the
+    # depth at two points INSIDE the object along the short axis and
+    # back-project each with its own depth: their difference is the true 3D
+    # open axis + width. Falls back to the legacy estimate when the depth at
+    # either sample is invalid.
+    open_vec_3d = _short_axis_3d(
+        depth_mm, K, center, short_dir_uv, grasp_span_px
+    )
+    jaw_width_3d: Optional[float] = None
+    if open_vec_3d is not None:
+        jaw_width_3d = float(np.linalg.norm(open_vec_3d))
+        open_axis = open_vec_3d
+    else:
+        open_axis = _pixel_vec_to_3d(short_dir_uv, z_m, K)
     open_axis = open_axis - float(np.dot(open_axis, approach)) * approach
     open_axis = _normalize(open_axis)
     if open_axis is None:
@@ -170,7 +251,12 @@ def estimate_grasp(
         rotation[:, 0], rotation[:, 1], rotation[:, 2]
     ).astype(np.float32)
 
-    jaw_width_m = float(np.linalg.norm(_pixel_vec_to_3d(short_dir_uv * grasp_span_px, z_m, K)))
+    if jaw_width_3d is not None:
+        jaw_width_m = jaw_width_3d
+    else:
+        jaw_width_m = float(
+            np.linalg.norm(_pixel_vec_to_3d(short_dir_uv * grasp_span_px, z_m, K))
+        )
     object_length_m = float(np.linalg.norm(_pixel_vec_to_3d(short_dir_uv * long_len_px, z_m, K)))
     angle_deg = float(np.degrees(np.arctan2(short_dir_uv[1], short_dir_uv[0])))
 
@@ -344,6 +430,164 @@ def _depth_mask(
     mask = np.zeros(image_shape, dtype=np.uint8)
     cv2.fillPoly(mask, [polygon], 1)
     return mask
+
+
+def _project(p_cam: np.ndarray, K: np.ndarray) -> tuple[float, float]:
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    z = max(float(p_cam[2]), 1e-6)
+    return float(p_cam[0]) * fx / z + cx, float(p_cam[1]) * fy / z + cy
+
+
+def _top_face_grasp(
+    mask: np.ndarray,
+    depth_mm: np.ndarray,
+    K: np.ndarray,
+    up_cam: np.ndarray,
+    max_points: int = 1500,
+    ransac_iters: int = 80,
+    plane_thresh_m: float = 0.008,
+    min_inliers: int = 120,
+    min_up_alignment: float = 0.85,
+) -> Optional[tuple]:
+    """Fit the object's TOP face and derive the grasp inside it.
+
+    Returns ``(center_cam, open_axis_cam, approach_cam, width_m, length_m,
+    n_inliers)`` or ``None`` (caller falls back to the silhouette path).
+
+    Steps: lift masked valid-depth pixels to a camera-frame cloud (sampled);
+    RANSAC up to two candidate planes (largest face first, then the rest);
+    keep the candidate whose normal aligns with ``up_cam`` (gravity-up
+    expressed in the camera frame — supplied by the caller from the current
+    TCP pose and hand-eye, so SIDE faces are rejected by construction); PCA
+    of the inliers projected into the plane → minor axis = open (grasp)
+    axis, extents (5–95 pct) = width/length; approach = -normal (i.e. press
+    onto the face). All numpy, no Open3D — slim-container friendly.
+    """
+    # MEASUREMENT HYGIENE (real-machine 2026-06-12): the seg mask bleeds a
+    # few px onto the background at the silhouette edge; lifted to 3D those
+    # points pulled the RANSAC plane into a ~28°-slanted compromise through
+    # box-top + bled table pixels and inflated the in-plane extents to
+    # 0.11-0.17m on a 0.077m box. Erode the mask (kill edge bleed) and
+    # band-pass the depths around the object's median (±0.12m) before any
+    # fitting.
+    mask_in = cv2.erode(
+        (mask > 0).astype(np.uint8), np.ones((7, 7), dtype=np.uint8)
+    )
+    ys, xs = np.nonzero(mask_in > 0)
+    if len(xs) < min_inliers:
+        return None
+    z = depth_mm[ys, xs].astype(np.float64)
+    ok = z > 0
+    xs, ys, z = xs[ok], ys[ok], z[ok] / 1000.0
+    if len(xs) < min_inliers:
+        return None
+    z_med = float(np.median(z))
+    band = np.abs(z - z_med) <= 0.12
+    xs, ys, z = xs[band], ys[band], z[band]
+    if len(xs) < min_inliers:
+        return None
+    if len(xs) > max_points:
+        sel = np.random.default_rng(0).choice(len(xs), size=max_points, replace=False)
+        xs, ys, z = xs[sel], ys[sel], z[sel]
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    pts = np.column_stack([(xs - cx) * z / fx, (ys - cy) * z / fy, z])
+
+    up = up_cam / max(float(np.linalg.norm(up_cam)), 1e-9)
+    rng = np.random.default_rng(1)
+    remaining = np.ones(len(pts), dtype=bool)
+    for _round in range(2):
+        idx_pool = np.nonzero(remaining)[0]
+        if len(idx_pool) < min_inliers:
+            return None
+        best_inliers: Optional[np.ndarray] = None
+        sub = pts[idx_pool]
+        for _ in range(ransac_iters):
+            tri = sub[rng.choice(len(sub), size=3, replace=False)]
+            n = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+            nn = float(np.linalg.norm(n))
+            if nn < 1e-9:
+                continue
+            n = n / nn
+            d = np.abs((sub - tri[0]) @ n)
+            inl = d < plane_thresh_m
+            if best_inliers is None or inl.sum() > best_inliers.sum():
+                best_inliers = inl
+        if best_inliers is None or int(best_inliers.sum()) < min_inliers:
+            return None
+        inlier_pts = sub[best_inliers]
+        # Refined normal via SVD of the inlier covariance.
+        centroid = inlier_pts.mean(axis=0)
+        _u, _s, vt = np.linalg.svd(inlier_pts - centroid, full_matrices=False)
+        normal = vt[2]
+        if float(np.dot(normal, up)) < 0:
+            normal = -normal
+        if float(np.dot(normal, up)) >= min_up_alignment:
+            # Top face found: PCA inside the plane.
+            in_plane = (inlier_pts - centroid) - np.outer(
+                (inlier_pts - centroid) @ normal, normal
+            )
+            _u2, _s2, vt2 = np.linalg.svd(in_plane, full_matrices=False)
+            major, minor = vt2[0], vt2[1]
+            major_c = in_plane @ major
+            minor_c = in_plane @ minor
+            length = float(np.percentile(major_c, 95) - np.percentile(major_c, 5))
+            width = float(np.percentile(minor_c, 95) - np.percentile(minor_c, 5))
+            if width < 0.005 or length < 0.005:
+                return None
+            approach = -normal  # press onto the face
+            return (
+                centroid,
+                minor / max(float(np.linalg.norm(minor)), 1e-9),
+                approach / max(float(np.linalg.norm(approach)), 1e-9),
+                width,
+                length,
+                int(best_inliers.sum()),
+            )
+        # Largest plane was a SIDE face (oblique view) — remove its inliers
+        # and try the next-largest candidate.
+        remaining[idx_pool[best_inliers]] = False
+    return None
+
+
+def _short_axis_3d(
+    depth_mm: np.ndarray,
+    K: np.ndarray,
+    center: np.ndarray,
+    short_dir_uv: np.ndarray,
+    grasp_span_px: float,
+    inner_frac: float = 0.35,
+) -> Optional[np.ndarray]:
+    """True 3D open-axis vector across the object's short side, full width.
+
+    Samples median depth at ``center ± inner_frac·span`` along the short axis
+    (INSIDE the object — the exact edge pixels often land on background),
+    back-projects each with its own depth, and scales the inner separation
+    back up to the full span. Returns the full-width 3D vector (length =
+    jaw width in metres), or ``None`` when either depth sample is invalid —
+    callers then fall back to the legacy fronto-parallel estimate.
+    """
+    if grasp_span_px < 4.0:
+        return None
+    h, w = depth_mm.shape
+    offsets = (-inner_frac * grasp_span_px, inner_frac * grasp_span_px)
+    pts3d = []
+    for off in offsets:
+        u = float(center[0] + short_dir_uv[0] * off)
+        v = float(center[1] + short_dir_uv[1] * off)
+        if not (0 <= u < w and 0 <= v < h):
+            return None
+        z = get_depth_mm(depth_mm, int(round(u)), int(round(v)), 5)
+        if z <= 0:
+            return None
+        pts3d.append(_backproject(u, v, z / 1000.0, K))
+    inner_vec = pts3d[1] - pts3d[0]
+    inner_norm = float(np.linalg.norm(inner_vec))
+    if inner_norm < 1e-6:
+        return None
+    # inner separation covers 2·inner_frac of the span → scale to full width.
+    return (inner_vec / (2.0 * inner_frac)).astype(np.float32)
 
 
 def _backproject(u: float, v: float, z_m: float, K: np.ndarray) -> np.ndarray:

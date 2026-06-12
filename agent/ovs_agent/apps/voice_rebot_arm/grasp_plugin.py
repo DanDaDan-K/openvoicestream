@@ -50,6 +50,7 @@ class GraspPlugin(Plugin):
         self._hand_eye: Optional[np.ndarray] = None
         self._cancel_event = threading.Event()
         self._grasp_task: Optional[asyncio.Task] = None
+        self._prime_task: Optional[asyncio.Task] = None
         self._registered = False
         # Last successful grasp result (grasp_pose / pregrasp_pose /
         # open_distance_m). put_down replays it so the object is placed back
@@ -83,6 +84,53 @@ class GraspPlugin(Plugin):
             reg = getattr(self._arm_plugin, "register_motion_source", None)
             if callable(reg):
                 reg(self._busy_motion_name)
+        # Prime perception in the background: the YOLO onnx session load and
+        # the camera stream start are otherwise paid by the FIRST grasp — and
+        # a cold Orbbec returns None frames for a while (wait_for_frames(500)
+        # timeouts), which used to make the demo's first grasp fail. Priming
+        # moves that cost to boot. Failure is non-fatal (lazy init remains).
+        if self.cfg.get("enabled", True) is not False and self._prime_enabled():
+            self._prime_task = asyncio.create_task(
+                asyncio.to_thread(self._prime_perception), name="grasp-prime"
+            )
+
+    def _prime_enabled(self) -> bool:
+        v = self.cfg.get("prime_on_start", True)
+        return v if isinstance(v, bool) else str(v).strip().lower() not in {"0", "false", "no"}
+
+    def _prime_perception(self) -> None:
+        import time as _time
+
+        t0 = _time.monotonic()
+        try:
+            self._ensure_perception()
+            cam = self._camera
+            if cam is not None:
+                try:
+                    cam.warm_up(5)
+                except Exception:
+                    logger.debug("GraspPlugin: prime warm_up failed", exc_info=True)
+                # Pull frames until one is real — a cold camera returns None
+                # for the first second or two.
+                for _ in range(10):
+                    try:
+                        c, d = cam.get_frame()
+                    except Exception:
+                        break
+                    if c is not None and d is not None:
+                        break
+            logger.info(
+                "GraspPlugin: perception primed in %.1fs (first grasp will "
+                "skip model load + camera cold-start)",
+                _time.monotonic() - t0,
+            )
+        except Exception:
+            logger.warning(
+                "GraspPlugin: perception priming failed after %.1fs — first "
+                "grasp falls back to lazy init",
+                _time.monotonic() - t0,
+                exc_info=True,
+            )
 
     def _busy_motion_name(self) -> Optional[str]:
         """Name of our in-flight motion (e.g. 'grasp-box'), or None."""
@@ -96,6 +144,14 @@ class GraspPlugin(Plugin):
 
     async def stop(self) -> None:
         await super().stop()
+        # Wind down the boot-time perception priming first (it only loads the
+        # model / pulls frames — bounded work, brief wait then abandon).
+        if self._prime_task is not None and not self._prime_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(self._prime_task), timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+        self._prime_task = None
         # Signal the in-flight grasp to abort. The grasp body runs in a worker
         # thread (asyncio.to_thread) which CANNOT be force-cancelled — the
         # pipeline polls _cancel_event before each motion and safe-parks. So
@@ -221,9 +277,11 @@ class GraspPlugin(Plugin):
             "Put down / place / release the object currently held by the "
             "gripper. The arm sets it back down at the spot it was picked up "
             "from (so the camera can find it again), opens the gripper, and "
-            "returns home. Triggers: '放下', '放下来', '放回去', '放到桌上', "
-            "'把它放下', 'put it down', 'put down', 'place it', 'set it down', "
-            "'drop it', 'release it'."
+            "returns home. Use this whenever the user wants the held object "
+            "put down or returned, EVEN IF they name the object. Triggers: "
+            "'放下', '放下来', '放回去', '把盒子放回去', '放下盒子', '放回原处', "
+            "'放到桌上', '把它放下', 'put it down', 'put down', 'put the box "
+            "back', 'place it', 'set it down', 'drop it', 'release it'."
         )
 
         @registry.tool(
@@ -308,6 +366,17 @@ class GraspPlugin(Plugin):
             from .grasp_service import run_grasp_once
 
             params = self._grasp_params()
+            # Force policy: a class listed in grasp_force_by_class uses its
+            # FIXED configured force (deterministic, zero extra latency);
+            # any unlisted class uses the adaptive ramp capped at the global
+            # grasp_force — soft/unknown objects settle at the lowest force
+            # that holds instead of getting the box-tuned clamp.
+            fixed = self._force_for_class(target)
+            if fixed is not None:
+                params["grasp_force"] = fixed
+                params["adaptive_force"] = False
+            else:
+                params["adaptive_force"] = True
             return await asyncio.to_thread(
                 run_grasp_once,
                 target,
@@ -482,7 +551,18 @@ class GraspPlugin(Plugin):
         user what the arm is still doing), or None when the arm is free."""
         mine = self._busy_motion_name()
         if mine:
-            return {"error": "already_running", "current": mine}
+            # The error string is LLM-facing (server-loop feeds it back as the
+            # tool result): say explicitly NOT to retry, or the model fires
+            # the same tool every round until the iteration cap (real-machine
+            # loop, 2026-06-12).
+            return {
+                "error": (
+                    f"already_running: the arm is still executing '{mine}'. "
+                    "Do NOT call any motion tool again this turn — tell the "
+                    "user the arm is busy and to wait for the completion tone."
+                ),
+                "current": mine,
+            }
         chk = getattr(self._arm_plugin, "busy_action", None)
         if callable(chk):
             try:
@@ -493,7 +573,14 @@ class GraspPlugin(Plugin):
             # was checked above and is idle — anything it reports now is a
             # static action sequence.
             if busy:
-                return {"error": "arm_busy", "current": str(busy)}
+                return {
+                    "error": (
+                        f"arm_busy: the arm is still executing '{busy}'. "
+                        "Do NOT call any motion tool again this turn — tell "
+                        "the user the arm is busy and to wait."
+                    ),
+                    "current": str(busy),
+                }
         return None
 
     def _on_grasp_done(self, task: asyncio.Task) -> None:
@@ -604,6 +691,26 @@ class GraspPlugin(Plugin):
             logger.exception("GraspPlugin: failed to load hand-eye from %s", path)
             return None
 
+    def _force_for_class(self, target: str) -> Optional[float]:
+        """Fixed per-class grasp force from grasp_force_by_class, or None
+        when the class is not configured (→ adaptive ramp)."""
+        fb = self.cfg.get("grasp_force_by_class")
+        if not isinstance(fb, dict) or not target:
+            return None
+        tl = target.strip().lower()
+        for k, v in fb.items():
+            if str(k).strip().lower() == tl:
+                try:
+                    s = str(v).strip()
+                    return float(s) if s else None
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "GraspPlugin: ignoring non-numeric grasp_force_by_class[%r]=%r",
+                        k, v,
+                    )
+                    return None
+        return None
+
     def _grasp_params(self) -> dict:
         # Numeric grasp params often arrive as "${VAR:-default}" → an env-
         # substituted STRING (e.g. conf "0.15"), which would break the numpy
@@ -615,9 +722,19 @@ class GraspPlugin(Plugin):
             "insertion_depth_m", "lift_height_m", "grasp_force",
             "open_distance_m", "move_duration",
         }
-        int_keys = {"warm_up_frames"}
-        bool_keys = {"release_after"}
+        int_keys = {"warm_up_frames", "detect_frames"}
+        bool_keys = {"release_after", "reobserve", "servo_correct"}
         out: dict[str, Any] = {}
+        # grasp_retries (config name) → retries (run_grasp_once param): extra
+        # full detect→grasp attempts after a retriable failure.
+        gr = self.cfg.get("grasp_retries")
+        if gr is not None:
+            try:
+                s = str(gr).strip()
+                if s:
+                    out["retries"] = int(float(s))
+            except (TypeError, ValueError):
+                logger.warning("GraspPlugin: ignoring non-numeric grasp_retries=%r", gr)
         # Auto-search: pass the configured scan_poses so grasp_object sweeps to
         # find the object when it is not in the immediate view (same poses
         # search_object uses).
@@ -627,6 +744,19 @@ class GraspPlugin(Plugin):
                 out["scan_poses"] = [tuple(float(v) for v in p) for p in sp]
             except (TypeError, ValueError):
                 logger.warning("GraspPlugin: ignoring malformed scan_poses")
+        # Plausibility box [x0,x1,y0,y1,z0,z1] (base frame) — rejects depth-
+        # noise grasp points before any motion; retriable so a fresh frame
+        # gets another chance.
+        pb = self.cfg.get("plausible_box")
+        if pb:
+            try:
+                box = [float(v) for v in pb]
+                if len(box) == 6:
+                    out["plausible_box"] = box
+                else:
+                    logger.warning("GraspPlugin: plausible_box needs 6 values")
+            except (TypeError, ValueError):
+                logger.warning("GraspPlugin: ignoring malformed plausible_box")
         for k in float_keys | int_keys | bool_keys:
             if k not in self.cfg:
                 continue
