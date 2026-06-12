@@ -135,6 +135,152 @@ def _letterbox(
     return padded, ratio, dw, dh
 
 
+class _Cudart:
+    """Minimal ctypes shim over the host-mounted ``libcudart`` — malloc /
+    memcpy / stream only. Deliberately NOT cuda-python/pycuda: the slim
+    container gets CUDA + TensorRT exclusively via host bind-mounts (the
+    edge-llm/SLV contract), so there is nothing to pip-install and nothing
+    to redo after a container recreate."""
+
+    H2D = 1
+    D2H = 2
+
+    def __init__(self) -> None:
+        import ctypes
+
+        self._ct = ctypes
+        lib = None
+        for cand in ("libcudart.so", "libcudart.so.12", "libcudart.so.11.0"):
+            try:
+                lib = ctypes.CDLL(cand)
+                break
+            except OSError:
+                continue
+        if lib is None:
+            raise RuntimeError(
+                "libcudart not loadable — host CUDA lib dir must be bind-"
+                "mounted and on LD_LIBRARY_PATH (slim-container contract)"
+            )
+        self._lib = lib
+
+    def _check(self, rc: int, what: str) -> None:
+        if int(rc) != 0:
+            raise RuntimeError(f"{what} failed (cudaError {int(rc)})")
+
+    def malloc(self, nbytes: int):
+        ptr = self._ct.c_void_p()
+        self._check(self._lib.cudaMalloc(self._ct.byref(ptr), self._ct.c_size_t(nbytes)), "cudaMalloc")
+        return ptr
+
+    def free(self, ptr) -> None:
+        try:
+            self._lib.cudaFree(ptr)
+        except Exception:
+            pass
+
+    def memcpy(self, dst, src, nbytes: int, kind: int) -> None:
+        self._check(
+            self._lib.cudaMemcpy(dst, src, self._ct.c_size_t(nbytes), self._ct.c_int(kind)),
+            "cudaMemcpy",
+        )
+
+    def stream_create(self):
+        s = self._ct.c_void_p()
+        self._check(self._lib.cudaStreamCreate(self._ct.byref(s)), "cudaStreamCreate")
+        return s
+
+    def stream_sync(self, s) -> None:
+        self._check(self._lib.cudaStreamSynchronize(s), "cudaStreamSynchronize")
+
+
+class _TrtSession:
+    """Native-TensorRT session exposing the same ``run(None, feeds)`` calling
+    convention :class:`YoloOnnxSegmenter` uses with onnxruntime, so the whole
+    pre/post-process pipeline is backend-agnostic.
+
+    Expects a serialized engine built (ON-DEVICE, same GPU arch) from the
+    YOLOE-seg ONNX, e.g.::
+
+        /usr/src/tensorrt/bin/trtexec --onnx=yoloe-26s-seg-box.onnx \
+            --saveEngine=yoloe-26s-seg-box.engine --fp16 --skipInference
+
+    Outputs are reordered to the ONNX contract (det rows ``[1,300,38]`` first,
+    mask prototypes ``[1,32,h,w]`` second) and cast to float32 so the numpy
+    post-process is byte-compatible with the CPU path.
+    """
+
+    def __init__(self, engine_path: str) -> None:
+        import tensorrt as trt  # host dist-packages, bind-mounted
+
+        self._trt = trt
+        trt_logger = trt.Logger(trt.Logger.WARNING)
+        # init_libnvinfer_plugins: harmless if no plugins are used.
+        try:
+            trt.init_libnvinfer_plugins(trt_logger, "")
+        except Exception:
+            pass
+        with open(engine_path, "rb") as fh:
+            blob = fh.read()
+        runtime = trt.Runtime(trt_logger)
+        self._engine = runtime.deserialize_cuda_engine(blob)
+        if self._engine is None:
+            raise RuntimeError(f"failed to deserialize TRT engine {engine_path!r}")
+        self._context = self._engine.create_execution_context()
+        self._cu = _Cudart()
+        self._stream = self._cu.stream_create()
+
+        self.input_name: Optional[str] = None
+        self._input = None
+        outputs = []
+        for i in range(self._engine.num_io_tensors):
+            name = self._engine.get_tensor_name(i)
+            shape = tuple(int(d) for d in self._engine.get_tensor_shape(name))
+            if any(d < 0 for d in shape):
+                raise RuntimeError(
+                    f"dynamic dim in tensor {name!r} {shape} — build the "
+                    "engine with static shapes (the seg export is static)"
+                )
+            dtype = np.dtype(trt.nptype(self._engine.get_tensor_dtype(name)))
+            nbytes = int(np.prod(shape)) * dtype.itemsize
+            dev = self._cu.malloc(nbytes)
+            self._context.set_tensor_address(name, dev.value)
+            entry = (name, shape, dtype, dev, nbytes)
+            if self._engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                self.input_name = name
+                self._input = entry
+            else:
+                outputs.append(entry)
+        if self._input is None or not outputs:
+            raise RuntimeError("TRT engine missing input/output tensors")
+        # ONNX contract order: detection rows (ndim 3) before mask protos
+        # (ndim 4) — engine binding order is not guaranteed to match.
+        self._outputs = sorted(outputs, key=lambda e: len(e[1]))
+
+    def run(self, _output_names, feeds: dict) -> list:
+        import ctypes
+
+        name, shape, dtype, dev, nbytes = self._input
+        arr = np.ascontiguousarray(
+            np.asarray(feeds[self.input_name]).astype(dtype, copy=False)
+        )
+        if arr.nbytes != nbytes:
+            raise ValueError(
+                f"input size mismatch: got {arr.nbytes}B, engine expects {nbytes}B"
+            )
+        self._cu.memcpy(dev, arr.ctypes.data_as(ctypes.c_void_p), nbytes, _Cudart.H2D)
+        if not self._context.execute_async_v3(stream_handle=self._stream.value):
+            raise RuntimeError("TensorRT execute_async_v3 failed")
+        self._cu.stream_sync(self._stream)
+        outs = []
+        for oname, oshape, odtype, odev, onbytes in self._outputs:
+            host = np.empty(oshape, dtype=odtype)
+            self._cu.memcpy(host.ctypes.data_as(ctypes.c_void_p), odev, onbytes, _Cudart.D2H)
+            # fp16 engines emit fp16 IO in some builds — normalise to float32
+            # so the numpy post-process matches the CPU path bit-for-bit-ish.
+            outs.append(host.astype(np.float32, copy=False))
+        return outs
+
+
 class YoloOnnxSegmenter:
     """ONNX-Runtime YOLOE-seg segmenter with numpy/cv2 seg post-process.
 
@@ -170,6 +316,16 @@ class YoloOnnxSegmenter:
     # ── session lifecycle ────────────────────────────────────────────────
     def _ensure_session(self) -> None:
         if self._session is not None:
+            return
+        # Native-TRT path (2026-06-12): a ``*.engine`` / ``*.plan`` model path
+        # selects the TensorRT backend. The container gets TRT by bind-
+        # mounting the HOST's /usr/lib/python3.10/dist-packages/tensorrt +
+        # CUDA libs (the same contract edge-llm/SLV run with) — no wheels, no
+        # writable-layer installs, nothing to redo after a container
+        # recreate. ONNX paths keep the onnxruntime CPU path unchanged.
+        if self.model_path.endswith((".engine", ".plan")):
+            self._session = _TrtSession(self.model_path)
+            self._input_name = self._session.input_name
             return
         # Deferred import: onnxruntime is an optional/device dep. Keep it out
         # of module import so the package loads on hosts without the wheel.
