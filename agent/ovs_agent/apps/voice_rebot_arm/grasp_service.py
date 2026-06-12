@@ -183,6 +183,7 @@ def run_grasp_once(
     adaptive_force: bool = False,
     reobserve: bool = True,
     servo_correct: bool = True,
+    ggcnn: Any = None,
     release_after: bool = False,
 ) -> dict:
     """Run a single cancellable grasp attempt for ``target``.
@@ -261,6 +262,7 @@ def run_grasp_once(
             adaptive_force=adaptive_force,
             reobserve=reobserve,
             servo_correct=servo_correct,
+            ggcnn=ggcnn,
             release_after=release_after,
         )
         res["attempt"] = attempt
@@ -304,6 +306,7 @@ def _grasp_attempt(
     adaptive_force: bool,
     reobserve: bool,
     servo_correct: bool,
+    ggcnn: Any,
     release_after: bool,
 ) -> dict:
     """One full detect→grasp→carry attempt. Returns the result dict; a
@@ -371,6 +374,7 @@ def _grasp_attempt(
                         results, depth_mm, Kl,
                         depth_quantile=depth_quantile,
                         up_hint_cam=up_hint,
+                        ggcnn=ggcnn,
                     )
                 )
                 if b is not None:
@@ -463,6 +467,8 @@ def _grasp_attempt(
             gx, gy, gz = (float(v) for v in grasp6d[:3])
             jaw = float(best.jaw_width_m)
             result["grasp_method"] = getattr(best, "method", "legacy")
+            if getattr(best, "ggcnn_agree", None) is not None:
+                result["ggcnn_agree"] = bool(best.ggcnn_agree)
 
             # SIDE grasps need jaw-body clearance above the table: the
             # fingers wrap a vertical face, so a grasp point lower than
@@ -483,7 +489,8 @@ def _grasp_attempt(
             if (
                 reobserve
                 and not reobserved
-                and (gx > 0.50 or jaw > 0.085)
+                and (gx > 0.50 or jaw > 0.085
+                     or getattr(best, "ggcnn_agree", None) is False)
             ):
                 reobserved = True
                 obs_x = min(max(gx - 0.22, 0.20), 0.50)

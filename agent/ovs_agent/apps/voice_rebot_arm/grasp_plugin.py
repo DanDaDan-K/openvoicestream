@@ -48,6 +48,7 @@ class GraspPlugin(Plugin):
         self._segmenter: Any = None
         self._camera: Any = None
         self._hand_eye: Optional[np.ndarray] = None
+        self._ggcnn: Any = None
         self._cancel_event = threading.Event()
         self._grasp_task: Optional[asyncio.Task] = None
         self._prime_task: Optional[asyncio.Task] = None
@@ -93,6 +94,10 @@ class GraspPlugin(Plugin):
             self._prime_task = asyncio.create_task(
                 asyncio.to_thread(self._prime_perception), name="grasp-prime"
             )
+
+    def _ggcnn_enabled(self) -> bool:
+        v = self.cfg.get("ggcnn_refiner", False)
+        return v if isinstance(v, bool) else str(v).strip().lower() in {"1", "true", "yes"}
 
     def _prime_enabled(self) -> bool:
         v = self.cfg.get("prime_on_start", True)
@@ -386,6 +391,7 @@ class GraspPlugin(Plugin):
                 camera=self._camera,
                 T_hand_eye=self._hand_eye,
                 cancel_event=cancel_event,
+                ggcnn=self._ggcnn,
                 **params,
             )
 
@@ -671,6 +677,26 @@ class GraspPlugin(Plugin):
             self._camera.open()
         if self._hand_eye is None:
             self._hand_eye = self._load_hand_eye()
+        # Optional GG-CNN refiner (Phase 3): second opinion for plane grasps
+        # + primary estimator for curved objects. Ships dark (config
+        # ggcnn_refiner default false) until real-fruit validation.
+        if self._ggcnn is None and self._ggcnn_enabled():
+            try:
+                from .perception.ggcnn_refiner import GgcnnRefiner
+                from pathlib import Path as _P
+
+                default_path = str(
+                    _P(__file__).parent / "tools" / "artifacts" / "ggcnn2-300.onnx"
+                )
+                self._ggcnn = GgcnnRefiner(
+                    str(self.cfg.get("ggcnn_model_path") or default_path)
+                )
+                logger.info("GraspPlugin: ggcnn refiner enabled (%s)",
+                            self._ggcnn.model_path)
+            except Exception:
+                logger.warning("GraspPlugin: ggcnn refiner init failed; "
+                               "continuing without it", exc_info=True)
+                self._ggcnn = None
 
     def _load_hand_eye(self) -> Optional[np.ndarray]:
         path = self.cfg.get("hand_eye_path")

@@ -54,10 +54,13 @@ class GraspPose:
     valid_depth_pixels: int
     rejected_reason: Optional[str] = None
     # which estimator produced this pose: "top_face" (3D plane fit — only
-    # possible when the camera can actually SEE the top) or "legacy"
-    # (silhouette short-axis). grasp_service uses this to pick the
+    # possible when the camera can actually SEE the top), "side_face", or
+    # "legacy" (silhouette short-axis). grasp_service uses this to pick the
     # re-observation strategy: no top face visible → go HIGH and tilt down.
     method: str = "legacy"
+    # GG-CNN second-opinion vote (None = refiner off/unavailable): False
+    # makes grasp_service trigger a re-observation before committing.
+    ggcnn_agree: "Optional[bool]" = None
 
     @property
     def is_valid(self) -> bool:
@@ -85,6 +88,7 @@ def estimate_grasps(
     K: np.ndarray,
     depth_quantile: float = 0.75,
     up_hint_cam: Optional[np.ndarray] = None,
+    ggcnn: Any = None,
 ) -> list[GraspPose]:
     grasps: list[GraspPose] = []
     for result in results:
@@ -94,6 +98,7 @@ def estimate_grasps(
                     result, index, depth_mm, K,
                     depth_quantile=depth_quantile,
                     up_hint_cam=up_hint_cam,
+                    ggcnn=ggcnn,
                 )
             )
     return grasps
@@ -113,6 +118,7 @@ def estimate_grasp(
     K: np.ndarray,
     depth_quantile: float = 0.75,
     up_hint_cam: Optional[np.ndarray] = None,
+    ggcnn: Any = None,
 ) -> GraspPose:
     class_name, conf, bbox_xyxy = _detection_meta(result, index)
     rect_points = _rect_points(result, index, depth_mm.shape, bbox_xyxy)
@@ -206,6 +212,11 @@ def estimate_grasp(
                     np.array([u, v], dtype=np.float32),
                     np.array([open_t[0], open_t[1]], dtype=np.float32) * 40.0,
                 )
+                agree = _ggcnn_vote(
+                    ggcnn, depth_mm, mask, K,
+                    float(np.degrees(np.arctan2(open_t[1], open_t[0]))),
+                    float(width_t), (int(round(u)), int(round(v))),
+                )
                 return GraspPose(
                     class_name=class_name,
                     conf=conf,
@@ -221,7 +232,20 @@ def estimate_grasp(
                     short_edge_points=short_uv,
                     valid_depth_pixels=int(n_in),
                     method="top_face",
+                    ggcnn_agree=agree,
                 )
+    # ── GG-CNN PRIMARY (curved/irregular objects) ──────────────────────
+    # Reaching here means NO plane fit held (the plane-failure itself is the
+    # curved-object detector). When the refiner is enabled, its per-pixel
+    # quality map replaces the weak silhouette geometry: grasp point + angle
+    # + width come from the network, the axis construction below is reused.
+    _gg_primary = None
+    if ggcnn is not None and up_hint_cam is not None:
+        try:
+            _gg_primary = ggcnn.predict(depth_mm, mask, K)
+        except Exception:
+            _gg_primary = None
+
     # One pass over the 4 rect edges: gather vectors/norms, then derive the
     # longest edge (object length) and the shortest edge (grasp short-axis).
     edge_vecs = [rect_points[(i + 1) % 4] - rect_points[i] for i in range(4)]
@@ -238,6 +262,16 @@ def estimate_grasp(
         refined = _refine_grasp_line_from_mask(mask, center, short_dir_uv, long_len_px)
         if refined is not None:
             center, short_edge_points, grasp_span_px = refined
+
+    if _gg_primary is not None and _gg_primary.quality > 0.1:
+        # Override the silhouette's center/axis with the network's best
+        # in-mask grasp; the geometric construction below stays identical.
+        center = np.array(_gg_primary.center_px, dtype=np.float32)
+        ga = float(_gg_primary.angle_rad)
+        short_dir_uv = np.array([np.cos(ga), np.sin(ga)], dtype=np.float32)
+        fxl = max(float(K[0, 0]), 1e-6)
+        grasp_span_px = float(_gg_primary.width_m) * fxl / max(_gg_primary.depth_m, 1e-6)
+        short_edge_points = _line_from_center(center, short_dir_uv * grasp_span_px)
 
     center_px = (int(round(float(center[0]))), int(round(float(center[1]))))
     depth_values = depth_mm[mask > 0]
@@ -480,6 +514,20 @@ def _depth_mask(
     mask = np.zeros(image_shape, dtype=np.uint8)
     cv2.fillPoly(mask, [polygon], 1)
     return mask
+
+
+def _ggcnn_vote(ggcnn, depth_mm, mask, K, plane_angle_deg, plane_width_m, hint_px):
+    """Optional consistency vote: None when the refiner is off/silent."""
+    if ggcnn is None:
+        return None
+    try:
+        gg = ggcnn.predict(depth_mm, mask, K, center_hint_px=hint_px)
+        if gg is None:
+            return None
+        from .ggcnn_refiner import consistent
+        return bool(consistent(plane_angle_deg, plane_width_m, gg))
+    except Exception:
+        return None
 
 
 def _project(p_cam: np.ndarray, K: np.ndarray) -> tuple[float, float]:

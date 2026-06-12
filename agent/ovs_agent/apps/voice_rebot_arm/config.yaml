@@ -345,6 +345,12 @@ metadata:
     # viewing distance and re-measure before committing (side-view silhouette
     # inflation fix). One extra move only in those cases.
     reobserve: true
+    # GG-CNN2 depth-grasp refiner (Phase 3): consistency check for plane
+    # grasps (disagreement → re-observation) + PRIMARY estimator for curved
+    # objects (plane fit fails on fruit — that failure routes here). Ships
+    # DARK until real-fruit validation; flipping this on changes nothing for
+    # boxes except the 35ms second-opinion pass.
+    ggcnn_refiner: false
     # Servo-lite correction: one re-detection from the pregrasp pose shifts
     # the grasp x/y by the measured drift (≤3cm) — cancels calibration
     # residue + far-view parallax in the final approach.
