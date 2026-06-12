@@ -184,10 +184,16 @@ HARD_MATRIX = [
     ("张开", "open_gripper", None, "truncated"),
     ("回原位", "go_home", None, "truncated"),
     ("挥", "wave", None, "truncated"),
-    # English / mixed
+    # English / mixed — on-site may be spoken in English
     ("wave", "wave", None, "english"),
     ("go home please", "go_home", None, "english"),
     ("grab the box", "grasp_object", "box", "english"),
+    ("wave your hand", "wave", None, "english"),
+    ("open the gripper", "open_gripper", None, "english"),
+    ("close the gripper", "close_gripper", None, "english"),
+    ("pick up the box", "grasp_object", "box", "english"),
+    ("point at it", "point_at", None, "english"),
+    ("reset to home position", "go_home", None, "english"),
     # intent collisions (抓住 is a close_gripper trigger, but a box is named)
     ("抓住盒子", "grasp_object", "box", "collision"),
     ("夹住这个盒子", "grasp_object", "box", "collision"),
@@ -198,6 +204,42 @@ HARD_MATRIX = [
     ("给我讲个笑话", None, None, "trap_chitchat"),
     ("挥手用英语怎么说", None, None, "trap_meta"),
 ]
+
+
+# ── trigger-guard simulation (faithful copy of app_base._server_tool_
+#    trigger_guard_error + _extract/_normalize_tool_trigger_phrases). The guard
+#    blocks a tool call whose user text contains none of that tool's declared
+#    trigger phrases. Tools with no "Triggers:" in their description (grasp_object,
+#    builtins) yield no phrases → never blocked (the scoped exemption). ──────
+import re as _re
+import unicodedata as _ud
+
+GUARD_EXEMPT = {"grasp_object", "time_now", "set_mode"}
+
+
+def _norm(text: str) -> str:
+    return "".join(ch.lower() for ch in (text or "") if _ud.category(ch)[0] in {"L", "N"})
+
+
+def _phrases(desc: str) -> list[str]:
+    m = _re.search(r"(?:Triggers?|Trigger words?)\s*:\s*([^.。]*)", desc or "", _re.I | _re.S)
+    if not m:
+        return []
+    return [p.strip() for p in _re.findall(r"""["']([^"']+)["']""", m.group(1)) if p.strip()]
+
+
+_TOOL_DESC = {t["function"]["name"]: t["function"]["description"] for t in TOOLS}
+
+
+def guard_blocks(user_text: str, tool: str | None) -> bool:
+    """True if the scoped trigger guard would BLOCK this tool call."""
+    if tool is None or tool in GUARD_EXEMPT:
+        return False
+    ph = _phrases(_TOOL_DESC.get(tool, ""))
+    if not ph:
+        return False
+    nt = _norm(user_text)
+    return not any(_norm(p) in nt for p in ph if _norm(p))
 
 
 def call_llm(base_url: str, model: str, text: str, timeout: float = 30.0) -> dict:
@@ -311,6 +353,52 @@ def run_hard(args) -> int:
             print(f"     {text!r} (exp {exp}): {seen}")
     else:
         print("\n  ✓ deterministic across all repeats")
+
+    if args.guard:
+        # Re-derive the per-row modal tool once more (cheap: 1 call/row) and
+        # apply the scoped trigger guard to show the NET demo outcome.
+        print("\n══ SCOPED TRIGGER-GUARD net effect (5 fixed-trigger motions guarded; "
+              "grasp_object + builtins exempt) ══")
+        g_correct = g_blocked_valid = g_saved_dangerous = g_saved_spurious = 0
+        g_still_dangerous = g_still_spurious = 0
+        blocked_valid_rows = []
+        for (text, exp_tool, exp_arg, cat) in HARD_MATRIX:
+            try:
+                r = call_llm(args.base_url, args.model, text)
+            except Exception:
+                r = {"tool": None, "arg": None}
+            got = r["tool"]
+            blocked = guard_blocks(text, got)
+            if exp_tool is None:  # trap
+                if got in MOTION_TOOLS:
+                    if blocked:
+                        g_saved_spurious += 1
+                    else:
+                        g_still_spurious += 1
+            else:  # command
+                correct = score(exp_tool, exp_arg, got, r["arg"])
+                if correct:
+                    if blocked:
+                        g_blocked_valid += 1
+                        blocked_valid_rows.append((cat, text, exp_tool))
+                    else:
+                        g_correct += 1
+                else:  # wrong tool
+                    if got in MOTION_TOOLS and not blocked:
+                        g_still_dangerous += 1
+                    elif got in MOTION_TOOLS and blocked:
+                        g_saved_dangerous += 1
+        print(f"  ✅ valid command, fires correctly (guard passes): {g_correct}")
+        print(f"  🛡️  WAS dangerous wrong-motion → now BLOCKED (safe no-op): {g_saved_dangerous}")
+        print(f"  🛡️  WAS spurious trap-motion → now BLOCKED (safe no-op): {g_saved_spurious}")
+        print(f"  ⛔ still-dangerous (wrong motion still fires): {g_still_dangerous}")
+        print(f"  ⚠️  still-spurious (trap motion still fires): {g_still_spurious}")
+        print(f"  🚧 valid command BLOCKED by guard (arm won't move — must use exact trigger): {g_blocked_valid}")
+        for cat, text, exp in blocked_valid_rows:
+            print(f"       [{cat}] {text!r} (wanted {exp}) — paraphrase lacks the literal trigger")
+        print("\n  NET: guard converts dangerous/spurious motion into a safe no-op, at the cost of")
+        print("  blocking paraphrases that omit the literal trigger. For a SCRIPTED demo using the")
+        print("  exact supported commands, blocked-valid count above is the only trade.")
     return 0
 
 
@@ -321,6 +409,7 @@ def main() -> int:
     ap.add_argument("--repeats", type=int, default=5, help="repeats per utterance (determinism)")
     ap.add_argument("--sequence", type=int, default=60, help="length of the long mixed-sequential drift run")
     ap.add_argument("--hard", action="store_true", help="run the demo-realistic HARD robustness matrix instead")
+    ap.add_argument("--guard", action="store_true", help="also report the scoped trigger-guard net effect (hard mode)")
     args = ap.parse_args()
 
     if args.hard:

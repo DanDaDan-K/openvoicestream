@@ -18,7 +18,10 @@ import time
 import numpy as np
 import pytest
 
-from ovs_agent.apps.voice_rebot_arm.grasp_service import run_grasp_once
+from ovs_agent.apps.voice_rebot_arm.grasp_service import (
+    run_grasp_once,
+    run_put_down_once,
+)
 from ovs_agent.apps.voice_rebot_arm.perception.yolo_onnx import (
     YoloResult,
     _Box,
@@ -174,8 +177,15 @@ def test_grasp_pipeline_uses_configured_safe_open_distance():
     )
 
     assert res["success"] is True
+    # The configured 0.06 is a FLOOR: the pipeline auto-widens the pre-grasp
+    # open to the detected object width + margin (clamped to the 0.09
+    # mechanical max) so the jaw clears objects wider than the configured
+    # width (e.g. the 0.077m demo box).
+    expected = min(0.09, max(0.06, res["jaw_width_m"] + 0.012))
     open_calls = [c for c in arm.calls if c[0] == "open_gripper"]
-    assert open_calls == [("open_gripper", 0.06)]
+    assert open_calls == [("open_gripper", pytest.approx(expected))]
+    assert res["open_distance_m"] == pytest.approx(expected)
+    assert open_calls[0][1] >= 0.06
 
 
 def test_cancel_before_motion_safe_parks_gripper():
@@ -399,6 +409,142 @@ def test_cancel_during_settle_wait_safe_parks():
     assert elapsed < 2.0, "settle wait was not interruptible (blocked full 5s)"
     assert "grasp" not in arm.names_of_calls()
     assert arm.names_of_calls()[-1] == "open_gripper"
+
+
+# ── put_down (place back where picked up) ──────────────────────────────────
+class PoseRecordingArm(FakeArm):
+    """FakeArm that records the full move_to pose, not just z."""
+
+    def move_to(self, x, y, z, roll=0.0, pitch=0.0, yaw=0.0, duration=2.0) -> bool:
+        self.calls.append(("move_to", (round(float(x), 4), round(float(y), 4),
+                                       round(float(z), 4))))
+        return True
+
+
+def test_put_down_replays_recorded_grasp_poses_and_releases_wide():
+    arm = PoseRecordingArm()
+    grasp6 = [0.40, 0.05, 0.08, 0.0, 0.0, 0.3]
+    pre6 = [0.38, 0.05, 0.16, 0.0, 0.0, 0.3]
+
+    res = run_put_down_once(
+        arm=arm,
+        grasp_pose=grasp6,
+        pregrasp_pose=pre6,
+        open_distance_m=0.089,  # the grasp's auto-widened width
+        move_duration=0.02,
+    )
+
+    assert res["success"] is True
+    assert res["released"] is True
+    assert res["used_recorded_pose"] is True
+    assert res["placed_at"] == [0.40, 0.05, 0.08]
+
+    moves = [c[1] for c in arm.calls if c[0] == "move_to"]
+    # approach (pregrasp) → place (grasp pose) → retreat (pregrasp) → home
+    assert moves[0] == (0.38, 0.05, 0.16)
+    assert moves[1] == (0.40, 0.05, 0.08)
+    assert moves[2] == (0.38, 0.05, 0.16)
+    assert moves[3] == (0.27, 0.0, 0.24)
+    # release uses the recorded (widened) width and happens AFTER the place
+    # move and BEFORE the retreat.
+    names = arm.names_of_calls()
+    open_call = next(c for c in arm.calls if c[0] == "open_gripper")
+    assert open_call == ("open_gripper", 0.089)
+    open_idx = names.index("open_gripper")
+    move_idxs = [i for i, n in enumerate(names) if n == "move_to"]
+    assert move_idxs[1] < open_idx < move_idxs[2]
+
+
+def test_put_down_fallback_pose_when_no_recorded_grasp():
+    arm = PoseRecordingArm()
+    res = run_put_down_once(
+        arm=arm,
+        place_pose=(0.30, 0.00, 0.15, 0.0, 0.0, 0.0),
+        move_duration=0.02,
+    )
+    assert res["success"] is True
+    assert res["used_recorded_pose"] is False
+    assert res["placed_at"] == [0.30, 0.0, 0.15]
+    moves = [c[1] for c in arm.calls if c[0] == "move_to"]
+    # derived approach 0.08 above the fallback spot, then the spot itself.
+    assert moves[0] == (0.30, 0.0, 0.23)
+    assert moves[1] == (0.30, 0.0, 0.15)
+    # full-open default release (no recorded width).
+    open_call = next(c for c in arm.calls if c[0] == "open_gripper")
+    assert open_call == ("open_gripper", 0.09)
+
+
+def test_put_down_place_ik_failure_keeps_holding():
+    # The place move MUST succeed; otherwise we keep holding (no release at an
+    # arbitrary pose) and report the error.
+    class PlaceFailArm(PoseRecordingArm):
+        def __init__(self) -> None:
+            super().__init__()
+            self._moves = 0
+
+        def move_to(self, *a, **kw) -> bool:
+            self._moves += 1
+            if self._moves == 2:  # approach ok, place fails
+                self.calls.append(("move_to", "FAILED"))
+                return False
+            return super().move_to(*a, **kw)
+
+    arm = PlaceFailArm()
+    res = run_put_down_once(
+        arm=arm,
+        grasp_pose=[0.40, 0.0, 0.08, 0.0, 0.0, 0.0],
+        pregrasp_pose=[0.38, 0.0, 0.16, 0.0, 0.0, 0.0],
+        move_duration=0.02,
+    )
+    assert res["success"] is False
+    assert res["released"] is False
+    assert res["stage"] == "place"
+    assert "still holding" in res["error"]
+    assert "open_gripper" not in arm.names_of_calls()
+
+
+def test_put_down_cancel_before_motion_safe_parks():
+    arm = PoseRecordingArm()
+    cancel = threading.Event()
+    cancel.set()
+    res = run_put_down_once(
+        arm=arm,
+        grasp_pose=[0.40, 0.0, 0.08, 0.0, 0.0, 0.0],
+        cancel_event=cancel,
+        move_duration=0.02,
+    )
+    assert res["success"] is False
+    assert res["cancelled"] is True
+    assert "move_to" not in arm.names_of_calls()
+    # explicit user stop → safe-park (open) like the grasp pipeline.
+    assert "open_gripper" in arm.names_of_calls()
+
+
+def test_put_down_approach_ik_failure_falls_through_to_direct_place():
+    class ApproachFailArm(PoseRecordingArm):
+        def __init__(self) -> None:
+            super().__init__()
+            self._moves = 0
+
+        def move_to(self, *a, **kw) -> bool:
+            self._moves += 1
+            if self._moves == 1:  # approach fails, the rest succeed
+                return False
+            return super().move_to(*a, **kw)
+
+    arm = ApproachFailArm()
+    res = run_put_down_once(
+        arm=arm,
+        grasp_pose=[0.40, 0.0, 0.08, 0.0, 0.0, 0.0],
+        pregrasp_pose=[0.38, 0.0, 0.16, 0.0, 0.0, 0.0],
+        move_duration=0.02,
+    )
+    assert res["success"] is True
+    assert res["released"] is True
+    moves = [c[1] for c in arm.calls if c[0] == "move_to"]
+    # first recorded move is the direct place (approach returned False before
+    # recording), then retreat + home.
+    assert moves[0] == (0.40, 0.0, 0.08)
 
 
 # ── holding-property handling (item 12) ────────────────────────────────────

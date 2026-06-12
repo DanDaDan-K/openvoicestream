@@ -34,13 +34,19 @@ client_vad_speech_min_ms: 200
 client_vad_silence_ms: 600
 client_vad_drive_eos: false
 
-# ── continuous-dialogue mic-pump (reSpeaker Flex XVF3800 ch1). Same
-# calibrated defaults as voice_arm.
+# ── continuous-dialogue mic-pump. The reSpeaker Flex XVF3800's USB ch0 is the
+# on-chip PROCESSED ASR output (AEC + beamforming): real-machine capture
+# (2026-06-12) showed ch0 carries the speech at peak 0.76 / rms 0.048 while
+# ch1-5 are silent (~0.001) — so ch0 is correct (NOT ch1). Because ch0 is
+# already normalized, makeup_gain MUST stay ~1.0: the old 12.0 multiplied a
+# 0.76-peak signal to 9× over full-scale → hard clipping/distortion → garbage
+# ASR ("识别率很低"). Gate thresholds are raw-ch0 RMS: open above the ambient
+# floor (~0.005-0.014) so noise does not open the mic, but below speech (~0.05+).
 energy_gate_enabled: true
-energy_gate_open_rms: 0.010
-energy_gate_close_rms: 0.004
+energy_gate_open_rms: 0.020
+energy_gate_close_rms: 0.010
 energy_gate_hangover_ms: 300
-mic_makeup_gain: 12.0
+mic_makeup_gain: 1.0
 gate_drive_eos: true
 gate_eos_min_speech_ms: 250
 # Grace after the gate-close chunk before the explicit asr_eos — preserves WS
@@ -81,8 +87,9 @@ tools_max_iterations: 3
 tool_trigger_guard: false
 # Tools exempt from the trigger guard (semantic tools with no fixed trigger
 # vocabulary). grasp_object maps any spoken object to a catalog label, so its
-# intent legitimately has no literal trigger phrase.
-tool_trigger_guard_exempt: ["grasp_object", "search_object"]
+# intent legitimately has no literal trigger phrase. put_down is grasp-coupled:
+# blocking it would strand a held object, so it is exempt too.
+tool_trigger_guard_exempt: ["grasp_object", "search_object", "put_down"]
 
 # System prompt — imperative robotic-arm controller.
 system_prompt: |
@@ -182,7 +189,7 @@ metadata:
       # Compliant-grasp force clamp (N·m). SDK hard limit is 1.5; default to a
       # gentle holding force so voice actions cannot over-command. Empty → SDK
       # default (handled as "unset" by _make_rebot_arm).
-      grasp_force: "${REBOT_GRASP_FORCE:-0.30}"
+      grasp_force: "${REBOT_GRASP_FORCE:-0.6}"
       # Max jaw opening for action frames (m). SDK maps 0.09 to mechanical
       # full-open; individual shipped actions may request less.
       open_distance_m: ${REBOT_OPEN_DIST:-0.09}
@@ -223,7 +230,13 @@ metadata:
       - [0.27, 0.00, 0.26, 0.0, 0.0, 0.0]
       - [0.25, 0.10, 0.26, 0.0, 0.0, 0.35]
       - [0.25, -0.10, 0.26, 0.0, 0.0, -0.35]
+    # put_down FALLBACK place spot [x,y,z,roll,pitch,yaw] — only used when
+    # there is no recorded grasp to put back to (e.g. the user manually closed
+    # the gripper around something). The normal put_down path replays the last
+    # grasp's recorded poses so the object lands back at the camera-visible
+    # spot it was picked from and the next grasp_object can find it again.
+    place_pose: [0.30, 0.00, 0.15, 0.0, 0.0, 0.0]
     # Safety: never open the jaw to the SDK full 0.09m during pre-grasp,
     # cancellation safe-park, or release; gentle compliant grasp force.
     open_distance_m: ${REBOT_GRASP_OPEN_DIST:-0.06}
-    grasp_force: ${REBOT_GRASP_FORCE:-0.30}
+    grasp_force: ${REBOT_GRASP_FORCE:-0.6}

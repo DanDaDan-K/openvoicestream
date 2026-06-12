@@ -125,6 +125,7 @@ def run_grasp_once(
     pregrasp_offset_m: float = 0.08,
     insertion_depth_m: float = 0.015,
     lift_height_m: float = 0.12,
+    home_pose: tuple = (0.27, 0.0, 0.24, 0.0, 0.0, 0.0),
     grasp_force: Optional[float] = None,
     open_distance_m: float = 0.06,
     move_duration: float = 2.0,
@@ -293,46 +294,40 @@ def run_grasp_once(
             held = bool(arm.grasp(force=grasp_force))
         result["grasp_closed"] = held
 
-        # ── 5. lift — actually pick the object UP ───────────────────────
-        # First try a straight-up lift at the grasp x/y. If the object was
-        # grasped near the reach limit (large x), "far + up" is often IK-
-        # unreachable, so a naive straight-up lift silently fails and the arm
-        # just stays clamped at table height ("只夹住不拿起来"). Fall back to a
-        # guaranteed-reachable holding pose that pulls the object back + up to a
-        # visible carry position, so it is genuinely lifted regardless of where
-        # it was grasped.
+        # ── 5. lift clear of the table, then CARRY the object back to home ──
+        # Demo flow: after grasping, the arm returns to its home/ready pose
+        # holding the object (looks dynamic + parks it in a stable, centred,
+        # IK-comfortable pose — a far grasp at the reach limit shakes/sags). The
+        # recorded grasp_pose/pregrasp_pose (set above) let put_down replay the
+        # pick spot to place it back, so carrying home loses nothing.
         stage = "lift"
         _check_cancel(cancel_event, arm, safe_open_m)
         lifted = False
-        zl = zg + float(lift_height_m)
+        # (a) small straight-up clearance lift so the object does not drag
+        #     across the table on the way home (best-effort; far grasps may fail
+        #     IK here — the carry-home move lifts anyway).
+        zc = zg + min(float(lift_height_m), 0.06)
         with _motion_lock(actuator):
-            lift_ok = arm.move_to(xg, yg, zl, rxg, ryg, rzg, duration=move_duration)
-        if lift_ok:
+            clr_ok = arm.move_to(xg, yg, zc, rxg, ryg, rzg,
+                                 duration=max(1.0, move_duration * 0.6))
+        if clr_ok and not _wait_motion_cancellable(arm, max(1.0, move_duration * 0.6), cancel_event):
+            _check_cancel(cancel_event, arm, safe_open_m)
+        # (b) carry home — the ready pose is always IK-reachable; this both
+        #     lifts and re-centres, holding the object at home.
+        stage = "carry_home"
+        _check_cancel(cancel_event, arm, safe_open_m)
+        with _motion_lock(actuator):
+            home_ok = arm.move_to(*home_pose, duration=move_duration)
+        if home_ok:
             if not _wait_motion_cancellable(arm, move_duration, cancel_event):
-                _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
+                _check_cancel(cancel_event, arm, safe_open_m)
             lifted = True
+            result["returned_home"] = True
         else:
-            # Fallback: a safe holding pose well inside the reachable box.
-            hx = min(0.30, max(0.22, xg))
-            hy = min(0.12, max(-0.12, yg))
-            hz = 0.26
-            hold_ok = False
-            try:
-                hold_ok, _ = arm.check_ik(hx, hy, hz, 0.0, 0.0, 0.0)
-            except Exception:
-                hold_ok = False
-            if hold_ok:
-                logger.info("lift: straight-up IK failed; lifting to holding pose "
-                            "(%.2f,%.2f,%.2f)", hx, hy, hz)
-                with _motion_lock(actuator):
-                    moved = arm.move_to(hx, hy, hz, 0.0, 0.0, 0.0, duration=move_duration)
-                if moved:
-                    if not _wait_motion_cancellable(arm, move_duration, cancel_event):
-                        _check_cancel(cancel_event, arm, safe_open_m)
-                    lifted = True
-            if not lifted:
-                logger.warning("lift IK failed (both straight-up and holding pose); "
-                               "leaving arm at grasp height")
+            # Home unreachable (should not happen) — fall back to a small lift
+            # so the object is at least raised off the table.
+            logger.warning("carry_home IK failed; leaving arm at clearance lift")
+            lifted = clr_ok
         result["lifted"] = lifted
 
         # ── 6. optional release ─────────────────────────────────────────
@@ -366,6 +361,127 @@ def run_grasp_once(
             _open_gripper_safe(arm, safe_open_m)
         except Exception:
             pass
+        return {**result, "stage": stage, "error": str(exc)}
+
+
+def run_put_down_once(
+    *,
+    arm: Any,
+    actuator: Any = None,
+    grasp_pose: Optional[list] = None,
+    pregrasp_pose: Optional[list] = None,
+    open_distance_m: float = _GRIPPER_MAX_M,
+    place_pose: tuple = (0.30, 0.00, 0.15, 0.0, 0.0, 0.0),
+    home_pose: tuple = (0.27, 0.0, 0.24, 0.0, 0.0, 0.0),
+    cancel_event: Optional[threading.Event] = None,
+    move_duration: float = 2.0,
+) -> dict:
+    """Put the held object DOWN — preferably back where it was picked up.
+
+    Closes the pick-and-place loop with the camera in mind: the spot the last
+    ``run_grasp_once`` picked the object from is, by construction, a spot the
+    camera has just detected it at (and every waypoint there passed IK during
+    the grasp). Releasing anywhere else (the old fixed place spot) can leave
+    the object outside the camera's view, so the NEXT grasp fails. So:
+
+    * ``grasp_pose`` / ``pregrasp_pose`` given (recorded from the last grasp):
+      replay them — approach via ``pregrasp_pose``, descend to ``grasp_pose``,
+      release, retreat back through ``pregrasp_pose``, go home. Zero new IK
+      risk; the object lands exactly where the camera last saw it.
+    * no recorded grasp (e.g. the user manually closed the gripper around
+      something): fall back to ``place_pose``.
+
+    Release width: ``open_distance_m`` should be the (auto-widened) width the
+    grasp recorded — the jaw MUST open wider than the held object or the SDK's
+    open ramp drives the jaws inward and never releases (0.06m cannot release
+    the 0.077m demo box). Defaults to mechanical full-open.
+
+    Failure policy: unlike cancel (explicit user stop → safe-park open), an
+    UNEXPECTED failure keeps the object held and reports the error — never
+    silently drop it at an arbitrary pose.
+
+    Returns ``{"success": bool, "released": bool, "placed_at": [x,y,z], ...}``.
+    """
+    result: dict[str, Any] = {
+        "success": False,
+        "released": False,
+        "cancelled": False,
+        "used_recorded_pose": grasp_pose is not None,
+    }
+    stage = "init"
+    safe_open_m = min(_GRIPPER_MAX_M, _safe_open_distance(open_distance_m))
+    try:
+        if grasp_pose is not None:
+            place6 = [float(v) for v in grasp_pose]
+            approach6 = (
+                [float(v) for v in pregrasp_pose]
+                if pregrasp_pose is not None
+                else [place6[0], place6[1], place6[2] + 0.08, *place6[3:]]
+            )
+        else:
+            place6 = [float(v) for v in place_pose]
+            approach6 = [place6[0], place6[1], place6[2] + 0.08, *place6[3:]]
+
+        # ── 1. approach above the place spot (IK-failure tolerated: fall
+        # through to a direct move — the place pose itself is the gate). ──
+        stage = "place_approach"
+        _check_cancel(cancel_event, arm, safe_open_m)
+        with _motion_lock(actuator):
+            approach_ok = arm.move_to(*approach6, duration=move_duration)
+        if approach_ok:
+            if not _wait_motion_cancellable(arm, move_duration, cancel_event):
+                _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
+        else:
+            logger.info("put_down: approach IK failed; moving directly to place pose")
+
+        # ── 2. descend to the place pose. This one MUST succeed — releasing
+        # anywhere else drops the object at an unknown spot. ──────────────
+        stage = "place"
+        _check_cancel(cancel_event, arm, safe_open_m)
+        with _motion_lock(actuator):
+            place_ok = arm.move_to(*place6, duration=move_duration)
+        if not place_ok:
+            return {**result, "stage": stage, "error": "place-pose IK failed (still holding)"}
+        if not _wait_motion_cancellable(arm, move_duration, cancel_event):
+            _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
+
+        # ── 3. release ──────────────────────────────────────────────────
+        stage = "release"
+        _check_cancel(cancel_event, arm, safe_open_m)
+        with _motion_lock(actuator):
+            _open_gripper_safe(arm, safe_open_m)
+        result["released"] = True
+        result["placed_at"] = place6[:3]
+
+        # ── 4. retreat back up (jaw open; IK failure tolerated) ─────────
+        stage = "retreat"
+        _check_cancel(cancel_event, arm, safe_open_m)
+        with _motion_lock(actuator):
+            retreat_ok = arm.move_to(*approach6, duration=move_duration)
+        if retreat_ok:
+            if not _wait_motion_cancellable(arm, move_duration, cancel_event):
+                _check_cancel(cancel_event, arm, safe_open_m)
+
+        # ── 5. home ─────────────────────────────────────────────────────
+        stage = "home"
+        _check_cancel(cancel_event, arm, safe_open_m)
+        with _motion_lock(actuator):
+            home_ok = arm.move_to(*home_pose, duration=move_duration)
+        if home_ok:
+            if not _wait_motion_cancellable(arm, move_duration, cancel_event):
+                _check_cancel(cancel_event, arm, safe_open_m)
+
+        result["success"] = True
+        result["stage"] = "done"
+        return result
+
+    except GraspCancelled:
+        logger.info("put_down cancelled at stage=%s", stage)
+        return {**result, "cancelled": True, "stage": stage}
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.exception("put_down pipeline failed at stage=%s", stage)
+        # Do NOT open the gripper here: an unexpected mid-carry failure must
+        # not drop the object at an arbitrary pose. Cancel already safe-parks.
         return {**result, "stage": stage, "error": str(exc)}
 
 
@@ -532,4 +648,4 @@ def _filter_results_to_target(results: list[Any], target: str) -> list[Any]:
     return out
 
 
-__all__ = ["run_grasp_once", "run_search_once", "GraspCancelled"]
+__all__ = ["run_grasp_once", "run_put_down_once", "run_search_once", "GraspCancelled"]

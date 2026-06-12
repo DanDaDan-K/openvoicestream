@@ -45,6 +45,11 @@ class GraspPlugin(Plugin):
         self._cancel_event = threading.Event()
         self._grasp_task: Optional[asyncio.Task] = None
         self._registered = False
+        # Last successful grasp result (grasp_pose / pregrasp_pose /
+        # open_distance_m). put_down replays it so the object is placed back
+        # at the camera-visible spot it was picked from. Cleared on a
+        # successful put_down.
+        self._last_grasp: Optional[dict] = None
 
     # ── lifecycle ──────────────────────────────────────────────────
     def setup(self) -> bool:
@@ -185,6 +190,29 @@ class GraspPlugin(Plugin):
         )
         async def search_object(object_name: str) -> dict:  # noqa: ANN001
             return await plugin._dispatch_search(object_name)
+
+        # put_down — place the held object back where grasp_object picked it
+        # up (a spot the camera detected it at, so the NEXT grasp can find it
+        # again), then return home. Lives here rather than actions.yaml so it
+        # can replay the recorded grasp/pregrasp poses and release width.
+        put_down_desc = (
+            "Put down / place / release the object currently held by the "
+            "gripper. The arm sets it back down at the spot it was picked up "
+            "from (so the camera can find it again), opens the gripper, and "
+            "returns home. Triggers: '放下', '放下来', '放回去', '放到桌上', "
+            "'把它放下', 'put it down', 'put down', 'place it', 'set it down', "
+            "'drop it', 'release it'."
+        )
+
+        @registry.tool(
+            name="put_down",
+            description=put_down_desc,
+            timeout_s=2.0,
+            preamble_text="好的。",
+            response_mode="parallel",
+        )
+        async def put_down() -> dict:
+            return await plugin._dispatch_put_down()
 
         self._registered = True
         # Tool list changed → invalidate the warmed prefix cache (mirrors
@@ -350,6 +378,75 @@ class GraspPlugin(Plugin):
                         pass
         return params
 
+    async def _dispatch_put_down(self) -> dict:
+        """Fast-return dispatch for put_down (place back where picked up)."""
+        if self._arm_plugin is None or getattr(self._arm_plugin, "arm", None) is None:
+            return {"started": False, "error": "arm not available"}
+        actuator = self._arm_plugin.arm
+        arm = getattr(actuator, "robot", None)
+        if arm is None:
+            return {"started": False, "error": "arm not connected"}
+        if not getattr(actuator, "torque_enabled", False):
+            return {"started": False, "error": "torque disabled"}
+        # Single arm-motion slot shared with grasp/search.
+        if self._grasp_task is not None and not self._grasp_task.done():
+            return {"started": False, "error": "already_running"}
+        # Nothing held → tell the LLM instead of running an empty place cycle.
+        # gripper_is_holding is a PROPERTY on the real arm; only call it when
+        # callable. Unknown (None / unreadable) → proceed (best-effort).
+        try:
+            holding_attr = getattr(arm, "gripper_is_holding", None)
+            held = holding_attr() if callable(holding_attr) else holding_attr
+        except Exception:
+            held = None
+        if held is False:
+            return {"started": False, "error": "nothing held"}
+
+        last = self._last_grasp or {}
+        kwargs: dict[str, Any] = {
+            "grasp_pose": last.get("grasp_pose"),
+            "pregrasp_pose": last.get("pregrasp_pose"),
+        }
+        try:
+            kwargs["open_distance_m"] = float(last.get("open_distance_m", 0.09))
+        except (TypeError, ValueError):
+            kwargs["open_distance_m"] = 0.09
+        pp = self.cfg.get("place_pose")
+        if pp:
+            try:
+                kwargs["place_pose"] = tuple(float(v) for v in pp)
+            except (TypeError, ValueError):
+                logger.warning("GraspPlugin: ignoring malformed place_pose")
+        md = self.cfg.get("move_duration")
+        if md is not None:
+            try:
+                kwargs["move_duration"] = float(str(md).strip())
+            except (TypeError, ValueError):
+                pass
+
+        self._cancel_event = threading.Event()
+        cancel_event = self._cancel_event
+
+        async def _runner() -> dict:
+            from .grasp_service import run_put_down_once
+
+            res = await asyncio.to_thread(
+                run_put_down_once,
+                arm=arm,
+                actuator=actuator,
+                cancel_event=cancel_event,
+                **kwargs,
+            )
+            if res.get("success"):
+                # Placed back — the recorded pose is consumed; the next grasp
+                # re-detects from camera.
+                self._last_grasp = None
+            return res
+
+        self._grasp_task = asyncio.create_task(_runner(), name="put_down")
+        self._grasp_task.add_done_callback(self._on_grasp_done)
+        return {"started": True, "used_recorded_pose": bool(last.get("grasp_pose"))}
+
     def _on_grasp_done(self, task: asyncio.Task) -> None:
         try:
             res = task.result()
@@ -358,6 +455,11 @@ class GraspPlugin(Plugin):
         except Exception:
             logger.exception("GraspPlugin: grasp task crashed")
             return
+        # Remember a successful grasp so put_down can place the object back at
+        # the (camera-visible, IK-validated) pickup spot. Search / put_down
+        # results have no grasp_pose, so they never overwrite this.
+        if res and res.get("success") and res.get("grasp_pose"):
+            self._last_grasp = dict(res)
         logger.info("GraspPlugin: grasp result: %s", res)
 
     # ── perception / calibration init (lazy, device-only) ───────────

@@ -174,3 +174,111 @@ def test_stop_sets_cancel_waits_and_closes_camera() -> None:
     assert plugin._grasp_task is None           # noqa: SLF001 — cleared
     assert closed["n"] == 1                      # camera closed exactly once
     assert plugin._camera is None                # noqa: SLF001
+
+
+# ── put_down dispatch (place back where picked up) ──────────────────
+
+
+class _HoldingRobot:
+    """Stub robot whose gripper_is_holding is a PROPERTY (like the real arm)."""
+
+    def __init__(self, holding) -> None:
+        self._holding = holding
+
+    @property
+    def gripper_is_holding(self):
+        return self._holding
+
+
+def test_put_down_rejected_when_nothing_held() -> None:
+    plugin, actuator = _make_plugin(torque=True)
+    actuator.robot = _HoldingRobot(holding=False)
+    res = asyncio.run(plugin._dispatch_put_down())  # noqa: SLF001
+    assert res["started"] is False
+    assert res["error"] == "nothing held"
+
+
+def test_put_down_rejected_when_torque_off() -> None:
+    plugin, _ = _make_plugin(torque=False)
+    res = asyncio.run(plugin._dispatch_put_down())  # noqa: SLF001
+    assert res["started"] is False
+    assert res["error"] == "torque disabled"
+
+
+def test_on_grasp_done_records_last_grasp_for_put_down() -> None:
+    plugin, _ = _make_plugin(torque=True)
+
+    async def _grasp_result() -> dict:
+        return {
+            "success": True,
+            "grasp_pose": [0.40, 0.0, 0.08, 0.0, 0.0, 0.0],
+            "pregrasp_pose": [0.38, 0.0, 0.16, 0.0, 0.0, 0.0],
+            "open_distance_m": 0.089,
+        }
+
+    async def _drive() -> None:
+        task = asyncio.create_task(_grasp_result())
+        await task
+        plugin._on_grasp_done(task)  # noqa: SLF001
+
+    asyncio.run(_drive())
+    assert plugin._last_grasp is not None  # noqa: SLF001
+    assert plugin._last_grasp["grasp_pose"][0] == 0.40  # noqa: SLF001
+
+
+def test_on_grasp_done_ignores_failed_and_search_results() -> None:
+    plugin, _ = _make_plugin(torque=True)
+
+    async def _failed() -> dict:
+        return {"success": False, "error": "no valid grasp"}
+
+    async def _search() -> dict:
+        return {"found": True, "position_base": [0.4, 0.0, 0.05]}
+
+    async def _drive() -> None:
+        for coro in (_failed(), _search()):
+            task = asyncio.create_task(coro)
+            await task
+            plugin._on_grasp_done(task)  # noqa: SLF001
+
+    asyncio.run(_drive())
+    assert plugin._last_grasp is None  # noqa: SLF001
+
+
+def test_put_down_uses_recorded_pose_and_clears_it_on_success() -> None:
+    plugin, actuator = _make_plugin(torque=True)
+    actuator.robot = _HoldingRobot(holding=True)
+    plugin._last_grasp = {  # noqa: SLF001
+        "success": True,
+        "grasp_pose": [0.40, 0.0, 0.08, 0.0, 0.0, 0.0],
+        "pregrasp_pose": [0.38, 0.0, 0.16, 0.0, 0.0, 0.0],
+        "open_distance_m": 0.089,
+    }
+
+    seen = {}
+
+    def _fake_run_put_down_once(**kwargs):
+        seen.update(kwargs)
+        return {"success": True, "released": True}
+
+    import ovs_agent.apps.voice_rebot_arm.grasp_service as gs
+
+    orig = gs.run_put_down_once
+    gs.run_put_down_once = _fake_run_put_down_once
+    try:
+        async def _drive() -> dict:
+            res = await plugin._dispatch_put_down()  # noqa: SLF001
+            await plugin._grasp_task  # noqa: SLF001
+            return res
+
+        res = asyncio.run(_drive())
+    finally:
+        gs.run_put_down_once = orig
+
+    assert res["started"] is True
+    assert res["used_recorded_pose"] is True
+    assert seen["grasp_pose"] == [0.40, 0.0, 0.08, 0.0, 0.0, 0.0]
+    assert seen["pregrasp_pose"] == [0.38, 0.0, 0.16, 0.0, 0.0, 0.0]
+    assert seen["open_distance_m"] == 0.089
+    # consumed on success → next put_down falls back to place_pose.
+    assert plugin._last_grasp is None  # noqa: SLF001

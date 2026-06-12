@@ -606,7 +606,21 @@ class RebotArm:
             self._g_open_target = target
             self._g_open_q_des  = self._g_pos
             self._g_state = _GS.OPENING
-        self._g_wait_idle(3.0)
+        if not self._g_wait_idle(3.0):
+            # Target not reached — the jaw is blocked (e.g. an open command
+            # NARROWER than a held object drives the jaws inward into it).
+            # Without this give-up the state machine stays in OPENING and the
+            # 500Hz loop keeps pushing into the obstacle at the clamped
+            # ~_G_TAU_MAX forever — a motor-overheat hazard. Mirror grasp()'s
+            # timeout: force IDLE, then park at the CURRENT position with
+            # damping only so the motor stops regulating into the obstacle.
+            print(
+                "[RebotArm] open_gripper: target not reached within 3s "
+                "(jaw blocked?); giving up and parking at current position"
+            )
+            with self._g_lock:
+                self._g_state = _GS.IDLE
+            self._g_safe_mit(self._g_pos, 0.0, 0.0, _G_KD_MOVE, 0.0)
 
     def close_gripper(self) -> None:
         """Pure-torque close (non-blocking)."""

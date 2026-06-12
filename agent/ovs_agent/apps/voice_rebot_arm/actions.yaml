@@ -32,15 +32,18 @@ sequences:
       - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
         delay: 2.0
 
-  # Open the gripper to 6 cm (no arm motion — pose fields omitted on purpose).
-  # Validated on hardware: open_gripper(0.06) drove the gripper to its open
-  # angle. Adjust the width per object/action as needed (max 0.09).
+  # Open the gripper FULLY (no arm motion — pose fields omitted on purpose).
+  # 0.09 = mechanical full-open. This MUST stay full-open: the action doubles
+  # as "release / 松开" while holding an object, and an open command NARROWER
+  # than the held object (e.g. 0.06 vs the 0.077m demo box) drives the jaws
+  # INWARD — the SDK's open ramp targets the commanded angle — so it squeezes
+  # instead of releasing and the object is never let go.
   open_gripper:
     description: >-
       Open the gripper / release. Triggers: "张开夹爪", "松开", "打开夹爪",
       "把夹爪打开", "夹爪打开", "open gripper", "release", "let go".
     frames:
-      - joints: {gripper: 0.06}
+      - joints: {gripper: 0.09}
         delay: 1.0
 
   # Grasp at 0.2 N·m (no arm motion — pose fields omitted on purpose).
@@ -74,25 +77,13 @@ sequences:
       - joints: {x: 0.27, y:  0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
         delay: 1.0
 
-  # Put down / place the held object: lower to a place spot in front, open the
-  # gripper to release, then retreat home. Completes the pick-and-place story
-  # (grasp_object picks up → put_down sets down). All poses sit inside the
-  # IK-validated workspace box (x∈[0.20,0.34], z∈[0.12,0.34]); the release height
-  # z=0.15 sets the object down just above the table the grasp picked it from.
-  # The first frame keeps the gripper closed (gripper:0 = hold) so the object is
-  # carried to the place spot; the second frame opens to 6cm to let it go.
-  put_down:
-    description: >-
-      Put down / place / release the currently held object onto the table in
-      front. Triggers: "放下", "放下来", "放回去", "放到桌上", "把它放下",
-      "put it down", "put down", "place it", "set it down", "drop it", "release it".
-    frames:
-      - joints: {x: 0.30, y: 0.00, z: 0.15, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
-        delay: 2.0
-      - joints: {gripper: 0.06}
-        delay: 1.0
-      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
-        delay: 2.0
+  # NOTE: put_down is NOT a static sequence any more. It moved to GraspPlugin
+  # (grasp_plugin.py) as a semantic tool: it replays the last grasp's recorded
+  # (IK-validated) pregrasp/grasp poses so the object is placed BACK at the
+  # spot the camera picked it from — a fixed place spot here left the object
+  # outside the camera's view and the next grasp_object failed. It also opens
+  # to the grasp's auto-widened jaw width (a fixed 0.06 cannot release the
+  # 0.077m demo box).
 
   # Point forward at an object, then return home. Both waypoints IK-validated
   # (point reach x=0.32 gave the lowest IK error, 7.3e-5).
