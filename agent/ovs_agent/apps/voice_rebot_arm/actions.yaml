@@ -74,6 +74,26 @@ sequences:
       - joints: {x: 0.27, y:  0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
         delay: 1.0
 
+  # Put down / place the held object: lower to a place spot in front, open the
+  # gripper to release, then retreat home. Completes the pick-and-place story
+  # (grasp_object picks up → put_down sets down). All poses sit inside the
+  # IK-validated workspace box (x∈[0.20,0.34], z∈[0.12,0.34]); the release height
+  # z=0.15 sets the object down just above the table the grasp picked it from.
+  # The first frame keeps the gripper closed (gripper:0 = hold) so the object is
+  # carried to the place spot; the second frame opens to 6cm to let it go.
+  put_down:
+    description: >-
+      Put down / place / release the currently held object onto the table in
+      front. Triggers: "放下", "放下来", "放回去", "放到桌上", "把它放下",
+      "put it down", "put down", "place it", "set it down", "drop it", "release it".
+    frames:
+      - joints: {x: 0.30, y: 0.00, z: 0.15, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 2.0
+      - joints: {gripper: 0.06}
+        delay: 1.0
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 2.0
+
   # Point forward at an object, then return home. Both waypoints IK-validated
   # (point reach x=0.32 gave the lowest IK error, 7.3e-5).
   point_at:
