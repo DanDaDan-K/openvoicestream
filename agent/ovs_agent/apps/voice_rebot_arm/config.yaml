@@ -7,8 +7,12 @@
 slv_url: "ws://${VOICE_SERVICE_HOST:-localhost}:${VOICE_SERVICE_PORT:-8621}/v2v/stream"
 
 slv_config:
-  # Mandarin-only arm demo. "auto" can mis-detect very short commands.
-  asr_language: "${STT_LANGUAGE:-zh}"
+  # Bilingual demo (2026-06-12): users speak BOTH Mandarin and English, so the
+  # default is "auto" (per-utterance language ID). Known trade-off: very short
+  # commands (single words like '挥手'/'wave') risk language mis-detection —
+  # validate on the real mic; export STT_LANGUAGE=zh to pin Mandarin-only if
+  # the mis-detect rate hurts. TTS is matcha, which handles mixed zh/en text.
+  asr_language: "${STT_LANGUAGE:-auto}"
   tts_language: "zh"
   tts_speaker_id: ${TTS_SID:-52}
   tts_speed: ${TTS_SPEED:-1.0}
@@ -95,7 +99,18 @@ tool_trigger_guard: false
 # blocking it would strand a held object, so it is exempt too.
 tool_trigger_guard_exempt: ["grasp_object", "search_object", "put_down"]
 
-# System prompt — imperative robotic-arm controller.
+# System prompt — imperative robotic-arm controller. v5 (2026-06-12),
+# bench-validated against Qwen3.5-4B GDN+MTP: main matrix 69/69 (回家 needed
+# the overlay no-args bare-call parser fix), HARD robustness 105/105 with
+# 0 dangerous / 0 spurious motions. Design notes vs the old v1 prompt:
+#   * v1's "EXACT trigger phrase" HARD RULE is GONE — Qwen3.5 followed it
+#     literally, so meta-questions CONTAINING a trigger ('挥手用英语怎么说')
+#     fired the motion while ASR homophones ('灰手') were refused. Replaced
+#     by intent matching + explicit meta-question exclusion + homophone
+#     recovery. Worked examples are the strongest lever; keep 回家/灰手 there.
+#   * Bilingual: trigger enumeration covers en ('home'/'reset'); HARD english
+#     27/27. If you EDIT this prompt, re-validate with
+#     tools/toolcall_stability_bench.py --system-prompt-file BEFORE deploying.
 system_prompt: |
   You are a voice controller for a reBot B601-DM robotic arm.
   The user speaks commands aloud and you reply via TTS.
@@ -108,20 +123,52 @@ system_prompt: |
     the robot executes the motion. Examples:
       User: "挥手"       → Emit "好的" → call wave()
       User: "回到原位"   → Emit "好的" → call go_home()
+      User: "回家"       → Emit "好的" → call go_home()
+         (the arm returning to its home pose — a command, not chit-chat)
       User: "张开夹爪"   → Emit "好的" → call open_gripper()
+      User: "灰手"       → Emit "好的" → call wave()
+         (ASR misheard '挥手'; clearly a command, so recover it)
+      User: "把盒子放回去" → Emit "好的" → call put_down()
+         (putting DOWN the held object — even though an object is named,
+          this is put_down, NOT a new grasp)
     AFTER the tool returns, emit a short confirmation ("已挥手" /
     "Done" / "已回到原位"), 1 short sentence max.
-  - To pick the right tool, read each tool's description and match the
-    user's exact phrase against the trigger words listed there. Chinese
-    triggers are LITERAL: '挥手' MUST call wave; '张开夹爪' MUST call
-    open_gripper; '闭合夹爪' MUST call close_gripper; '回到原位' MUST
-    call go_home; '指向' MUST call point_at. Never substitute a
-    semantically-similar tool — if no description literally contains the
-    user's phrase, reply that you don't have that action.
-  - HARD RULE — only call a tool when the user's text contains the
-    EXACT trigger phrase listed in that tool's description. If the
-    phrase is not literally present, DO NOT call any tool — reply
-    "没听清，请再说一次。" / "Sorry, I didn't catch that." instead.
+  - To pick the right tool, match the user's INTENT against the trigger
+    words in each tool's description. Trigger examples (not exhaustive):
+      '挥手' / '挥挥手' / '打招呼' → wave
+      '回到原位' / '回家' / '归位' / '复位' / 'home' / 'reset' → go_home
+      '张开夹爪' / '松开' / '打开夹爪' → open_gripper
+      '闭合夹爪' / '夹紧' / '合上夹爪' → close_gripper
+      '指向' / '指一下' → point_at
+      '抓/拿起/夹住 + 物体名' → grasp_object
+      '找/搜索 + 物体名' → search_object
+      '放下' / '放回去' → put_down
+    Never substitute a semantically-similar tool for a different action
+    the user named — if the user names an action no tool supports, reply
+    that you don't have that action.
+  - If the user names an OBJECT to grab/pick/hold ('夹住这个盒子',
+    '把箱子拿起来', 'grab the box'), that is grasp_object — the
+    camera-guided pick. close_gripper is ONLY for closing the empty
+    gripper when NO object is named. EXCEPTION: putting an object DOWN
+    ('把盒子放回去', '放下盒子', 'put the box back/down') is put_down
+    even when the object is named — the verb decides, not the noun.
+  - Commands often come wrapped in politeness or filler ('那个，麻烦你
+    挥手好吗', '请', '帮我', '一下', '好吗'). Strip the wrapping — the
+    command inside still counts and the tool MUST be called.
+  - The text comes from speech recognition and may contain NEAR-HOMOPHONE
+    mishearings of a trigger (e.g. '灰手'/'挥首' for '挥手', '必合夹爪'
+    for '闭合夹爪', '加紧' for '夹紧'). If the text is clearly a COMMAND
+    and sounds like a trigger, treat it as that trigger and call that
+    tool.
+  - NOT every sentence containing a trigger word is a command. Questions
+    or talk ABOUT a command — asking how to say it in another language
+    ('挥手用英语怎么说'), what it means, how it is spelled — are NOT
+    requests to move. Answer in words and call NO tool.
+  - If the text is neither a clear command nor a close mishearing of one
+    (chit-chat, unrelated questions), DO NOT call any tool — just reply
+    normally. If it sounds like a garbled command you cannot map to
+    exactly ONE trigger, reply "没听清，请再说一次。" / "Sorry, I didn't
+    catch that."
 
   /no_think
 
@@ -206,7 +253,11 @@ metadata:
     # Phase B camera-guided grasp_object. Perception + calibration artifacts are
     # mounted at /opt/rebot-models (host /home/seeed/rebot-models).
     enabled: true
-    yolo_model_path: "${REBOT_GRASP_MODEL:-/opt/rebot-models/yoloe-26s-seg-box.onnx}"
+    # Native-TRT engine by default (25× vs CPU: 20ms vs 496ms raw inference,
+    # built on-device via trtexec --fp16; arch-specific — rebuild if
+    # TRT/JetPack changes). Set REBOT_GRASP_MODEL to the .onnx sibling to
+    # fall back to the onnxruntime CPU path.
+    yolo_model_path: "${REBOT_GRASP_MODEL:-/opt/rebot-models/yoloe-26s-seg-box.engine}"
     yolo_classes: ["box", "cardboard box", "carton", "package"]
     # CPU EP: production voice stack leaves <300MB GPU free → TRT/CUDA OOMs.
     onnx_providers: ["CPUExecutionProvider"]
@@ -251,4 +302,58 @@ metadata:
     # Safety: never open the jaw to the SDK full 0.09m during pre-grasp,
     # cancellation safe-park, or release; gentle compliant grasp force.
     open_distance_m: ${REBOT_GRASP_OPEN_DIST:-0.06}
-    grasp_force: ${REBOT_GRASP_FORCE:-0.6}
+    # 0.8 N·m (was 0.6): real-machine feel 2026-06-12 was "not tight enough" —
+    # the :20260612i gripper rework can latch CONTACT earlier (CLOSING grace
+    # path), so the position-hold grips at a shallower compression; more
+    # feed-forward torque compensates. SDK hard ceiling 1.5. Doubles as the
+    # CEILING for the adaptive ramp on unlisted classes (see below).
+    grasp_force: ${REBOT_GRASP_FORCE:-0.8}
+    # Per-class grip force (N·m). A class listed here uses its FIXED value —
+    # deterministic, no ramp, no extra latency. Any class NOT listed uses the
+    # ADAPTIVE ramp: start at 0.2 N·m, watch the encoder ~0.3s, step +0.1
+    # while the gap is still creeping shut (soft object compressing), stop at
+    # the first force that holds — capped at grasp_force above. Soft fruit
+    # settles low instead of being crushed by the box-tuned clamp. When
+    # adding fruit classes, either list them here (e.g. banana: 0.3) or leave
+    # them unlisted to let the ramp find the force.
+    grasp_force_by_class:
+      box: ${REBOT_GRASP_FORCE:-0.8}
+      "cardboard box": ${REBOT_GRASP_FORCE:-0.8}
+      carton: ${REBOT_GRASP_FORCE:-0.8}
+      package: ${REBOT_GRASP_FORCE:-0.8}
+    # How far the TCP advances along the approach axis past the detected grasp
+    # point before closing (m). Pipeline default was 0.015 — real-machine feel
+    # "抓得浅": the jaw barely wrapped the box rim. 0.025 wraps ~1cm deeper for
+    # a fuller-contact grip; raise further with care (TCP presses lower —
+    # watch for table contact on short objects).
+    insertion_depth_m: ${REBOT_GRASP_INSERT:-0.025}
+    # ── success-rate hardening (2026-06-12), all latency-neutral ──────────
+    # Max frames per detection: the FIRST frame with a valid candidate wins
+    # (zero added latency normally); extra frames only run on dropped/cold
+    # frames or single-frame detector/depth misses.
+    detect_frames: ${REBOT_GRASP_DETECT_FRAMES:-3}
+    # Extra full attempts (fresh detect → grasp) after a retriable failure:
+    # implausible pose, IK fail, closed-on-air, object lost during carry.
+    # Costs time only when the first attempt failed anyway.
+    grasp_retries: ${REBOT_GRASP_RETRIES:-1}
+    # Load the YOLO session + start the camera stream at boot (background)
+    # instead of on the first grasp — kills the first-grasp cold-start
+    # failure (Orbbec returns None frames for the first ~1-2s of a stream).
+    prime_on_start: true
+    # Close-up re-observation: when the first detection is far (x>0.50) or
+    # suspiciously wide (>0.085m), move the camera to the validated sweet-spot
+    # viewing distance and re-measure before committing (side-view silhouette
+    # inflation fix). One extra move only in those cases.
+    reobserve: true
+    # Servo-lite correction: one re-detection from the pregrasp pose shifts
+    # the grasp x/y by the measured drift (≤3cm) — cancels calibration
+    # residue + far-view parallax in the final approach.
+    servo_correct: true
+    # Base-frame sanity box [x_min,x_max, y_min,y_max, z_min,z_max] for the
+    # computed grasp point. GARBAGE-ONLY bounds: catch depth-noise artefacts
+    # (under the table, behind the base, >0.85m fantasy points) and NOTHING
+    # else — reachability is IK's call, not this gate's. The first cut capped
+    # x at 0.60 and wrongly rejected REAL boxes at x=0.61/0.73 (real machine
+    # 2026-06-12; a grasp at x=0.596 succeeded the same minute, so reach
+    # comfortably exceeds the old 0.44 assumption).
+    plausible_box: [0.05, 0.85, -0.50, 0.50, -0.02, 0.50]
