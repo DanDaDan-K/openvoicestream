@@ -107,7 +107,14 @@ class GraspPlugin(Plugin):
         logger.info("GraspPlugin: stop-intent → cancel grasp")
 
     async def on_user_speech_start(self) -> None:
-        # User started talking mid-grasp → treat as barge-in cancel.
+        # Speech-start barge-in cancel is OFF by default: in a noisy demo hall
+        # ambient noise / TTS echo opens the mic and would abort an in-flight
+        # grasp mid-motion ("arm twitches then stops"). A grasp is a short,
+        # committed motion; let it finish. The user can still abort via an
+        # explicit stop-intent (on_user_stop_intent) or by going to sleep. Set
+        # grasp.cancel_on_speech: true to restore the old barge-in behaviour.
+        if not self.cfg.get("cancel_on_speech", False):
+            return
         if self._grasp_task is not None and not self._grasp_task.done():
             self._cancel_event.set()
             logger.info("GraspPlugin: barge-in → cancel grasp")
