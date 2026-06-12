@@ -7,11 +7,17 @@ thread and returns ``{"started": True, "target": ...}`` within ~200ms so the
 LLM's spoken acknowledgement overlaps the multi-second physical grasp (same
 fast-dispatch pattern as ``ArmPlugin.dispatch_action``).
 
-Cancellation: a ``threading.Event`` is set on barge-in / stop-intent / sleep
-(``on_user_stop_intent`` / ``on_user_speech_start`` / ``on_sleep``); the grasp
-service polls it before every arm motion, safe-parks the gripper (open), and
-aborts. This keeps Phase A's ArmPlugin (framework core) untouched — the grasp
-tool lives entirely in this app-local plugin.
+Cancellation: a ``threading.Event`` is set on stop-intent ("停") or sleep
+(``on_user_stop_intent`` / ``on_sleep``); the grasp service polls it before
+every arm motion, safe-parks the gripper (open), and aborts. Ordinary user
+speech does NOT cancel an in-flight motion — an early design cancelled on
+``on_user_speech_start``, which meant saying ANYTHING mid-grasp silently
+dropped the held object and the new command then bounced off the
+already_running guard ("第一遍没反应"). Only an explicit stop word or sleep
+interrupts the arm now; a new motion command while one runs is refused with
+the busy motion's name so the LLM can tell the user to wait. A short
+completion tone (success/failure pitch) tells the user when the arm is done
+and ready for the next command.
 
 Heavy deps (onnxruntime via the segmenter, camera SDK) are imported lazily on
 first grasp so the agent boots on hosts without them.
@@ -71,6 +77,22 @@ class GraspPlugin(Plugin):
                 break
         if self._arm_plugin is None:
             logger.warning("GraspPlugin: no ArmPlugin found; grasp_object will error")
+        else:
+            # Cross-plugin motion mutex: let ArmPlugin's static actions see
+            # our in-flight grasp/search/put_down (and refuse to interleave).
+            reg = getattr(self._arm_plugin, "register_motion_source", None)
+            if callable(reg):
+                reg(self._busy_motion_name)
+
+    def _busy_motion_name(self) -> Optional[str]:
+        """Name of our in-flight motion (e.g. 'grasp-box'), or None."""
+        task = self._grasp_task
+        if task is not None and not task.done():
+            try:
+                return task.get_name()
+            except Exception:  # pragma: no cover — defensive
+                return "grasp"
+        return None
 
     async def stop(self) -> None:
         await super().stop()
@@ -264,11 +286,13 @@ class GraspPlugin(Plugin):
         if not getattr(actuator, "torque_enabled", False):
             return {"started": False, "target": target, "error": "torque disabled"}
 
-        # SAFETY: refuse re-entry. A second grasp while one is in flight would
-        # overwrite _cancel_event / _grasp_task and let two grasp workers race
-        # the same arm/bus.
-        if self._grasp_task is not None and not self._grasp_task.done():
-            return {"started": False, "target": target, "error": "already_running"}
+        # SAFETY: refuse re-entry / interleave. A second grasp while one is in
+        # flight would overwrite _cancel_event / _grasp_task and let two grasp
+        # workers race the same arm/bus; a static action in flight would
+        # interleave waypoints with ours.
+        busy_err = self._refuse_if_motion_busy()
+        if busy_err is not None:
+            return {"started": False, "target": target, **busy_err}
 
         # Fresh cancel token for this grasp.
         self._cancel_event = threading.Event()
@@ -325,9 +349,10 @@ class GraspPlugin(Plugin):
             return {"started": False, "target": target, "error": "arm not connected"}
         if not getattr(actuator, "torque_enabled", False):
             return {"started": False, "target": target, "error": "torque disabled"}
-        # Single arm-motion slot shared with grasp: refuse if one is in flight.
-        if self._grasp_task is not None and not self._grasp_task.done():
-            return {"started": False, "target": target, "error": "already_running"}
+        # Single arm-motion slot shared with grasp + ArmPlugin actions.
+        busy_err = self._refuse_if_motion_busy()
+        if busy_err is not None:
+            return {"started": False, "target": target, **busy_err}
         self._cancel_event = threading.Event()
         cancel_event = self._cancel_event
         try:
@@ -388,9 +413,10 @@ class GraspPlugin(Plugin):
             return {"started": False, "error": "arm not connected"}
         if not getattr(actuator, "torque_enabled", False):
             return {"started": False, "error": "torque disabled"}
-        # Single arm-motion slot shared with grasp/search.
-        if self._grasp_task is not None and not self._grasp_task.done():
-            return {"started": False, "error": "already_running"}
+        # Single arm-motion slot shared with grasp/search + ArmPlugin actions.
+        busy_err = self._refuse_if_motion_busy()
+        if busy_err is not None:
+            return {"started": False, **busy_err}
         # Nothing held → tell the LLM instead of running an empty place cycle.
         # gripper_is_holding is a PROPERTY on the real arm; only call it when
         # callable. Unknown (None / unreadable) → proceed (best-effort).
@@ -447,6 +473,27 @@ class GraspPlugin(Plugin):
         self._grasp_task.add_done_callback(self._on_grasp_done)
         return {"started": True, "used_recorded_pose": bool(last.get("grasp_pose"))}
 
+    def _refuse_if_motion_busy(self) -> Optional[dict]:
+        """Shared single-motion-slot guard for grasp/search/put_down, plus the
+        cross-plugin check against ArmPlugin's static actions. Returns an
+        error payload naming the in-flight motion (so the LLM can tell the
+        user what the arm is still doing), or None when the arm is free."""
+        mine = self._busy_motion_name()
+        if mine:
+            return {"error": "already_running", "current": mine}
+        chk = getattr(self._arm_plugin, "busy_action", None)
+        if callable(chk):
+            try:
+                busy = chk()
+            except Exception:  # pragma: no cover — defensive
+                busy = None
+            # busy_action also consults our registered source, but our slot
+            # was checked above and is idle — anything it reports now is a
+            # static action sequence.
+            if busy:
+                return {"error": "arm_busy", "current": str(busy)}
+        return None
+
     def _on_grasp_done(self, task: asyncio.Task) -> None:
         try:
             res = task.result()
@@ -454,6 +501,7 @@ class GraspPlugin(Plugin):
             return
         except Exception:
             logger.exception("GraspPlugin: grasp task crashed")
+            self._play_done_tone(False)
             return
         # Remember a successful grasp so put_down can place the object back at
         # the (camera-visible, IK-validated) pickup spot. Search / put_down
@@ -461,6 +509,55 @@ class GraspPlugin(Plugin):
         if res and res.get("success") and res.get("grasp_pose"):
             self._last_grasp = dict(res)
         logger.info("GraspPlugin: grasp result: %s", res)
+        # Audible completion feedback: the parallel tool result returned long
+        # ago ("好的"), so without this the user cannot tell when the arm is
+        # done and safe to command again. Skip on cancel — the user stopped it
+        # and already knows.
+        if res and not res.get("cancelled"):
+            self._play_done_tone(bool(res.get("success") or res.get("found")))
+
+    def _play_done_tone(self, ok: bool) -> None:
+        """Play a short local tone when a motion finishes (success/failure
+        pitch), mirroring app_base's wake tone. Config (all optional):
+        ``grasp.done_tone: {hz_ok, hz_fail, ms}``; set ms: 0 to disable."""
+        try:
+            audio = getattr(self.app, "audio", None)
+            notify = getattr(audio, "play_notification", None)
+            if not callable(notify):
+                return
+            cfg = dict(self.cfg.get("done_tone") or {})
+            hz = float(cfg.get("hz_ok", 1175)) if ok else float(cfg.get("hz_fail", 330))
+            ms = float(cfg.get("ms", 180))
+            if hz <= 0 or ms <= 0:
+                return
+            import math
+            import struct
+            import time as _time
+
+            sr = int(getattr(audio, "output_sr", None) or 16000)
+            n = int(sr * ms / 1000)
+            amp = 16000
+            fade = min(n // 4, int(sr * 0.01))
+            pcm = bytearray(n * 2)
+            for i in range(n):
+                s = amp * math.sin(2 * math.pi * hz * i / sr)
+                if i < fade:
+                    s *= i / fade
+                elif i >= n - fade:
+                    s *= (n - 1 - i) / fade
+                struct.pack_into("<h", pcm, i * 2, max(-32768, min(32767, int(s))))
+            notify(bytes(pcm))
+            # Suppress the mic while the tone plays so it isn't captured as a
+            # command (same pattern as the wake tone).
+            sup = getattr(self.app, "_local_output_mic_suppress_until", None)
+            if sup is not None:
+                self.app._local_output_mic_suppress_until = max(
+                    float(sup), _time.monotonic() + (ms + 200.0) / 1000.0
+                )
+            logger.info("GraspPlugin: done tone (%s) %dHz %dms",
+                        "ok" if ok else "fail", int(hz), int(ms))
+        except Exception:  # pragma: no cover — defensive
+            logger.debug("GraspPlugin: done tone failed", exc_info=True)
 
     # ── perception / calibration init (lazy, device-only) ───────────
     def _ensure_perception(self) -> None:

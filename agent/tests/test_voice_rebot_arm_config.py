@@ -26,8 +26,14 @@ def test_voice_rebot_arm_stays_resident_server_loop():
     assert cfg.gate_drive_eos is True
     assert float(cfg.asr_final_timeout_s) <= 1.0
     assert float(cfg.gate_eos_delay_ms) > 0
-    # Tool trigger guard on (block motions whose ASR lacks a trigger phrase).
-    assert cfg.tool_trigger_guard is True
+    # Tool trigger guard OFF (deliberate, 2026-06-12): on the real device ASR
+    # mis-hears short Mandarin commands and the guard blocked the CORRECT tool
+    # the LLM picked ("只回复不干活"); the 4B recovers homophones on its own.
+    # The exempt list is retained for a future re-enable: semantic tools plus
+    # put_down (blocking it would strand a held object).
+    assert cfg.tool_trigger_guard is False
+    exempt = set(cfg.tool_trigger_guard_exempt)
+    assert {"grasp_object", "search_object", "put_down"} <= exempt
 
 
 def test_voice_rebot_arm_enables_gated_tts_hardening():

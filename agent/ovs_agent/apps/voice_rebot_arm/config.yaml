@@ -230,6 +230,14 @@ metadata:
       - [0.27, 0.00, 0.26, 0.0, 0.0, 0.0]
       - [0.25, 0.10, 0.26, 0.0, 0.0, 0.35]
       - [0.25, -0.10, 0.26, 0.0, 0.0, -0.35]
+    # Completion tone: a short local beep when grasp/search/put_down FINISHES
+    # (high pitch = success, low = failure), so the user knows the arm is done
+    # and ready for the next command — the spoken "好的" happens at START
+    # (parallel mode) and there is no spoken completion. Set ms: 0 to disable.
+    done_tone:
+      hz_ok: 1175
+      hz_fail: 330
+      ms: 180
     # put_down FALLBACK place spot [x,y,z,roll,pitch,yaw] — only used when
     # there is no recorded grasp to put back to (e.g. the user manually closed
     # the gripper around something). The normal put_down path replays the last
