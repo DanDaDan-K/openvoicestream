@@ -198,6 +198,37 @@ def test_put_down_rejected_when_nothing_held() -> None:
     assert res["error"] == "nothing held"
 
 
+def test_put_down_proceeds_with_recorded_grasp_even_if_not_holding() -> None:
+    """A recorded grasp admits put_down regardless of the holding flag — the
+    flag can be momentarily False mid-transition (or after a misheard gripper
+    command), and replaying the place-back is harmless even when empty."""
+    plugin, actuator = _make_plugin(torque=True)
+    actuator.robot = _HoldingRobot(holding=False)
+    plugin._last_grasp = {  # noqa: SLF001
+        "success": True,
+        "grasp_pose": [0.40, 0.0, 0.08, 0.0, 0.0, 0.0],
+        "pregrasp_pose": [0.38, 0.0, 0.16, 0.0, 0.0, 0.0],
+        "open_distance_m": 0.089,
+    }
+
+    import ovs_agent.apps.voice_rebot_arm.grasp_service as gs
+
+    orig = gs.run_put_down_once
+    gs.run_put_down_once = lambda **kwargs: {"success": True, "released": True}
+    try:
+        async def _drive() -> dict:
+            res = await plugin._dispatch_put_down()  # noqa: SLF001
+            await plugin._grasp_task  # noqa: SLF001
+            return res
+
+        res = asyncio.run(_drive())
+    finally:
+        gs.run_put_down_once = orig
+
+    assert res["started"] is True
+    assert res["used_recorded_pose"] is True
+
+
 def test_put_down_rejected_when_torque_off() -> None:
     plugin, _ = _make_plugin(torque=False)
     res = asyncio.run(plugin._dispatch_put_down())  # noqa: SLF001

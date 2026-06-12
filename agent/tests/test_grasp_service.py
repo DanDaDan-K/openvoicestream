@@ -38,6 +38,8 @@ class FakeArm:
 
     def open_gripper(self, distance_m: float = 0.09) -> None:
         self.calls.append(("open_gripper", float(distance_m)))
+        # Physical behaviour: an open jaw is no longer gripping.
+        self._holding = False
 
     def move_to(self, x, y, z, roll=0.0, pitch=0.0, yaw=0.0, duration=2.0) -> bool:
         self.calls.append(("move_to", round(float(z), 4)))
@@ -501,6 +503,34 @@ def test_put_down_place_ik_failure_keeps_holding():
     assert res["stage"] == "place"
     assert "still holding" in res["error"]
     assert "open_gripper" not in arm.names_of_calls()
+
+
+def test_put_down_release_verified_with_retry_then_honest_failure():
+    """Release is VERIFIED physically: still gripping after the recorded-width
+    open → one retry at full mechanical open; still gripping → honest error
+    (never a fake success that leaves the demo box clamped)."""
+    class StuckJawArm(PoseRecordingArm):
+        def gripper_is_holding(self) -> bool:
+            return True  # physically never lets go
+
+    arm = StuckJawArm()
+    res = run_put_down_once(
+        arm=arm,
+        grasp_pose=[0.40, 0.0, 0.08, 0.0, 0.0, 0.0],
+        pregrasp_pose=[0.38, 0.0, 0.16, 0.0, 0.0, 0.0],
+        open_distance_m=0.089,
+        move_duration=0.02,
+    )
+    assert res["success"] is False
+    assert res["released"] is False
+    assert res["stage"] == "release"
+    assert "still gripping" in res["error"]
+    opens = [c for c in arm.calls if c[0] == "open_gripper"]
+    assert opens == [("open_gripper", 0.089), ("open_gripper", 0.09)]
+    # No retreat/home after a failed release — the arm stays at the place
+    # pose with the object still held.
+    move_idxs = [i for i, n in enumerate(arm.names_of_calls()) if n == "move_to"]
+    assert len(move_idxs) == 2  # approach + place only
 
 
 def test_put_down_cancel_before_motion_safe_parks():

@@ -76,6 +76,18 @@ def _open_gripper_safe(arm: Any, open_distance_m: float) -> None:
     arm.open_gripper(open_distance_m)
 
 
+def _gripper_holding(arm: Any, default: Optional[bool] = None) -> Optional[bool]:
+    """Physical holding check (best-effort). On the real RebotArm
+    ``gripper_is_holding`` is a method grounded in encoder gap + sustained
+    grip torque; on some stubs it is a plain attribute. Unknown → default."""
+    try:
+        attr = getattr(arm, "gripper_is_holding", None)
+        val = attr() if callable(attr) else attr
+        return bool(val) if val is not None else default
+    except Exception:
+        return default
+
+
 def _check_cancel(
     cancel_event: Optional[threading.Event],
     arm: Any,
@@ -337,17 +349,13 @@ def run_grasp_once(
             with _motion_lock(actuator):
                 _open_gripper_safe(arm, safe_open_m)
 
-        # holding check (best-effort). On the real RebotArm this is a
-        # PROPERTY (not a method); only call it when it's actually callable so
-        # we don't TypeError on a bool.
-        try:
-            holding_attr = getattr(arm, "gripper_is_holding", None)
-            holding = holding_attr() if callable(holding_attr) else holding_attr
-            result["holding"] = bool(holding) if holding is not None else held
-        except Exception:
-            result["holding"] = held
+        # Holding check — PHYSICAL (encoder gap + grip torque on the real
+        # arm), so a grasp() that timed out in software but is in fact
+        # clamping the object still counts as success.
+        holding = _gripper_holding(arm, default=None)
+        result["holding"] = holding if holding is not None else held
 
-        result["success"] = held
+        result["success"] = bool(held or (not release_after and result["holding"]))
         result["stage"] = "done"
         return result
 
@@ -445,12 +453,35 @@ def run_put_down_once(
         if not _wait_motion_cancellable(arm, move_duration, cancel_event):
             _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
 
-        # ── 3. release ──────────────────────────────────────────────────
+        # ── 3. release — VERIFIED physically, never assumed ─────────────
+        # After the open, read back the gripper's physical holding evidence
+        # (encoder gap + grip torque). Still clamping → retry once at full
+        # mechanical open; still clamping after that → report the failure
+        # honestly (arm stays at the place pose, object still held) instead
+        # of claiming success.
         stage = "release"
         _check_cancel(cancel_event, arm, safe_open_m)
         with _motion_lock(actuator):
             _open_gripper_safe(arm, safe_open_m)
-        result["released"] = True
+        released = _gripper_holding(arm, default=False) is not True
+        if not released:
+            logger.warning(
+                "put_down: still gripping after open(%.3fm); retrying at full open",
+                safe_open_m,
+            )
+            with _motion_lock(actuator):
+                _open_gripper_safe(arm, _GRIPPER_MAX_M)
+            released = _gripper_holding(arm, default=False) is not True
+        result["released"] = released
+        opening = getattr(arm, "gripper_opening_m", None)
+        if callable(opening):
+            try:
+                result["release_opening_m"] = round(float(opening()), 4)
+            except Exception:
+                pass
+        if not released:
+            return {**result, "stage": stage,
+                    "error": "release failed — jaw still gripping after full open"}
         result["placed_at"] = place6[:3]
 
         # ── 4. retreat back up (jaw open; IK failure tolerated) ─────────

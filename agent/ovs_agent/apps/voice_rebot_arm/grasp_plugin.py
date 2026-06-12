@@ -417,18 +417,20 @@ class GraspPlugin(Plugin):
         busy_err = self._refuse_if_motion_busy()
         if busy_err is not None:
             return {"started": False, **busy_err}
-        # Nothing held → tell the LLM instead of running an empty place cycle.
-        # gripper_is_holding is a PROPERTY on the real arm; only call it when
-        # callable. Unknown (None / unreadable) → proceed (best-effort).
-        try:
-            holding_attr = getattr(arm, "gripper_is_holding", None)
-            held = holding_attr() if callable(holding_attr) else holding_attr
-        except Exception:
-            held = None
-        if held is False:
-            return {"started": False, "error": "nothing held"}
-
         last = self._last_grasp or {}
+        # Admission: a recorded grasp is sufficient — place-back is harmless
+        # even if the jaw somehow let go in the meantime, and the physical
+        # holding check can be momentarily False mid-transition. Refuse only
+        # when BOTH there is no recorded grasp AND the gripper is physically
+        # not clamping anything (encoder gap + grip torque on the real arm).
+        if not last.get("grasp_pose"):
+            try:
+                holding_attr = getattr(arm, "gripper_is_holding", None)
+                held = holding_attr() if callable(holding_attr) else holding_attr
+            except Exception:
+                held = None
+            if held is False:
+                return {"started": False, "error": "nothing held"}
         kwargs: dict[str, Any] = {
             "grasp_pose": last.get("grasp_pose"),
             "pregrasp_pose": last.get("pregrasp_pose"),

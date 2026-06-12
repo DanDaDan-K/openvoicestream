@@ -159,6 +159,14 @@ _G_KP_HOLD         = 5.0
 _G_KD_HOLD         = 1.0
 _G_DEFAULT_FORCE   = 0.30
 _G_CTRL_RATE       = 500.0
+# Physical-evidence thresholds. The control-mode enum is NOT a reliable
+# record of whether an object is held (any later gripper command rewrites
+# it), so holding/open-complete decisions are grounded in encoder + torque:
+_G_HOLD_MIN_GAP    = -0.30   # rad; jaw at least this ajar (~5mm) ⇒ something can be between the fingers
+_G_HOLD_TORQ_MIN   = 0.12    # N·m sustained grip torque ⇒ physically clamping an object
+_G_OPEN_STALL_S    = 0.20    # s stalled after the open ramp finished ⇒ jaw at its physical open limit
+_G_CLOSE_GRACE_S   = 0.40    # s in CLOSING after which stall ⇒ contact even with no start-up travel
+                             # (jaw already resting on the object moves < _G_STARTUP_DIST)
 
 
 class _GS:
@@ -298,6 +306,8 @@ class RebotArm:
         self._g_contact_elapsed  = 0.0
         self._g_open_q_des       = _G_OPEN_SOFT_LIMIT
         self._g_open_target      = _G_OPEN_SOFT_LIMIT
+        self._g_open_stall_s     = 0.0
+        self._g_close_elapsed    = 0.0
         self._g_target_force     = _G_DEFAULT_FORCE
         self._g_loop_thread: Optional[threading.Thread] = None
         self._g_loop_running     = False
@@ -454,8 +464,28 @@ class RebotArm:
 
     @property
     def gripper_is_holding(self) -> bool:
+        """True when the jaw is physically gripping an object.
+
+        Grounded in PHYSICAL evidence (encoder gap + sustained grip torque),
+        not just the control-mode enum: any later gripper command rewrites the
+        enum (e.g. a misheard "close_gripper" while carrying re-enters CLOSING
+        and used to make this report False with the box still clamped), but it
+        cannot rewrite the measured jaw angle / torque.
+        """
         with self._g_lock:
-            return self._g_state == _GS.HOLDING
+            s = self._g_state
+        if s in (_GS.CONTACT, _GS.HOLDING):
+            return True
+        if s in (_GS.OPENING, _GS.HOMING):
+            return False  # actively releasing — never report "holding"
+        # IDLE / CLOSING: gripping iff the jaw is noticeably ajar AND the
+        # motor is exerting sustained clamp torque (a parked-empty jaw shows
+        # ~0 torque regardless of its angle).
+        return self._g_pos < _G_HOLD_MIN_GAP and abs(self._g_torq) >= _G_HOLD_TORQ_MIN
+
+    def gripper_opening_m(self) -> float:
+        """Current jaw opening in metres, estimated from the encoder."""
+        return float(np.clip(self._g_pos / _G_ANGLE_OPEN, 0.0, 1.0) * _G_MAX_DIST_M)
 
     # ── gripper state-machine internals ──────────────────────────────────────
 
@@ -494,16 +524,46 @@ class RebotArm:
                 target = self._g_open_target
                 self._g_open_q_des = max(self._g_open_q_des - _G_OPEN_RATE * dt, target)
                 q = self._g_open_q_des
+                ramp_done = q <= target + 1e-9
             self._g_safe_mit(q, 0.0, _G_KP_MOVE, _G_KD_MOVE)
-            if abs(pos - target) < _G_ARRIVE_TOL:
+            arrived = abs(pos - target) < _G_ARRIVE_TOL
+            stalled = False
+            if ramp_done and not arrived:
+                # The commanded ramp finished but the encoder never got within
+                # tolerance: the jaw is parked against its PHYSICAL open limit
+                # (the -4.9 rad soft-limit target is past what the mechanism
+                # can reach) or against an obstacle. A short sustained stall is
+                # the completion signal — without it the loop pushes at the
+                # torque clamp forever (motor-overheat hazard) and every full
+                # open "fails" despite the jaw being open.
+                with self._g_lock:
+                    if abs(vel) < _G_STALL_VEL:
+                        self._g_open_stall_s += dt
+                    else:
+                        self._g_open_stall_s = 0.0
+                    stalled = self._g_open_stall_s >= _G_OPEN_STALL_S
+            if arrived or stalled:
+                if stalled:
+                    # Park at the achieved position (damping only) so the
+                    # motor stops regulating into the hard stop.
+                    self._g_safe_mit(pos, 0.0, 0.0, _G_KD_MOVE, 0.0)
                 with self._g_lock:
                     self._g_state = _GS.IDLE
+                    self._g_open_stall_s = 0.0
 
         elif s == _GS.CLOSING:
             self._g_safe_mit(0.0, 0.0, 0.0, _G_KD_CLOSE, _G_CLOSE_TORQUE)
             with self._g_lock:
                 ps = self._g_pos_start
-            if abs(pos - ps) >= _G_STARTUP_DIST:
+                self._g_close_elapsed += dt
+                grace_over = self._g_close_elapsed >= _G_CLOSE_GRACE_S
+            # Stall detection normally waits for _G_STARTUP_DIST of travel so
+            # rest-state vel≈0 isn't mistaken for contact. But a jaw that is
+            # ALREADY resting on the object (misheard close while holding)
+            # never travels that far — after a short grace period a stall
+            # counts as contact regardless, otherwise the state machine sits
+            # in CLOSING pushing _G_CLOSE_TORQUE into the object forever.
+            if abs(pos - ps) >= _G_STARTUP_DIST or grace_over:
                 if pos > _G_HARD_STOP_ANGLE:
                     with self._g_lock:
                         self._g_state = _GS.IDLE
@@ -596,31 +656,38 @@ class RebotArm:
 
     # ── gripper public API ──────────────────────────────────────────────────
 
-    def open_gripper(self, distance_m: float = _G_MAX_DIST_M) -> None:
-        """Open the gripper (blocking, up to 3s)."""
+    def open_gripper(self, distance_m: float = _G_MAX_DIST_M) -> bool:
+        """Open the gripper (blocking, up to 3s).
+
+        Returns True when the open COMPLETED — either the encoder reached the
+        target or the jaw stalled at its physical open limit (the control loop
+        treats a sustained post-ramp stall as completion and parks). Returns
+        False only on the timeout backstop (state machine wedged), which
+        force-parks to avoid motor overheat.
+        """
         if self._gripper_mot is None:
-            return
+            return False
         d = float(np.clip(distance_m, 0.0, _G_MAX_DIST_M))
         target = max((d / _G_MAX_DIST_M) * _G_ANGLE_OPEN, _G_OPEN_SOFT_LIMIT)
         with self._g_lock:
-            self._g_open_target = target
-            self._g_open_q_des  = self._g_pos
+            self._g_open_target  = target
+            self._g_open_q_des   = self._g_pos
+            self._g_open_stall_s = 0.0
             self._g_state = _GS.OPENING
         if not self._g_wait_idle(3.0):
-            # Target not reached — the jaw is blocked (e.g. an open command
-            # NARROWER than a held object drives the jaws inward into it).
-            # Without this give-up the state machine stays in OPENING and the
-            # 500Hz loop keeps pushing into the obstacle at the clamped
-            # ~_G_TAU_MAX forever — a motor-overheat hazard. Mirror grasp()'s
-            # timeout: force IDLE, then park at the CURRENT position with
-            # damping only so the motor stops regulating into the obstacle.
+            # Backstop only (the in-loop stall completion should fire first):
+            # force IDLE, then park at the CURRENT position with damping only
+            # so the 500Hz loop stops regulating into whatever blocked it.
             print(
-                "[RebotArm] open_gripper: target not reached within 3s "
-                "(jaw blocked?); giving up and parking at current position"
+                "[RebotArm] open_gripper: state machine did not settle within "
+                f"3s; force-parking at current position (opening≈{self.gripper_opening_m():.3f}m)"
             )
             with self._g_lock:
                 self._g_state = _GS.IDLE
+                self._g_open_stall_s = 0.0
             self._g_safe_mit(self._g_pos, 0.0, 0.0, _G_KD_MOVE, 0.0)
+            return False
+        return True
 
     def close_gripper(self) -> None:
         """Pure-torque close (non-blocking)."""
@@ -628,6 +695,7 @@ class RebotArm:
             return
         with self._g_lock:
             self._g_pos_start = self._g_pos
+            self._g_close_elapsed = 0.0
             self._g_state = _GS.CLOSING
 
     def grasp(self, force: Optional[float] = None, timeout: float = 5.0) -> bool:
@@ -639,6 +707,7 @@ class RebotArm:
                 self._g_target_force = float(np.clip(force, 0.05, _G_TAU_MAX))
         with self._g_lock:
             self._g_pos_start = self._g_pos
+            self._g_close_elapsed = 0.0
             self._g_state = _GS.CLOSING
         t_end = time.monotonic() + timeout
         while time.monotonic() < t_end:
@@ -658,7 +727,8 @@ class RebotArm:
         if self._gripper_mot is None:
             return
         with self._g_lock:
-            self._g_open_q_des = self._g_pos
+            self._g_open_q_des   = self._g_pos
+            self._g_open_stall_s = 0.0
             self._g_state = _GS.OPENING
         self._g_wait_idle(2.0)
         with self._g_lock:
