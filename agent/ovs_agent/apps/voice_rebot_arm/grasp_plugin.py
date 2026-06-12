@@ -243,7 +243,7 @@ class GraspPlugin(Plugin):
             name="grasp_object",
             description=grasp_desc,
             timeout_s=2.0,
-            preamble_text="抓取。",
+            preamble_text="好的，正在抓取。",
             response_mode="parallel",
         )
         async def grasp_object(object_name: str) -> dict:  # noqa: ANN001
@@ -268,7 +268,7 @@ class GraspPlugin(Plugin):
             name="search_object",
             description=search_desc,
             timeout_s=2.0,
-            preamble_text="找找看。",
+            preamble_text="好的，正在寻找。",
             response_mode="parallel",
         )
         async def search_object(object_name: str) -> dict:  # noqa: ANN001
@@ -293,7 +293,7 @@ class GraspPlugin(Plugin):
             name="put_down",
             description=put_down_desc,
             timeout_s=2.0,
-            preamble_text="放回去。",
+            preamble_text="好的，正在放回。",
             response_mode="parallel",
         )
         async def put_down() -> dict:
@@ -621,6 +621,56 @@ class GraspPlugin(Plugin):
                 else:
                     kind = "fail"               # single low
             self._play_done_tone(kind)
+            # Spoken failure reason — the voxedge engine's CLIENT_TEXT path is
+            # a DIRECT text→TTS channel (conversation.py event loop feeds the
+            # session-lifetime tts buffer, no LLM round), so the agent can
+            # announce WHY it failed the moment the motion ends. Success
+            # stays tone-only (operator chose minimal chatter).
+            if kind != "ok" and self._announce_enabled():
+                phrase = self._failure_phrase(kind, res)
+                if phrase:
+                    try:
+                        asyncio.get_running_loop().create_task(
+                            self._announce(phrase), name="grasp-announce"
+                        )
+                    except RuntimeError:
+                        pass
+
+    def _announce_enabled(self) -> bool:
+        v = self.cfg.get("announce_failures", True)
+        return v if isinstance(v, bool) else str(v).strip().lower() not in {"0", "false", "no"}
+
+    @staticmethod
+    def _failure_phrase(kind: str, res: dict) -> str:
+        err = str(res.get("error") or "")
+        target = str(res.get("target") or "目标")
+        if kind == "not_found":
+            return f"没有找到{target}。"
+        if kind == "out_of_range":
+            if "jaw width" in err or "太宽" in err:
+                return "目标太宽，夹不住。"
+            if "too low" in err:
+                return "目标位置太低了。"
+            return "目标超出可达范围，请挪近一点。"
+        if "release failed" in err:
+            return "没有放下来，请检查夹爪。"
+        if "nothing held" in err or "lost during carry" in err:
+            return "没抓住，请再试一次。"
+        if "IK failed" in err:
+            return "这个位置够不到。"
+        return "动作没有成功。"
+
+    async def _announce(self, text: str) -> None:
+        """Direct text→TTS via the SLV CLIENT_TEXT channel (no LLM)."""
+        try:
+            slv = getattr(self.app, "slv", None)
+            if slv is None:
+                return
+            await slv.send_text(text)
+            await slv.flush_tts()
+            logger.info("GraspPlugin: announced %r", text)
+        except Exception:
+            logger.debug("GraspPlugin: announce failed", exc_info=True)
 
     def _play_done_tone(self, kind) -> None:
         """Audible motion-outcome feedback, reason-differentiated so the

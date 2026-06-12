@@ -123,9 +123,11 @@ def register_arm_tools(
             # call the tool" prompt rule; this metadata is the
             # structural workaround.
             _DEFAULT_PREAMBLES = {
-                "wave": "挥手。", "go_home": "回原位。",
-                "open_gripper": "张爪。", "close_gripper": "合爪。",
-                "point_at": "指向。",
+                "wave": "好的，正在挥手。",
+                "go_home": "好的，正在回原位。",
+                "open_gripper": "好的，正在张开夹爪。",
+                "close_gripper": "好的，正在闭合夹爪。",
+                "point_at": "好的，正在指向。",
             }
             preamble = pre_cfg or _DEFAULT_PREAMBLES.get(name, "好的。")
             registry.tool(
