@@ -462,6 +462,20 @@ def _grasp_attempt(
             result["pregrasp_pose"] = [float(v) for v in pre6d]
             gx, gy, gz = (float(v) for v in grasp6d[:3])
             jaw = float(best.jaw_width_m)
+            result["grasp_method"] = getattr(best, "method", "legacy")
+
+            # SIDE grasps need jaw-body clearance above the table: the
+            # fingers wrap a vertical face, so a grasp point lower than
+            # ~45mm presses the jaw into the tabletop. Retriable — a fresh
+            # view may produce a top/таller candidate.
+            if result["grasp_method"] == "side_face" and gz < 0.045:
+                return {
+                    **result,
+                    "stage": "plausibility",
+                    "stage_ms": timings,
+                    "error": f"side grasp too low (z={gz:.3f}m)",
+                    "_retriable": True,
+                }
 
             # Close-up re-observation trigger: far target (side-on view from
             # the home-height camera) or an estimate already wider than the
@@ -568,8 +582,13 @@ def _grasp_attempt(
         if not pregrasp_ok:
             # Orientation ladder first: a far-but-reachable position is often
             # only infeasible because of the camera-derived roll/pitch. Keep
-            # the yaw (jaw↔short-axis alignment), flatten the rest.
-            relaxed = _relax_orientation(arm, pre6d, grasp6d)
+            # the yaw (jaw↔short-axis alignment), flatten the rest. NEVER for
+            # side grasps — their pitch IS the grasp geometry; flattening it
+            # would wipe the face alignment (IK envelope says side-band
+            # poses are 91-100% feasible anyway, so the ladder buys nothing).
+            relaxed = None
+            if result.get("grasp_method") != "side_face":
+                relaxed = _relax_orientation(arm, pre6d, grasp6d)
             if relaxed is not None:
                 pre6d, grasp6d = relaxed
                 result["orientation_relaxed"] = True
@@ -629,7 +648,8 @@ def _grasp_attempt(
         grasp_dur = max(1.0, move_duration * 0.75)
         with _motion_lock(actuator):
             grasp_move_ok = arm.move_to(xg, yg, zg, rxg, ryg, rzg, duration=grasp_dur)
-        if not grasp_move_ok and not result.get("orientation_relaxed"):
+        if (not grasp_move_ok and not result.get("orientation_relaxed")
+                and result.get("grasp_method") != "side_face"):
             # Same ladder if the grasp pose (not the pregrasp) is the
             # infeasible one. The arm is parked at the pregrasp — moving to a
             # flatter-orientation grasp from here is safe.

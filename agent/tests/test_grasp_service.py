@@ -1105,3 +1105,113 @@ def test_reobserve_goes_high_when_top_face_not_visible():
     assert first_move in [(0.33, 0.45), (0.26, 0.0)]
     if first_move == (0.33, 0.45):
         assert res["success"] is True
+
+
+# ── side-face grasp (Phase: side MVP) ───────────────────────────────────────
+def _tall_side_scene():
+    """Synthetic tall object: camera sees ONLY a vertical front face (depth
+    constant, normal toward camera, perpendicular to up). up = -y (camera
+    horizontal). Face is 100px wide × 300px tall at 400mm ≈ 0.067m × 0.2m."""
+    h, w = 480, 640
+    color = np.zeros((h, w, 3), dtype=np.uint8)
+    depth = np.zeros((h, w), dtype=np.uint16)
+    mask = np.zeros((h, w), dtype=np.float32)
+    mask[90:390, 290:390] = 1.0
+    depth[90:390, 290:390] = 400
+    K = np.array([[600, 0, 320], [0, 600, 240], [0, 0, 1]], dtype=np.float32)
+    res = YoloResult(
+        names={0: "banana", 1: "bottle"},
+        boxes=_Boxes([_Box([290, 90, 390, 390], 0, 0.8)]),
+        masks=_Masks(np.stack([mask], axis=0)),
+        orig_shape=(h, w),
+    )
+    return color, depth, K, res
+
+
+def test_side_face_grasp_selected_for_tall_front_face():
+    from ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp import estimate_grasps
+    color, depth, K, res = _tall_side_scene()
+    # up = -y in camera frame: the flat front face (normal -z, toward camera)
+    # is perpendicular to up → side candidate; no top face in view.
+    grasps = [g for g in estimate_grasps([res], depth, K,
+                                         up_hint_cam=np.array([0.0, -1.0, 0.0]))
+              if g.is_valid]
+    assert grasps, "side-face path must produce a candidate"
+    g = grasps[0]
+    assert g.method == "side_face"
+    # horizontal width of the face ≈ 100px at 0.4m ≈ 0.067m (within jaw).
+    assert 0.04 < g.jaw_width_m < 0.085
+    assert g.object_length_m > g.jaw_width_m   # vertical extent is longer
+
+
+def test_side_grasp_too_low_rejected_retriable():
+    color, depth, K, res = _tall_side_scene()
+    cam = FakeCamera(color, depth, K)
+    seg = FakeSegmenter(res)
+
+    class LowTcpArm(FakeArm):
+        """TCP transform puts the side-face grasp point BELOW 45mm."""
+        def get_tcp_pose(self) -> np.ndarray:
+            self.calls.append(("get_tcp_pose",))
+            T = np.eye(4, dtype=np.float64)
+            # rotate camera frame so the face centroid lands at low base z:
+            # base z = -y_cam mapping → centroid y_cam≈0 → z≈0. Identity works:
+            return T
+
+    res_run = run_grasp_once(
+        "banana", arm=LowTcpArm(), segmenter=seg, camera=cam, K=K,
+        T_hand_eye=np.eye(4), warm_up_frames=0, move_duration=0.02,
+        retries=0, reobserve=False, servo_correct=False,
+    )
+    # with identity transforms the synthetic grasp z≈0 → below the 45mm gate
+    if res_run.get("grasp_method") == "side_face":
+        assert res_run["success"] is False
+        assert "too low" in res_run["error"]
+
+
+def test_side_grasp_skips_orientation_ladder():
+    from ovs_agent.apps.voice_rebot_arm import grasp_service as gs
+    color, depth, K, res = _tall_side_scene()
+    cam = FakeCamera(color, depth, K)
+    seg = FakeSegmenter(res)
+
+    calls = {"ladder": 0}
+    orig = gs._relax_orientation
+
+    def _spy(arm, pre, grasp):
+        calls["ladder"] += 1
+        return orig(arm, pre, grasp)
+
+    class SideArm(FakeArm):
+        """Pregrasp move fails once → ladder would be consulted for top
+        grasps; must NOT be for side grasps. TCP lifts the scene so the
+        side z-gate passes."""
+        def __init__(self) -> None:
+            super().__init__()
+            self._fails = 1
+
+        def get_tcp_pose(self) -> np.ndarray:
+            self.calls.append(("get_tcp_pose",))
+            T = np.eye(4, dtype=np.float64)
+            T[2, 3] = 0.15  # raise base z above the 45mm side gate
+            return T
+
+        def move_to(self, x, y, z, roll=0.0, pitch=0.0, yaw=0.0, duration=2.0) -> bool:
+            if self._fails > 0:
+                self._fails -= 1
+                return False
+            return super().move_to(x, y, z, roll, pitch, yaw, duration)
+
+    gs._relax_orientation = _spy
+    try:
+        out = run_grasp_once(
+            "banana", arm=SideArm(), segmenter=seg, camera=cam, K=K,
+            T_hand_eye=np.eye(4), warm_up_frames=0, move_duration=0.02,
+            retries=0, reobserve=False, servo_correct=False,
+        )
+    finally:
+        gs._relax_orientation = orig
+    if out.get("grasp_method") == "side_face":
+        assert calls["ladder"] == 0          # ladder never consulted
+        assert out["success"] is False       # move failed → honest failure
+        assert out["error"] == "pregrasp IK failed"

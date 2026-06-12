@@ -129,7 +129,57 @@ def estimate_grasp(
     # a face-normal approach. Falls back to the legacy estimators whenever
     # the fit is not confident (curved objects, sparse depth, no hint).
     if up_hint_cam is not None:
-        top = _top_face_grasp(mask, depth_mm, K, np.asarray(up_hint_cam, dtype=np.float64))
+        side_cands: list = []
+        top = _top_face_grasp(
+            mask, depth_mm, K, np.asarray(up_hint_cam, dtype=np.float64),
+            side_out=side_cands,
+        )
+        # Arbitration: TOP grasp when the top face is visible AND its width
+        # fits the jaw; otherwise a SIDE grasp on a camera-facing vertical
+        # face whose HORIZONTAL extent fits (tall objects whose top is out of
+        # view / too wide). Each construction keeps the legacy camera-ray
+        # approach (transform sign convention + the measured IK envelope:
+        # pitch 0.2-0.9 is the 93-99% feasible band, pure down-press is not).
+        if top is not None and top[3] > 0.085 and side_cands:
+            top = None  # top face too wide for the jaw — try the side path
+        if top is None and side_cands:
+            best_side = min(
+                (c for c in side_cands if c[3] <= 0.085),
+                key=lambda c: c[3],
+                default=None,
+            )
+            if best_side is not None:
+                c_pos, horiz, _n_cam, h_width, v_len, n_in = best_side
+                approach_s = _normalize(-c_pos)
+                if approach_s is None:
+                    approach_s = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+                grip_s = _normalize(np.cross(horiz, approach_s))
+                open_s = _normalize(np.cross(approach_s, grip_s))
+                if grip_s is not None and open_s is not None:
+                    rotation = np.column_stack([grip_s, open_s, approach_s]).astype(np.float32)
+                    tcp_rotation = grasp_axes_to_rebot_tcp_rotation(
+                        rotation[:, 0], rotation[:, 1], rotation[:, 2]
+                    ).astype(np.float32)
+                    u, v = _project(c_pos, K)
+                    return GraspPose(
+                        class_name=class_name,
+                        conf=conf,
+                        bbox_xyxy=bbox_xyxy,
+                        center_px=(int(round(u)), int(round(v))),
+                        position=c_pos.astype(np.float32),
+                        rotation=rotation,
+                        tcp_rotation=tcp_rotation,
+                        jaw_width_m=float(h_width),
+                        object_length_m=float(v_len),
+                        angle_deg=float(np.degrees(np.arctan2(open_s[1], open_s[0]))),
+                        rect_points=rect_points,
+                        short_edge_points=_line_from_center(
+                            np.array([u, v], dtype=np.float32),
+                            np.array([open_s[0], open_s[1]], dtype=np.float32) * 40.0,
+                        ),
+                        valid_depth_pixels=int(n_in),
+                        method="side_face",
+                    )
         if top is not None:
             position_t, open_axis_t, _face_normal_t, width_t, length_t, n_in = top
             # APPROACH stays the legacy camera-ray (pointing TOWARD the
@@ -449,6 +499,7 @@ def _top_face_grasp(
     plane_thresh_m: float = 0.008,
     min_inliers: int = 120,
     min_up_alignment: float = 0.85,
+    side_out: Optional[list] = None,
 ) -> Optional[tuple]:
     """Fit the object's TOP face and derive the grasp inside it.
 
@@ -545,8 +596,32 @@ def _top_face_grasp(
                 length,
                 int(best_inliers.sum()),
             )
-        # Largest plane was a SIDE face (oblique view) — remove its inliers
-        # and try the next-largest candidate.
+        # Largest plane was a SIDE face (oblique view): remember it as a
+        # SIDE-GRASP candidate (jaw closes across its HORIZONTAL in-plane
+        # axis) before moving on to the next-largest plane. Only faces that
+        # actually FACE the camera are graspable this way.
+        if abs(float(np.dot(normal, up))) <= 0.35:
+            view_dir = -centroid / max(float(np.linalg.norm(centroid)), 1e-9)
+            facing = float(np.dot(normal, view_dir))
+            n_cam = normal if facing >= 0 else -normal
+            if abs(facing) >= 0.3:
+                in_plane2 = (inlier_pts - centroid) - np.outer(
+                    (inlier_pts - centroid) @ n_cam, n_cam
+                )
+                # horizontal in-plane axis = in-plane direction ⊥ up
+                horiz = np.cross(n_cam, up)
+                hn = float(np.linalg.norm(horiz))
+                if hn > 1e-6:
+                    horiz = horiz / hn
+                    h_coord = in_plane2 @ horiz
+                    v_axis = np.cross(n_cam, horiz)
+                    v_coord = in_plane2 @ v_axis
+                    h_width = float(np.percentile(h_coord, 95) - np.percentile(h_coord, 5))
+                    v_len = float(np.percentile(v_coord, 95) - np.percentile(v_coord, 5))
+                    if h_width >= 0.005 and side_out is not None:
+                        side_out.append((centroid, horiz, n_cam, h_width, v_len,
+                                         int(best_inliers.sum())))
+        # remove this plane's inliers and try the next-largest candidate.
         remaining[idx_pool[best_inliers]] = False
     return None
 
