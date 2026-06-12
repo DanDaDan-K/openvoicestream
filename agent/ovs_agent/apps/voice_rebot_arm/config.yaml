@@ -38,15 +38,19 @@ client_vad_drive_eos: false
 # on-chip PROCESSED ASR output (AEC + beamforming): real-machine capture
 # (2026-06-12) showed ch0 carries the speech at peak 0.76 / rms 0.048 while
 # ch1-5 are silent (~0.001) — so ch0 is correct (NOT ch1). Because ch0 is
-# already normalized, makeup_gain MUST stay ~1.0: the old 12.0 multiplied a
+# already normalized, makeup_gain must stay SMALL: the old 12.0 multiplied a
 # 0.76-peak signal to 9× over full-scale → hard clipping/distortion → garbage
-# ASR ("识别率很低"). Gate thresholds are raw-ch0 RMS: open above the ambient
-# floor (~0.005-0.014) so noise does not open the mic, but below speech (~0.05+).
+# ASR ("识别率很低"). But 1.0 proved TOO QUIET for SLV's server-side VAD/ASR
+# (speech rms 0.02-0.06 → every utterance returned an empty asr_final), so
+# 3.0 is the verified middle ground: 0.76 peak × 3 clips rare loud peaks only,
+# normal speech lands at a healthy level. Gate thresholds are raw-ch0 RMS
+# (applied BEFORE makeup_gain): open above the ambient floor (~0.005-0.014)
+# so noise does not open the mic, but below speech (~0.05+).
 energy_gate_enabled: true
 energy_gate_open_rms: 0.020
 energy_gate_close_rms: 0.010
 energy_gate_hangover_ms: 300
-mic_makeup_gain: 1.0
+mic_makeup_gain: 3.0
 gate_drive_eos: true
 gate_eos_min_speech_ms: 250
 # Grace after the gate-close chunk before the explicit asr_eos — preserves WS
