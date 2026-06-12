@@ -311,6 +311,10 @@ class Config:
     # This preserves the LLM as the semantic selector, but prevents unsupported
     # motions such as "点头" from being mapped onto a nearby physical action.
     tool_trigger_guard: bool = False
+    # Tools exempt from the trigger guard — semantic tools whose intent has no
+    # fixed literal trigger vocabulary (e.g. grasp_object maps any spoken object
+    # to a catalog label). Guarding them would wrongly block valid intent.
+    tool_trigger_guard_exempt: list[str] = field(default_factory=lambda: ["grasp_object"])
     # ── Server-loop client mode (#37 Phase 2-product, spec §5/§6) ──
     # When False (default), the agent runs the LLM + tool loop locally
     # (current behaviour, byte-for-byte unchanged). When True, the agent

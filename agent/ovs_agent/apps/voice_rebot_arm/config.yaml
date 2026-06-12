@@ -70,10 +70,20 @@ tools_default_allowlist: []
 tools_max_iterations: 3
 # Block a server-loop tool call whose ASR text contains none of the tool's
 # declared trigger phrases (guards against the LLM firing a motion the user
-# never asked for). Opt-in; env-toggleable. Currently OFF: it was blocking
-# valid semantic grasp intent ("取一下盒子") since grasp_object's literal
-# trigger list didn't carry that phrasing — semantic grasp should trust the LLM.
-tool_trigger_guard: false
+# never asked for). SCOPED: only the fixed-trigger arm motions are guarded;
+# grasp_object (semantic — maps free-form speech to a catalog label) is EXEMPT
+# via tool_trigger_guard_exempt below. ON for demo stability: real-machine bench
+# (2026-06-12) showed the 4B occasionally fires a wrong/spurious motion on
+# off-script input (灰手→close_gripper, 点头→point_at, 转个圈→wave); the guard
+# turns every such case into a safe no-op (arm stays still, user re-states) while
+# all exact supported commands still pass. Trade: paraphrases/ASR-homophones
+# that omit the literal trigger are also blocked (safe no-op), so a demo should
+# use the exact supported command phrasings.
+tool_trigger_guard: true
+# Tools exempt from the trigger guard (semantic tools with no fixed trigger
+# vocabulary). grasp_object maps any spoken object to a catalog label, so its
+# intent legitimately has no literal trigger phrase.
+tool_trigger_guard_exempt: ["grasp_object"]
 
 # System prompt — imperative robotic-arm controller.
 system_prompt: |

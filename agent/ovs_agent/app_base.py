@@ -2035,6 +2035,18 @@ class BaseApp:
     def _server_tool_trigger_guard_error(self, evt: "ServerToolCall", registry) -> str | None:  # noqa: ANN001
         if not bool(getattr(self.config, "tool_trigger_guard", False)):
             return None
+        # Scoped guard: only tools with a fixed literal-trigger vocabulary
+        # (the arm motions) are guarded. Semantic tools — grasp_object maps a
+        # free-form spoken object to a catalog label, so its intent legitimately
+        # has no fixed trigger phrase — are EXEMPT. The exempt set is explicit
+        # (config-overridable) rather than relying on the tool's description
+        # happening to omit a "Triggers:" list, so a later description edit can't
+        # silently re-guard a semantic tool.
+        exempt = getattr(self.config, "tool_trigger_guard_exempt", None)
+        if exempt is None:
+            exempt = ("grasp_object",)
+        if evt.name in set(exempt):
+            return None
         user_text = str(getattr(self, "_last_user_utterance_text", "") or "")
         if not user_text.strip():
             return None
