@@ -607,11 +607,19 @@ def run_search_once(
                 # at this scan pose — the camera is already centered on the box,
                 # which is itself a natural "found it" indication. Never grasps.
                 bx, by, bz = p_base
-                plausible = (0.15 <= bx <= 0.50 and -0.25 <= by <= 0.25 and 0.0 <= bz <= 0.30)
+                # Bounds = HARDWARE-VALIDATED reach, not the old conservative
+                # tuning box: real grasps land at x 0.55-0.62 (2026-06-12
+                # production logs) and search detected the demo box at x=0.574
+                # — an upper bound of 0.50 flagged every real position as
+                # implausible, so search found the box but never pointed.
+                plausible = (0.15 <= bx <= 0.68 and -0.25 <= by <= 0.25 and 0.0 <= bz <= 0.30)
                 result["position_plausible"] = plausible
                 if (indicate and plausible
                         and not (cancel_event is not None and cancel_event.is_set())):
-                    px = min(0.34, max(0.20, bx))
+                    # Pointing gesture pose: x=0.44 is IK-validated on hardware
+                    # (the old 0.34 cap pointed visibly short of far boxes);
+                    # check_ik below still gates the actual move.
+                    px = min(0.44, max(0.20, bx))
                     py = min(0.14, max(-0.14, by))
                     pz = 0.20
                     try:
