@@ -164,6 +164,16 @@ _G_CTRL_RATE       = 500.0
 # it), so holding/open-complete decisions are grounded in encoder + torque:
 _G_HOLD_MIN_GAP    = -0.30   # rad; jaw at least this ajar (~5mm) ⇒ something can be between the fingers
 _G_HOLD_TORQ_MIN   = 0.12    # N·m sustained grip torque ⇒ physically clamping an object
+# After an INTENTIONAL open, "holding" additionally requires the jaw to have
+# stopped at least this far (rad) short of the commanded open target — i.e. an
+# object physically blocked it. The soft-limit shortfall at full open is
+# ~0.26 rad (0.0853m measured vs 0.09m commanded) WITH residual limit torque,
+# which used to false-positive the release verification ("release failed —
+# jaw still gripping after full open" on a 0.057m object, real machine
+# 2026-06-12). NOTE the physical blind spot: an object ≥~0.082m wide is
+# indistinguishable from the soft limit by gap — release verification is only
+# trustworthy for objects ≤~0.078m (use a ≤75mm demo box).
+_G_OPEN_BLOCKED_RAD = 0.35
 _G_OPEN_STALL_S    = 0.20    # s stalled after the open ramp finished ⇒ jaw at its physical open limit
 _G_CLOSE_GRACE_S   = 0.40    # s in CLOSING after which stall ⇒ contact even with no start-up travel
                              # (jaw already resting on the object moves < _G_STARTUP_DIST)
@@ -306,6 +316,11 @@ class RebotArm:
         self._g_contact_elapsed  = 0.0
         self._g_open_q_des       = _G_OPEN_SOFT_LIMIT
         self._g_open_target      = _G_OPEN_SOFT_LIMIT
+        # Set after an intentional open completes/gives up; cleared by any
+        # close/grasp. Lets gripper_is_holding distinguish "parked at the
+        # commanded open (soft-limit shortfall + residual torque)" from
+        # "an object blocked the open" — see _G_OPEN_BLOCKED_RAD.
+        self._g_open_last_target: "float | None" = None
         self._g_open_stall_s     = 0.0
         self._g_close_elapsed    = 0.0
         self._g_target_force     = _G_DEFAULT_FORCE
@@ -481,7 +496,19 @@ class RebotArm:
         # IDLE / CLOSING: gripping iff the jaw is noticeably ajar AND the
         # motor is exerting sustained clamp torque (a parked-empty jaw shows
         # ~0 torque regardless of its angle).
-        return self._g_pos < _G_HOLD_MIN_GAP and abs(self._g_torq) >= _G_HOLD_TORQ_MIN
+        ajar = self._g_pos < _G_HOLD_MIN_GAP
+        torq = abs(self._g_torq) >= _G_HOLD_TORQ_MIN
+        last_open = getattr(self, "_g_open_last_target", None)
+        if last_open is not None:
+            # After an INTENTIONAL open: only report holding when the jaw
+            # stopped well SHORT of the commanded target (an object blocked
+            # it). Parking at/near the target — including the ~0.26 rad
+            # soft-limit shortfall at full open, with its residual limit
+            # torque — is a successful release, not a grip (this exact case
+            # false-positived the put_down release verification).
+            blocked = (self._g_pos - last_open) >= _G_OPEN_BLOCKED_RAD
+            return ajar and torq and blocked
+        return ajar and torq
 
     def gripper_opening_m(self) -> float:
         """Current jaw opening in metres, estimated from the encoder."""
@@ -674,6 +701,8 @@ class RebotArm:
             self._g_open_q_des   = self._g_pos
             self._g_open_stall_s = 0.0
             self._g_state = _GS.OPENING
+        with self._g_lock:
+            self._g_open_last_target = target
         if not self._g_wait_idle(3.0):
             # Backstop only (the in-loop stall completion should fire first):
             # force IDLE, then park at the CURRENT position with damping only
@@ -694,33 +723,101 @@ class RebotArm:
         if self._gripper_mot is None:
             return
         with self._g_lock:
+            self._g_open_last_target = None
             self._g_pos_start = self._g_pos
             self._g_close_elapsed = 0.0
             self._g_state = _GS.CLOSING
 
-    def grasp(self, force: Optional[float] = None, timeout: float = 5.0) -> bool:
-        """Compliant grasp: close → contact detect → force-hold (blocking)."""
+    def grasp(
+        self,
+        force: Optional[float] = None,
+        timeout: float = 5.0,
+        *,
+        adaptive: bool = False,
+        adaptive_start: float = 0.2,
+        adaptive_step: float = 0.1,
+        adaptive_window_s: float = 0.3,
+        adaptive_creep_rad: float = 0.04,
+    ) -> bool:
+        """Compliant grasp: close → contact detect → force-hold (blocking).
+
+        adaptive=False (default): hold at ``force`` — byte-equivalent to the
+        historical behaviour. Used for objects whose grip force is configured
+        per class (grasp_force_by_class).
+
+        adaptive=True: ``force`` becomes the CEILING. Start holding at
+        ``adaptive_start`` and watch the encoder for ``adaptive_window_s``:
+        if the gap is still creeping shut by more than ``adaptive_creep_rad``
+        (a soft object compressing / not yet stable), bump the hold force by
+        ``adaptive_step`` and re-anchor the hold angle at the current
+        position, until the gap is stable or the ceiling is reached. A rigid
+        box stabilises in the first window (one ~0.3s check); soft fruit
+        settles at the lowest force that actually holds it instead of being
+        crushed at the ceiling. PHYSICAL LIMIT: the encoder only sees the
+        GAP — an object sliding ALONG the jaws is invisible here; the grasp
+        pipeline's post-carry holding re-check + retry covers that.
+        """
         if self._gripper_mot is None:
             return False
-        if force is not None:
+        cap = float(np.clip(
+            force if force is not None else self._g_target_force,
+            0.05, _G_TAU_MAX,
+        ))
+        initial = float(np.clip(adaptive_start, 0.05, cap)) if adaptive else cap
+        if force is not None or adaptive:
             with self._g_lock:
-                self._g_target_force = float(np.clip(force, 0.05, _G_TAU_MAX))
+                self._g_target_force = initial
         with self._g_lock:
+            self._g_open_last_target = None
             self._g_pos_start = self._g_pos
             self._g_close_elapsed = 0.0
             self._g_state = _GS.CLOSING
         t_end = time.monotonic() + timeout
+        holding = False
         while time.monotonic() < t_end:
             with self._g_lock:
                 s = self._g_state
             if s == _GS.HOLDING:
-                return True
+                holding = True
+                break
             if s == _GS.IDLE:
                 return False
             time.sleep(0.01)
-        with self._g_lock:
-            self._g_state = _GS.IDLE
-        return False
+        if not holding:
+            with self._g_lock:
+                self._g_state = _GS.IDLE
+            return False
+        if not adaptive:
+            return True
+
+        # ── adaptive ramp (HOLDING reached at `initial`) ──────────────────
+        tf = initial
+        while time.monotonic() < t_end and tf < cap:
+            p0 = self._g_pos
+            t_w = time.monotonic() + max(0.05, float(adaptive_window_s))
+            while time.monotonic() < t_w:
+                time.sleep(0.02)
+            with self._g_lock:
+                still_holding = self._g_state == _GS.HOLDING
+            if not still_holding:
+                break  # released / re-commanded mid-ramp — stop adjusting
+            # Closing direction is pos → 0 (less negative): creep means the
+            # gap is still shrinking under the current force.
+            if (self._g_pos - p0) < float(adaptive_creep_rad):
+                break  # stable — this force is enough
+            tf = float(min(cap, tf + float(adaptive_step)))
+            with self._g_lock:
+                self._g_target_force = tf
+                # Re-anchor the position hold at the compressed angle so the
+                # spring term stops fighting the deeper grip.
+                self._g_q_contact = self._g_pos
+        logger_force = tf
+        try:
+            print(f"[RebotArm] adaptive grasp settled at {logger_force:.2f} N·m "
+                  f"(cap {cap:.2f})")
+        except Exception:
+            pass
+        return True
 
     def release_gripper(self, timeout: float = 4.0) -> None:
         """Open the gripper and home it (blocking)."""
