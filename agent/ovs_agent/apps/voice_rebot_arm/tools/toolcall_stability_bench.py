@@ -153,6 +153,53 @@ MATRIX = [
 ]
 
 
+# ── HARD matrix: demo-realistic robustness. Each entry is
+#    (utterance, expected_tool_or_None, expected_arg_substr, category).
+# expected_tool=None → no motion tool should fire (chit-chat / unsupported).
+# For ASR-homophone / truncation rows the "expected" is the demo-desired
+# recovery; failures are later split into DANGEROUS (a different motion fired)
+# vs SAFE (no tool → presenter just repeats).
+MOTION_TOOLS = {"wave", "go_home", "open_gripper", "close_gripper", "point_at", "grasp_object"}
+HARD_MATRIX = [
+    # colloquial / indirect phrasings that still embed the trigger word
+    ("帮我挥个手", "wave", None, "colloquial"),
+    ("挥一挥手", "wave", None, "colloquial"),
+    ("胳膊回到原位", "go_home", None, "colloquial"),
+    ("请把夹爪张开", "open_gripper", None, "colloquial"),
+    ("把夹爪闭合一下", "close_gripper", None, "colloquial"),
+    ("帮我把盒子拿起来", "grasp_object", "box", "colloquial"),
+    # polite / distractor wrappers around the literal trigger
+    ("那个，麻烦你挥手好吗", "wave", None, "wrapper"),
+    ("现在请回到原位吧", "go_home", None, "wrapper"),
+    ("嗯…你帮我把夹爪松开", "open_gripper", None, "wrapper"),
+    # ASR homophone / near-homophone errors (what STT may actually emit)
+    ("灰手", "wave", None, "asr_homophone"),
+    ("挥首", "wave", None, "asr_homophone"),
+    ("回到原味", "go_home", None, "asr_homophone"),
+    ("张开夹抓", "open_gripper", None, "asr_homophone"),
+    ("必合夹爪", "close_gripper", None, "asr_homophone"),
+    ("加紧", "close_gripper", None, "asr_homophone"),
+    ("抓河子", "grasp_object", "box", "asr_homophone"),
+    # truncated / partial (ASR cut the tail)
+    ("张开", "open_gripper", None, "truncated"),
+    ("回原位", "go_home", None, "truncated"),
+    ("挥", "wave", None, "truncated"),
+    # English / mixed
+    ("wave", "wave", None, "english"),
+    ("go home please", "go_home", None, "english"),
+    ("grab the box", "grasp_object", "box", "english"),
+    # intent collisions (抓住 is a close_gripper trigger, but a box is named)
+    ("抓住盒子", "grasp_object", "box", "collision"),
+    ("夹住这个盒子", "grasp_object", "box", "collision"),
+    # traps — must NOT fire a motion tool
+    ("点头", None, None, "trap_unsupported"),
+    ("转个圈", None, None, "trap_unsupported"),
+    ("你叫什么名字", None, None, "trap_chitchat"),
+    ("给我讲个笑话", None, None, "trap_chitchat"),
+    ("挥手用英语怎么说", None, None, "trap_meta"),
+]
+
+
 def call_llm(base_url: str, model: str, text: str, timeout: float = 30.0) -> dict:
     """One production-shaped chat/completions call; return parsed result."""
     body = {
@@ -202,13 +249,82 @@ def score(exp_tool, exp_arg, got_tool, got_arg) -> bool:
     return True
 
 
+def run_hard(args) -> int:
+    """Demo-realistic robustness matrix with failure classified by demo impact."""
+    print(f"=== HARD robustness bench :: model={args.model} base={args.base_url} repeats={args.repeats} ===\n")
+    by_cat = defaultdict(lambda: [0, 0])
+    dangerous = []   # a motion command/trap → a DIFFERENT motion tool fired (arm moves wrong)
+    safe_miss = []   # a motion command → no tool (arm doesn't move; presenter repeats)
+    spurious = []    # a trap (no-tool expected) → a motion tool fired (arm moves unexpectedly)
+    nondet = []
+    ok_total = tot = 0
+    for (text, exp_tool, exp_arg, cat) in HARD_MATRIX:
+        seen_tools = set()
+        row_ok = 0
+        last = None
+        for _ in range(args.repeats):
+            try:
+                r = call_llm(args.base_url, args.model, text)
+            except Exception as e:
+                r = {"tool": "ERROR:" + type(e).__name__, "arg": str(e)[:60], "text": "", "latency_s": 0}
+            last = r
+            seen_tools.add(r["tool"])
+            tot += 1
+            if score(exp_tool, exp_arg, r["tool"], r["arg"]):
+                row_ok += 1
+                ok_total += 1
+        by_cat[cat][0] += row_ok
+        by_cat[cat][1] += args.repeats
+        if len(seen_tools) > 1:
+            nondet.append((text, exp_tool, sorted(map(str, seen_tools))))
+        # classify the row by its modal (last) outcome for demo-impact triage
+        got = last["tool"] if last else None
+        if exp_tool is None:  # trap
+            if got in MOTION_TOOLS:
+                spurious.append((cat, text, got))
+        else:  # motion command expected
+            if got != exp_tool:
+                if got in MOTION_TOOLS:
+                    dangerous.append((cat, text, exp_tool, got))
+                else:  # None / chit-chat reply / error
+                    safe_miss.append((cat, text, exp_tool, got))
+
+    print("── accuracy by category ──")
+    for c in sorted(by_cat):
+        p, t = by_cat[c]
+        print(f"  {c:18s} {p}/{t}  ({100*p//max(t,1)}%)")
+    print(f"\nOVERALL HARD: {ok_total}/{tot} ({100*ok_total//max(tot,1)}%)")
+
+    print("\n── DEMO-IMPACT TRIAGE ──")
+    print(f"  ⛔ DANGEROUS (command → WRONG motion fired, arm moves wrong): {len(dangerous)}")
+    for cat, text, exp, got in dangerous:
+        print(f"       [{cat}] {text!r}: expected {exp} → fired {got}")
+    print(f"  ⚠️  SPURIOUS (trap → motion fired, arm moves unexpectedly): {len(spurious)}")
+    for cat, text, got in spurious:
+        print(f"       [{cat}] {text!r}: fired {got} (should be no-tool)")
+    print(f"  ✅ SAFE-MISS (command → no tool, arm still, presenter repeats): {len(safe_miss)}")
+    for cat, text, exp, got in safe_miss:
+        print(f"       [{cat}] {text!r}: expected {exp} → {got}")
+    if nondet:
+        print(f"\n  non-deterministic rows ({len(nondet)}):")
+        for text, exp, seen in nondet:
+            print(f"     {text!r} (exp {exp}): {seen}")
+    else:
+        print("\n  ✓ deterministic across all repeats")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base-url", default="http://edge-llm:8000/v1")
     ap.add_argument("--model", default="Qwen/Qwen3-4B-AWQ")
     ap.add_argument("--repeats", type=int, default=5, help="repeats per utterance (determinism)")
     ap.add_argument("--sequence", type=int, default=60, help="length of the long mixed-sequential drift run")
+    ap.add_argument("--hard", action="store_true", help="run the demo-realistic HARD robustness matrix instead")
     args = ap.parse_args()
+
+    if args.hard:
+        return run_hard(args)
 
     print(f"=== tool-call stability bench :: model={args.model} base={args.base_url} ===")
     print(f"system_prompt_len={len(SYSTEM_PROMPT)} tools={len(TOOLS)} matrix={len(MATRIX)} repeats={args.repeats}\n")
