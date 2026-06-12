@@ -42,33 +42,67 @@ import urllib.request
 from collections import defaultdict
 
 
-# ── production system prompt (voice_rebot_arm/config.yaml) ──────────────
+# ── production system prompt (voice_rebot_arm/config.yaml, v5 2026-06-12) ──
 SYSTEM_PROMPT = (
-    "You are a voice controller for a reBot B601-DM robotic arm.\n"
-    "The user speaks commands aloud and you reply via TTS.\n\n"
-    "Behaviour:\n"
-    "- When the user clearly requests a motion, FIRST emit a brief\n"
-    "  spoken acknowledgement, THEN call the matching tool function.\n"
+    'You are a voice controller for a reBot B601-DM robotic arm.\n'
+    'The user speaks commands aloud and you reply via TTS.\n'
+    '\n'
+    'Behaviour:\n'
+    '- When the user clearly requests a motion, FIRST emit a brief\n'
+    '  spoken acknowledgement, THEN call the matching tool function.\n'
     "  The acknowledgement is ONE OR TWO words in the user's language\n"
-    "  (\"好的，\" / \"OK,\" / \"Sure,\") and gets spoken immediately while\n"
-    "  the robot executes the motion. Examples:\n"
-    "    User: \"挥手\"       → Emit \"好的\" → call wave()\n"
-    "    User: \"回到原位\"   → Emit \"好的\" → call go_home()\n"
-    "    User: \"张开夹爪\"   → Emit \"好的\" → call open_gripper()\n"
-    "  AFTER the tool returns, emit a short confirmation (\"已挥手\" /\n"
-    "  \"Done\" / \"已回到原位\"), 1 short sentence max.\n"
-    "- To pick the right tool, read each tool's description and match the\n"
-    "  user's exact phrase against the trigger words listed there. Chinese\n"
-    "  triggers are LITERAL: '挥手' MUST call wave; '张开夹爪' MUST call\n"
-    "  open_gripper; '闭合夹爪' MUST call close_gripper; '回到原位' MUST\n"
-    "  call go_home; '指向' MUST call point_at. Never substitute a\n"
-    "  semantically-similar tool — if no description literally contains the\n"
-    "  user's phrase, reply that you don't have that action.\n"
-    "- HARD RULE — only call a tool when the user's text contains the\n"
-    "  EXACT trigger phrase listed in that tool's description. If the\n"
-    "  phrase is not literally present, DO NOT call any tool — reply\n"
-    "  \"没听清，请再说一次。\" / \"Sorry, I didn't catch that.\" instead.\n\n"
-    "/no_think"
+    '  ("好的，" / "OK," / "Sure,") and gets spoken immediately while\n'
+    '  the robot executes the motion. Examples:\n'
+    '    User: "挥手"       → Emit "好的" → call wave()\n'
+    '    User: "回到原位"   → Emit "好的" → call go_home()\n'
+    '    User: "回家"       → Emit "好的" → call go_home()\n'
+    '       (the arm returning to its home pose — a command, not chit-chat)\n'
+    '    User: "张开夹爪"   → Emit "好的" → call open_gripper()\n'
+    '    User: "灰手"       → Emit "好的" → call wave()\n'
+    "       (ASR misheard '挥手'; clearly a command, so recover it)\n"
+    '    User: "把盒子放回去" → Emit "好的" → call put_down()\n'
+    '       (putting DOWN the held object — even though an object is named,\n'
+    '        this is put_down, NOT a new grasp)\n'
+    '  AFTER the tool returns, emit a short confirmation ("已挥手" /\n'
+    '  "Done" / "已回到原位"), 1 short sentence max.\n'
+    "- To pick the right tool, match the user's INTENT against the trigger\n"
+    "  words in each tool's description. Trigger examples (not exhaustive):\n"
+    "    '挥手' / '挥挥手' / '打招呼' → wave\n"
+    "    '回到原位' / '回家' / '归位' / '复位' / 'home' / 'reset' → go_home\n"
+    "    '张开夹爪' / '松开' / '打开夹爪' → open_gripper\n"
+    "    '闭合夹爪' / '夹紧' / '合上夹爪' → close_gripper\n"
+    "    '指向' / '指一下' → point_at\n"
+    "    '抓/拿起/夹住 + 物体名' → grasp_object\n"
+    "    '找/搜索 + 物体名' → search_object\n"
+    "    '放下' / '放回去' → put_down\n"
+    '  Never substitute a semantically-similar tool for a different action\n'
+    '  the user named — if the user names an action no tool supports, reply\n'
+    "  that you don't have that action.\n"
+    "- If the user names an OBJECT to grab/pick/hold ('夹住这个盒子',\n"
+    "  '把箱子拿起来', 'grab the box'), that is grasp_object — the\n"
+    '  camera-guided pick. close_gripper is ONLY for closing the empty\n'
+    '  gripper when NO object is named. EXCEPTION: putting an object DOWN\n'
+    "  ('把盒子放回去', '放下盒子', 'put the box back/down') is put_down\n"
+    '  even when the object is named — the verb decides, not the noun.\n'
+    "- Commands often come wrapped in politeness or filler ('那个，麻烦你\n"
+    "  挥手好吗', '请', '帮我', '一下', '好吗'). Strip the wrapping — the\n"
+    '  command inside still counts and the tool MUST be called.\n'
+    '- The text comes from speech recognition and may contain NEAR-HOMOPHONE\n'
+    "  mishearings of a trigger (e.g. '灰手'/'挥首' for '挥手', '必合夹爪'\n"
+    "  for '闭合夹爪', '加紧' for '夹紧'). If the text is clearly a COMMAND\n"
+    '  and sounds like a trigger, treat it as that trigger and call that\n'
+    '  tool.\n'
+    '- NOT every sentence containing a trigger word is a command. Questions\n'
+    '  or talk ABOUT a command — asking how to say it in another language\n'
+    "  ('挥手用英语怎么说'), what it means, how it is spelled — are NOT\n"
+    '  requests to move. Answer in words and call NO tool.\n'
+    '- If the text is neither a clear command nor a close mishearing of one\n'
+    '  (chit-chat, unrelated questions), DO NOT call any tool — just reply\n'
+    '  normally. If it sounds like a garbled command you cannot map to\n'
+    '  exactly ONE trigger, reply "没听清，请再说一次。" / "Sorry, I didn\'t\n'
+    '  catch that."\n'
+    '\n'
+    '/no_think'
 )
 
 
@@ -108,6 +142,12 @@ TOOLS = [
         "properties": {"object_name": {"type": "string", "description": "Catalog label of the object to grasp."}},
         "required": ["object_name"],
     }),
+    _fn("search_object", "Search for / locate an object by sweeping the camera around when the user asks to FIND or LOOK FOR something but not (yet) pick it up ('找一下','找找','搜索','看看有没有','find','look for','search for'). The arm scans several viewpoints, stops when it sees the object and points at it WITHOUT grasping. object_name MUST be exactly one of these catalog labels: ['box', 'cardboard box', 'carton', 'package'].", {
+        "type": "object",
+        "properties": {"object_name": {"type": "string", "description": "Catalog label of the object to find."}},
+        "required": ["object_name"],
+    }),
+    _fn("put_down", "Put down / place / release the object currently held by the gripper. The arm sets it back down at the spot it was picked up from (so the camera can find it again), opens the gripper, and returns home. Use this whenever the user wants the held object put down or returned, EVEN IF they name the object. Triggers: '放下', '放下来', '放回去', '把盒子放回去', '放下盒子', '放回原处', '放到桌上', '把它放下', 'put it down', 'put down', 'put the box back', 'place it', 'set it down', 'drop it', 'release it'."),
     _fn("time_now", "Return the current local time as ISO 8601."),
     _fn("set_mode", "Switch the agent to a different mode.", {
         "type": "object",
@@ -143,6 +183,16 @@ MATRIX = [
     ("指一下", "point_at", None),
     # grasp_object (vision grasp) — note the 抓住/抓 trigger collision with close_gripper
     ("抓盒子", "grasp_object", "box"),
+    # put_down — the held-object return path; MUST win over grasp_object even
+    # when the object is named (real-machine miss 2026-06-12: '把盒子放回去'
+    # fired NO tool under v5).
+    ("放下盒子", "put_down", None),
+    ("把盒子放回去", "put_down", None),
+    ("放回去", "put_down", None),
+    ("put the box back", "put_down", None),
+    # search_object
+    ("找一下盒子", "search_object", "box"),
+    ("看看有没有盒子", "search_object", "box"),
     ("把盒子抓起来", "grasp_object", "box"),
     ("夹起盒子", "grasp_object", "box"),
     ("抓取盒子", "grasp_object", "box"),
@@ -410,7 +460,19 @@ def main() -> int:
     ap.add_argument("--sequence", type=int, default=60, help="length of the long mixed-sequential drift run")
     ap.add_argument("--hard", action="store_true", help="run the demo-realistic HARD robustness matrix instead")
     ap.add_argument("--guard", action="store_true", help="also report the scoped trigger-guard net effect (hard mode)")
+    ap.add_argument(
+        "--system-prompt-file",
+        help="override the baked-in production system prompt (A/B prompt "
+        "engineering: validate a candidate prompt here BEFORE editing the "
+        "app config)",
+    )
     args = ap.parse_args()
+
+    if args.system_prompt_file:
+        global SYSTEM_PROMPT
+        with open(args.system_prompt_file, encoding="utf-8") as fh:
+            SYSTEM_PROMPT = fh.read().strip()
+        print(f"[system prompt overridden from {args.system_prompt_file}]")
 
     if args.hard:
         return run_hard(args)
