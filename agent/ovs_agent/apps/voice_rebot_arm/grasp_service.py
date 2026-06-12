@@ -609,8 +609,33 @@ def _grasp_attempt(
             # object may sit differently in the next frame).
             return {**result, "stage": stage, "stage_ms": timings,
                     "error": "pregrasp IK failed", "_retriable": True}
-        if not _wait_motion_cancellable(arm, move_duration, cancel_event):
-            _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
+        # Overlap the servo-correction CAPTURE with the settle tail: the last
+        # ~0.4s of the pregrasp move is damping/settle — the camera is already
+        # essentially on target, so the frame grabbed there is sharp enough
+        # for the bounded ≤3cm correction and the capture+inference cost
+        # disappears into the wait (-0.4..1s per grasp).
+        servo_pre = {}
+        if servo_correct:
+            head = max(0.0, float(move_duration) - 0.4)
+            if not _wait_motion_cancellable(arm, head, cancel_event):
+                _check_cancel(cancel_event, arm, safe_open_m)
+            cap_box: dict = {}
+
+            def _bg_capture() -> None:
+                try:
+                    cap_box["out"] = _capture_and_detect()
+                except Exception:
+                    logger.debug("overlapped servo capture failed", exc_info=True)
+
+            t_cap = threading.Thread(target=_bg_capture, daemon=True)
+            t_cap.start()
+            if not _wait_motion_cancellable(arm, 0.4, cancel_event):
+                _check_cancel(cancel_event, arm, safe_open_m)
+            t_cap.join(timeout=3.0)
+            servo_pre = cap_box
+        else:
+            if not _wait_motion_cancellable(arm, move_duration, cancel_event):
+                _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
 
         # Servo-lite correction (Phase 2): from the pregrasp the camera looks
         # straight at the target — one quick re-detection measures the drift
@@ -620,7 +645,7 @@ def _grasp_attempt(
         if servo_correct:
             _mark("servo")
             _check_cancel(cancel_event, arm, safe_open_m)
-            b3, _K3, _nd3 = _capture_and_detect()
+            b3, _K3, _nd3 = servo_pre.get("out") or _capture_and_detect()
             if b3 is not None and b3.position is not None:
                 try:
                     with _motion_lock(actuator):
@@ -897,9 +922,20 @@ def run_put_down_once(
                     "error": "release failed — jaw still gripping after full open"}
         result["placed_at"] = place6[:3]
 
-        # ── 4. retreat back up (jaw open; IK failure tolerated) ─────────
+        # ── 4. retreat: straight UP first, then back through the approach
+        # pose. Retreating directly along the (often shallow) approach used
+        # to brush tall objects and tip them over (real machine: round-1
+        # put_down knocked the standing box flat). +6cm vertical clears the
+        # object before any lateral motion; IK failure on the hop is
+        # tolerated (fall through to the approach retreat).
         stage = "retreat"
         _check_cancel(cancel_event, arm, safe_open_m)
+        hop = [place6[0], place6[1], place6[2] + 0.06, *place6[3:]]
+        with _motion_lock(actuator):
+            hop_ok = arm.move_to(*hop, duration=max(0.8, move_duration * 0.5))
+        if hop_ok:
+            if not _wait_motion_cancellable(arm, max(0.8, move_duration * 0.5), cancel_event):
+                _check_cancel(cancel_event, arm, safe_open_m)
         with _motion_lock(actuator):
             retreat_ok = arm.move_to(*approach6, duration=move_duration)
         if retreat_ok:

@@ -311,6 +311,11 @@ class Config:
     # This preserves the LLM as the semantic selector, but prevents unsupported
     # motions such as "点头" from being mapped onto a nearby physical action.
     tool_trigger_guard: bool = False
+    # Monitor-only variant: evaluate the trigger guard on every server tool
+    # call but NEVER block — emit a WARNING when it WOULD have flagged the
+    # call. Gives "suspected wrong-tool" telemetry without the false-block
+    # risk that got the blocking guard disabled (ASR mishears).
+    tool_trigger_guard_log_only: bool = False
     # Tools exempt from the trigger guard — semantic tools whose intent has no
     # fixed literal trigger vocabulary (e.g. grasp_object maps any spoken object
     # to a catalog label). Guarding them would wrongly block valid intent.

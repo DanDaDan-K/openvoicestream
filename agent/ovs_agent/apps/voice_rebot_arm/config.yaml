@@ -93,13 +93,22 @@ tools_max_iterations: 3
 # the rare off-script wrong-motion it prevents. Keep OFF; trust the LLM. The
 # exempt list is retained so the guard can be re-enabled later if ASR improves.
 tool_trigger_guard: false
+# Monitor-only telemetry: log a WARNING whenever the literal-trigger check
+# WOULD have flagged a tool call (suspected wrong-tool / ASR mishear) without
+# blocking anything. grep "trigger-guard MONITOR" after a demo for the count.
+tool_trigger_guard_log_only: true
 # Tools exempt from the trigger guard (semantic tools with no fixed trigger
 # vocabulary). grasp_object maps any spoken object to a catalog label, so its
 # intent legitimately has no literal trigger phrase. put_down is grasp-coupled:
 # blocking it would strand a held object, so it is exempt too.
 tool_trigger_guard_exempt: ["grasp_object", "search_object", "put_down"]
 
-# System prompt — imperative robotic-arm controller. v5 (2026-06-12),
+# System prompt — imperative robotic-arm controller. v7 (2026-06-12):
+# v8: motion tool calls are SILENT on the model side — the tool preamble
+# plays the "好的" ack instantly and the completion tone closes the loop;
+# model text (pre-call ack AND post-call confirmation) only duplicated
+# audio or added round-2 LLM+TTS latency. Model speaks only when NOT
+# calling a tool. Earlier notes:
 # bench-validated against Qwen3.5-4B GDN+MTP: main matrix 69/69 (回家 needed
 # the overlay no-args bare-call parser fix), HARD robustness 105/105 with
 # 0 dangerous / 0 spurious motions. Design notes vs the old v1 prompt:
@@ -116,23 +125,26 @@ system_prompt: |
   The user speaks commands aloud and you reply via TTS.
 
   Behaviour:
-  - When the user clearly requests a motion, FIRST emit a brief
-    spoken acknowledgement, THEN call the matching tool function.
-    The acknowledgement is ONE OR TWO words in the user's language
-    ("好的，" / "OK," / "Sure,") and gets spoken immediately while
-    the robot executes the motion. Examples:
-      User: "挥手"       → Emit "好的" → call wave()
-      User: "回到原位"   → Emit "好的" → call go_home()
-      User: "回家"       → Emit "好的" → call go_home()
+  - When the user clearly requests a motion, call the matching tool
+    DIRECTLY — do NOT write any text before or alongside the call. The
+    system already plays a spoken acknowledgement the moment the tool
+    starts, so any text you add would be spoken ON TOP of it ("好的"
+    twice). Examples:
+      User: "挥手"       → call wave()
+      User: "回到原位"   → call go_home()
+      User: "回家"       → call go_home()
          (the arm returning to its home pose — a command, not chit-chat)
-      User: "张开夹爪"   → Emit "好的" → call open_gripper()
-      User: "灰手"       → Emit "好的" → call wave()
+      User: "张开夹爪"   → call open_gripper()
+      User: "灰手"       → call wave()
          (ASR misheard '挥手'; clearly a command, so recover it)
-      User: "把盒子放回去" → Emit "好的" → call put_down()
+      User: "把盒子放回去" → call put_down()
          (putting DOWN the held object — even though an object is named,
           this is put_down, NOT a new grasp)
-    AFTER the tool returns, emit a short confirmation ("已挥手" /
-    "Done" / "已回到原位"), 1 short sentence max.
+    AFTER a motion tool returns, do NOT speak either — reply with an
+    EMPTY message (no words at all). The system plays a completion tone
+    when the motion finishes; any text you add only delays the next
+    command. You only speak words when NO tool is called (questions,
+    chit-chat, refusals).
   - To pick the right tool, match the user's INTENT against the trigger
     words in each tool's description. Trigger examples (not exhaustive):
       '挥手' / '挥挥手' / '打招呼' → wave
@@ -144,8 +156,10 @@ system_prompt: |
       '找/搜索 + 物体名' → search_object
       '放下' / '放回去' → put_down
     Never substitute a semantically-similar tool for a different action
-    the user named — if the user names an action no tool supports, reply
-    that you don't have that action.
+    the user named — if the user names an action no tool supports ('点头',
+    '转圈', '跳舞', 'nod', 'spin'), call NO tool and reply that you don't
+    have that action. Example:
+      User: "点头"       → (no tool) "我不会点头这个动作。"
   - If the user names an OBJECT to grab/pick/hold ('夹住这个盒子',
     '把箱子拿起来', 'grab the box'), that is grasp_object — the
     camera-guided pick. close_gripper is ONLY for closing the empty
@@ -281,10 +295,14 @@ metadata:
     # (no grasp). All poses sit inside the IK-validated workspace box
     # (x∈[0.20,0.34], y∈[-0.14,0.14], z∈[0.12,0.34], |rpy|≤0.5). Tune on the real
     # arm so the views overlap and cover the tabletop. First pose = home-ish.
+    # Raised + pitched-down observation poses (pitch 0.30 sits in the
+    # measured 99%-feasible IK band): a tall box's TOP face is visible from
+    # the FIRST look, so the high-tilt re-observation pass rarely triggers
+    # (-3s in those cases). z 0.30 also widens the visible tabletop.
     scan_poses:
-      - [0.27, 0.00, 0.26, 0.0, 0.0, 0.0]
-      - [0.25, 0.10, 0.26, 0.0, 0.0, 0.35]
-      - [0.25, -0.10, 0.26, 0.0, 0.0, -0.35]
+      - [0.27, 0.00, 0.30, 0.0, 0.30, 0.0]
+      - [0.25, 0.10, 0.30, 0.0, 0.30, 0.35]
+      - [0.25, -0.10, 0.30, 0.0, 0.30, -0.35]
     # Completion tone: a short local beep when grasp/search/put_down FINISHES
     # (high pitch = success, low = failure), so the user knows the arm is done
     # and ready for the next command — the spoken "好的" happens at START
@@ -327,6 +345,10 @@ metadata:
     # a fuller-contact grip; raise further with care (TCP presses lower —
     # watch for table contact on short objects).
     insertion_depth_m: ${REBOT_GRASP_INSERT:-0.025}
+    # Per-waypoint motion time for the grasp pipeline (s). 2.0 was the
+    # conservative bring-up value; the B601 trajectory runs 1.4 cleanly —
+    # saves ~2.5-3s per grasp across the 4-5 moves (validated by cycle runs).
+    move_duration: ${REBOT_GRASP_MOVE_DUR:-1.4}
     # ── success-rate hardening (2026-06-12), all latency-neutral ──────────
     # Max frames per detection: the FIRST frame with a valid candidate wins
     # (zero added latency normally); extra frames only run on dropped/cold

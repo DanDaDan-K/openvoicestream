@@ -260,3 +260,17 @@ def test_done_tone_disabled_by_config() -> None:
     plugin = GraspPlugin(app, {"done_tone": {"ms": 0}})
     plugin._on_grasp_done(_done_task({"success": True}))  # noqa: SLF001
     assert app.played == []
+
+
+def test_done_tone_kinds_distinct():
+    app = _ToneApp()
+    plugin = GraspPlugin(app)
+    plugin._on_grasp_done(_done_task({"success": True}))                                  # ok
+    plugin._on_grasp_done(_done_task({"success": False, "error": "gripper closed but nothing held", "stage": "grasp"}))   # fail
+    plugin._on_grasp_done(_done_task({"success": False, "error": "no valid grasp for target 'box'", "stage": "detect"}))  # not_found
+    plugin._on_grasp_done(_done_task({"success": False, "error": "implausible jaw width 0.166m", "stage": "plausibility"}))  # out_of_range
+    assert len(app.played) == 4
+    # all four waveforms differ (length and/or content)
+    assert len({(len(p), bytes(p[:64])) for p in app.played}) == 4
+    # not_found (double beep with gap) is the longest of the fixed-freq ones
+    assert len(app.played[2]) > len(app.played[1])

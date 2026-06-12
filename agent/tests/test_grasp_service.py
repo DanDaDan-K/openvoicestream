@@ -446,11 +446,13 @@ def test_put_down_replays_recorded_grasp_poses_and_releases_wide():
     assert res["placed_at"] == [0.40, 0.05, 0.08]
 
     moves = [c[1] for c in arm.calls if c[0] == "move_to"]
-    # approach (pregrasp) → place (grasp pose) → retreat (pregrasp) → home
+    # approach (pregrasp) → place (grasp) → VERTICAL HOP (+6cm, anti-tip) →
+    # retreat (pregrasp) → home
     assert moves[0] == (0.38, 0.05, 0.16)
     assert moves[1] == (0.40, 0.05, 0.08)
-    assert moves[2] == (0.38, 0.05, 0.16)
-    assert moves[3] == (0.27, 0.0, 0.24)
+    assert moves[2] == (0.40, 0.05, 0.14)
+    assert moves[3] == (0.38, 0.05, 0.16)
+    assert moves[4] == (0.27, 0.0, 0.24)
     # release uses the recorded (widened) width and happens AFTER the place
     # move and BEFORE the retreat.
     names = arm.names_of_calls()

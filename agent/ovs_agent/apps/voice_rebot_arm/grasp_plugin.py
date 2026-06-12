@@ -243,7 +243,7 @@ class GraspPlugin(Plugin):
             name="grasp_object",
             description=grasp_desc,
             timeout_s=2.0,
-            preamble_text="好的。",
+            preamble_text="抓取。",
             response_mode="parallel",
         )
         async def grasp_object(object_name: str) -> dict:  # noqa: ANN001
@@ -268,7 +268,7 @@ class GraspPlugin(Plugin):
             name="search_object",
             description=search_desc,
             timeout_s=2.0,
-            preamble_text="好的。",
+            preamble_text="找找看。",
             response_mode="parallel",
         )
         async def search_object(object_name: str) -> dict:  # noqa: ANN001
@@ -293,7 +293,7 @@ class GraspPlugin(Plugin):
             name="put_down",
             description=put_down_desc,
             timeout_s=2.0,
-            preamble_text="好的。",
+            preamble_text="放回去。",
             response_mode="parallel",
         )
         async def put_down() -> dict:
@@ -596,7 +596,7 @@ class GraspPlugin(Plugin):
             return
         except Exception:
             logger.exception("GraspPlugin: grasp task crashed")
-            self._play_done_tone(False)
+            self._play_done_tone("fail")
             return
         # Remember a successful grasp so put_down can place the object back at
         # the (camera-visible, IK-validated) pickup spot. Search / put_down
@@ -609,38 +609,73 @@ class GraspPlugin(Plugin):
         # done and safe to command again. Skip on cancel — the user stopped it
         # and already knows.
         if res and not res.get("cancelled"):
-            self._play_done_tone(bool(res.get("success") or res.get("found")))
+            ok = bool(res.get("success") or res.get("found"))
+            kind = "ok"
+            if not ok:
+                err = str(res.get("error") or "")
+                stage = str(res.get("stage") or "")
+                if "no valid grasp" in err or res.get("found") is False:
+                    kind = "not_found"          # double low beep
+                elif stage == "plausibility" or "implausible" in err or "too low" in err:
+                    kind = "out_of_range"       # descending sweep
+                else:
+                    kind = "fail"               # single low
+            self._play_done_tone(kind)
 
-    def _play_done_tone(self, ok: bool) -> None:
-        """Play a short local tone when a motion finishes (success/failure
-        pitch), mirroring app_base's wake tone. Config (all optional):
-        ``grasp.done_tone: {hz_ok, hz_fail, ms}``; set ms: 0 to disable."""
+    def _play_done_tone(self, kind) -> None:
+        """Audible motion-outcome feedback, reason-differentiated so the
+        presenter knows WHAT failed without reading logs:
+          ok           — single high beep (1175Hz)
+          fail         — single low beep (330Hz; grasp/release failure)
+          not_found    — DOUBLE low beep (nothing detected — reposition/retry)
+          out_of_range — descending sweep (target unreachable/ungraspable —
+                         move the object)
+        Config ``grasp.done_tone: {hz_ok, hz_fail, ms}``; ms: 0 disables.
+        bool kinds accepted for backward compat (True→ok, False→fail)."""
+        if isinstance(kind, bool):
+            kind = "ok" if kind else "fail"
         try:
             audio = getattr(self.app, "audio", None)
             notify = getattr(audio, "play_notification", None)
             if not callable(notify):
                 return
             cfg = dict(self.cfg.get("done_tone") or {})
-            hz = float(cfg.get("hz_ok", 1175)) if ok else float(cfg.get("hz_fail", 330))
+            hz_ok = float(cfg.get("hz_ok", 1175))
+            hz_fail = float(cfg.get("hz_fail", 330))
             ms = float(cfg.get("ms", 180))
-            if hz <= 0 or ms <= 0:
+            if ms <= 0:
                 return
             import math
             import struct
             import time as _time
 
             sr = int(getattr(audio, "output_sr", None) or 16000)
-            n = int(sr * ms / 1000)
             amp = 16000
-            fade = min(n // 4, int(sr * 0.01))
-            pcm = bytearray(n * 2)
-            for i in range(n):
-                s = amp * math.sin(2 * math.pi * hz * i / sr)
-                if i < fade:
-                    s *= i / fade
-                elif i >= n - fade:
-                    s *= (n - 1 - i) / fade
-                struct.pack_into("<h", pcm, i * 2, max(-32768, min(32767, int(s))))
+
+            def _seg(f0: float, f1: float, seg_ms: float) -> bytes:
+                n = int(sr * seg_ms / 1000)
+                fade = min(n // 4, int(sr * 0.01))
+                pcm = bytearray(n * 2)
+                for i in range(n):
+                    t = i / max(n - 1, 1)
+                    f = f0 + (f1 - f0) * t
+                    v = amp * math.sin(2 * math.pi * f * i / sr)
+                    if i < fade:
+                        v *= i / fade
+                    elif i >= n - fade:
+                        v *= (n - 1 - i) / fade
+                    struct.pack_into("<h", pcm, i * 2, max(-32768, min(32767, int(v))))
+                return bytes(pcm)
+
+            gap = bytes(int(sr * 0.06) * 2)
+            if kind == "ok":
+                pcm = _seg(hz_ok, hz_ok, ms)
+            elif kind == "not_found":
+                pcm = _seg(hz_fail, hz_fail, ms * 0.6) + gap + _seg(hz_fail, hz_fail, ms * 0.6)
+            elif kind == "out_of_range":
+                pcm = _seg(hz_ok * 0.56, hz_fail, ms * 1.6)
+            else:  # fail
+                pcm = _seg(hz_fail, hz_fail, ms)
             notify(bytes(pcm))
             # Suppress the mic while the tone plays so it isn't captured as a
             # command (same pattern as the wake tone).
@@ -649,8 +684,7 @@ class GraspPlugin(Plugin):
                 self.app._local_output_mic_suppress_until = max(
                     float(sup), _time.monotonic() + (ms + 200.0) / 1000.0
                 )
-            logger.info("GraspPlugin: done tone (%s) %dHz %dms",
-                        "ok" if ok else "fail", int(hz), int(ms))
+            logger.info("GraspPlugin: done tone kind=%s", kind)
         except Exception:  # pragma: no cover — defensive
             logger.debug("GraspPlugin: done tone failed", exc_info=True)
 

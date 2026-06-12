@@ -1990,6 +1990,15 @@ class BaseApp:
         if registry is None:
             from .tools import default_registry as registry  # type: ignore
         guard_error = self._server_tool_trigger_guard_error(evt, registry)
+        if guard_error is not None and bool(
+            getattr(self.config, "tool_trigger_guard_log_only", False)
+        ) and not bool(getattr(self.config, "tool_trigger_guard", False)):
+            # Monitor mode: record the suspicion, let the call through.
+            logger.warning(
+                "trigger-guard MONITOR: would flag tool_call %r: %s",
+                evt.name, guard_error,
+            )
+            guard_error = None
         if guard_error is not None:
             logger.warning(
                 "server tool_call %r blocked by trigger guard: %s",
@@ -2041,7 +2050,10 @@ class BaseApp:
             )
 
     def _server_tool_trigger_guard_error(self, evt: "ServerToolCall", registry) -> str | None:  # noqa: ANN001
-        if not bool(getattr(self.config, "tool_trigger_guard", False)):
+        if not (
+            bool(getattr(self.config, "tool_trigger_guard", False))
+            or bool(getattr(self.config, "tool_trigger_guard_log_only", False))
+        ):
             return None
         # Scoped guard: only tools with a fixed literal-trigger vocabulary
         # (the arm motions) are guarded. Semantic tools — grasp_object maps a

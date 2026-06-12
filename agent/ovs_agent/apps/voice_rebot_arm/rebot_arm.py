@@ -774,15 +774,27 @@ class RebotArm:
             self._g_state = _GS.CLOSING
         t_end = time.monotonic() + timeout
         holding = False
+        t0 = time.monotonic()
+        t_contact = None
         while time.monotonic() < t_end:
             with self._g_lock:
                 s = self._g_state
+            if s == _GS.CONTACT and t_contact is None:
+                t_contact = time.monotonic()
             if s == _GS.HOLDING:
                 holding = True
                 break
             if s == _GS.IDLE:
                 return False
             time.sleep(0.01)
+        # Phase timing (close-window tuning data): how long the physical
+        # close travel took vs the contact-confirm window. Tune only with
+        # this evidence — the CLOSING grace/stall logic has real-machine
+        # history behind every constant.
+        if holding:
+            now = time.monotonic()
+            print(f"[RebotArm] close timing: contact={((t_contact or now) - t0):.2f}s "
+                  f"holding={(now - t0):.2f}s")
         if not holding:
             with self._g_lock:
                 self._g_state = _GS.IDLE

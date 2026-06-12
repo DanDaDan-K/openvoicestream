@@ -45,9 +45,15 @@ def test_voice_rebot_arm_enables_gated_tts_hardening():
 
 
 def test_voice_rebot_arm_keeps_parallel_preamble_prompt():
-    # We kept the parallel + spoken-preamble behaviour, so the prompt keeps its
-    # "emit a brief acknowledgement first" guidance (the template-mode prompt
-    # rewrite was rejected along with the response-mode default change).
+    # v7 (2026-06-12): the tool PREAMBLE already speaks the acknowledgement
+    # ("好的"), so the prompt now forbids the model from writing its own text
+    # before/alongside the call — the old "FIRST emit a brief acknowledgement"
+    # guidance made it speak twice. The model only confirms AFTER the tool
+    # returns.
     cfg = _cfg()
     prompt = " ".join(cfg.system_prompt.split())
-    assert "FIRST emit a brief" in prompt
+    assert "FIRST emit a brief" not in prompt
+    assert "do NOT write any text before" in prompt
+    # v8: post-tool confirmation text is gone too (round-2 LLM+TTS latency);
+    # the completion tone closes the loop.
+    assert "EMPTY message" in prompt

@@ -264,7 +264,9 @@ def test_register_arm_tools_defaults_to_parallel_with_preamble():
 
     assert count == 1
     meta = r._tools["wave"]
-    assert meta.preamble_text == "好的。"
+    # Per-tool action-name preamble (wrong-tool audible detection): known
+    # actions speak their NAME ("挥手。"), unknown ones fall back to "好的。".
+    assert meta.preamble_text == "挥手。"
     assert meta.response_mode == "parallel"
 
 
