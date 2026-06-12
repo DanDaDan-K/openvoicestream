@@ -318,11 +318,11 @@ The orchestrator builds the runtime, downloads + SHA-256-verifies the HF artifac
 | Profile | Goal | Default behavior |
 |---------|------|------------------|
 | `official` | Minimal-diff EdgeLLM example. Close enough to upstream that it can be reviewed or upstreamed as a Qwen3 ASR/TTS example. | Semantic/correctness fixes only — tokenizer layout, sampling, runtime contract, stream callback. Regular exported Talker/CodePredictor/Code2Wav directories. |
-| `highperf` (default) | Product low-latency dual-resident path for Orin. | Full vocab, ASR FP8 embedding, TTS W8A16 Talker, CP BF16 I/O + `lm_head` pretranspose, stateful Code2Wav, CP decode CUDA graph, `ACTIVE_CP_GROUPS=13`. |
+| `highperf` (default) | Product low-latency dual-resident path for Orin. | Full vocab, ASR FP8 embedding, FP16 CustomVoice Talker on Orin NX with 1024-token Talker KV cap, CP BF16 I/O + `lm_head` pretranspose, stateful Code2Wav, CP decode CUDA graph, `ACTIVE_CP_GROUPS=13`. |
 
 Use `jetson-multilang-highperf-nx` on Orin NX when consuming the NX-native engine set; the default `jetson-multilang-highperf` profile targets the Nano artifact set. Profiles in [`configs/profiles`](configs/profiles) set env defaults only; explicit env vars still override them.
 
-**CustomVoice variant.** Setting `QWEN3_TTS_VARIANT=customvoice` (or an `OVS_TTS_MODEL_ID` containing `customvoice`) selects the Qwen3-TTS-12Hz-0.6B-CustomVoice talker. It ships **9 built-in speakers** (vivian, ryan, aiden, serena, dylan, eric, uncle_fu, ono_anna, sohee) driven by natural-language instructions instead of x-vector voice cloning — so the `VOICE_CLONE` capability is off and `/speakers/register` is rejected, while the rest of the Qwen3 multilingual path (52 languages, W8A16 Talker) is unchanged.
+**CustomVoice variant.** Setting `QWEN3_TTS_VARIANT=customvoice` (or an `OVS_TTS_MODEL_ID` containing `customvoice`) selects the Qwen3-TTS-12Hz-0.6B-CustomVoice talker. It ships **9 built-in speakers** (vivian, ryan, aiden, serena, dylan, eric, uncle_fu, ono_anna, sohee) driven by natural-language instructions instead of x-vector voice cloning — so the `VOICE_CLONE` capability is off and `/speakers/register` is rejected. Current CustomVoice production precision is FP16 on Orin NX; the default NX engine uses a 1024-token Talker KV cap to reduce resident memory. W8A16 is rejected until a no-preload EOS-valid quant exists.
 
 For detailed branch ownership, engine env vars, frozen-baseline numbers, and artifact handling, see [`docs/plans/qwen3-current-frozen-baseline-2026-05-10.md`](docs/plans/qwen3-current-frozen-baseline-2026-05-10.md).
 

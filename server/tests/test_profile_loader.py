@@ -18,11 +18,17 @@ from server.core import profile_loader
 @pytest.fixture(autouse=True)
 def reset_module_state(monkeypatch):
     """Reset profile_loader module-level state between tests."""
+    import os
+    env_snapshot = dict(os.environ)
     # Start each test with empty operator set + empty applied set + no profile.
     monkeypatch.setattr(profile_loader, "_OPERATOR_KEYS", frozenset())
     monkeypatch.setattr(profile_loader, "_APPLIED_KEYS", set())
     monkeypatch.setattr(profile_loader, "_CURRENT_PROFILE", {})
-    yield
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(env_snapshot)
 
 
 def _write_profile(tmp_path: Path, name: str, body: dict) -> Path:

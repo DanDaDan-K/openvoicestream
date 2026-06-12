@@ -1,0 +1,19 @@
+# Logical model registry: default precision per device class.
+#
+# Precision is a LEAF attribute resolved here: a leaf with `precision` unset
+# inherits this default for its device class; an explicit leaf precision wins.
+# Changing one line below re-resolves EVERY leaf of that model — compositions,
+# the resolver, and the worker are untouched.
+
+models:
+  qwen3-tts-customvoice:
+    default_precision:
+      # TODAY: fp16. FUTURE DEFAULT: flip jetson -> w8a16 once a quality-valid
+      # CustomVoice W8A16 quant exists (naive max-abs W8A16 of the talker breaks
+      # EOS; tracked separately). Flipping this one value re-resolves every
+      # Jetson CustomVoice TTS leaf to w8a16 with no other change.
+      jetson: fp16
+
+  qwen3-asr:
+    default_precision:
+      jetson: fp16

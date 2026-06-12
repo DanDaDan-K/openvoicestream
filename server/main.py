@@ -805,6 +805,19 @@ async def startup():
         logger.error("Failed to apply OpenVoiceStream profile: %s", exc)
         raise
 
+    # TRACK 1 SLICE 2 (gated): if the active profile carries a `composition`
+    # block, validate it (fail fast, before any download/limiter), apply the
+    # leaf-derived env with env-wins precedence, and capture the union-pull
+    # file list for the downloader below. A profile WITHOUT `composition` is a
+    # strict no-op here — the flat path is byte-for-byte unchanged.
+    _composition_pull_files: list[str] = []
+    try:
+        from server.core.composition_boot import apply_composition
+        _composition_pull_files = apply_composition(current_profile())
+    except Exception as exc:
+        logger.error("Composition validation/apply failed: %s", exc)
+        raise
+
     # Week 1 production hardening: initialise the global session limiter
     # immediately after profile application, BEFORE model downloads and
     # backend preload. A bad limit value (zero/negative/non-int env) MUST
@@ -859,6 +872,16 @@ async def startup():
 
     from server.core import model_downloader
     model_dir = os.environ.get("MODEL_DIR", "/opt/models")
+    # TRACK 1 SLICE 2 (gated): when composition mode is active, the leaf
+    # union-pull list is folded in additively. The leaf env (EDGE_LLM_*) was
+    # already emitted to os.environ above, so the existing artifact-provisioning
+    # path picks the right files up unchanged; here we only surface the
+    # declared union for the operator. Empty (and silent) on the flat path.
+    if _composition_pull_files:
+        logger.info(
+            "composition: %d union-pull file(s) required: %s",
+            len(_composition_pull_files), _composition_pull_files,
+        )
     model_downloader.ensure_models(language_mode, model_dir)
 
     # Resolve any TRT engines declared by the active profile. Must run

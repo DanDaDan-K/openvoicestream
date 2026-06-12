@@ -1,0 +1,33 @@
+# Device registry: unified-memory budget + recommended default combo per class.
+#
+# `default` is the per-device recommended leaf for each capability. The
+# composition validator rejects combos where
+#   base_reservation_mb + sum(selected leaf DELTA peak_unified_mb)
+#   exceeds `unified_mb * headroom` (default headroom 0.85).
+#
+# `base_reservation_mb` is the non-leaf resident floor: the idle voice-stack-
+# absent baseline (translator + system + other-resident services) that every
+# composition pays once. Leaf `peak_unified_mb` values are DELTAS over THIS
+# baseline (see qwen3-asr-nx.yaml / qwen3-tts-nx.yaml), so the baseline is
+# counted once here instead of being double-counted inside each leaf's peak.
+# 4400 MB measured/observed on both Orin devices (orin-nx 2026-06-12).
+#
+# `device_class` drives precision resolution (models.yaml default_precision is
+# keyed by class). Both Orin devices are class `jetson`.
+
+devices:
+  orin-nx:
+    unified_mb: 15656
+    base_reservation_mb: 4400
+    device_class: jetson
+    default:
+      asr: asr.qwen3_asr.orin-nx.n2
+      tts: tts.qwen3_tts.orin-nx.n1
+
+  orin-nano:
+    unified_mb: 7864
+    base_reservation_mb: 4400
+    device_class: jetson
+    default:
+      asr: asr.qwen3_asr.orin-nx.n2
+      tts: tts.qwen3_tts.orin-nx.n1
