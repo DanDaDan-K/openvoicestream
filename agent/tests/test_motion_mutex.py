@@ -274,3 +274,100 @@ def test_done_tone_kinds_distinct():
     assert len({(len(p), bytes(p[:64])) for p in app.played}) == 4
     # not_found (double beep with gap) is the longest of the fixed-freq ones
     assert len(app.played[2]) > len(app.played[1])
+
+
+# ── deferred "your turn" tone (失败播报后再响, 2026-06-13) ──────────────
+
+
+def test_failure_tone_deferred_until_assistant_done() -> None:
+    """A failure WITH a spoken reason defers the completion tone until the
+    reply finishes (on_assistant_done), so the tone is always the LAST output
+    — the reliable 'your turn to speak' signal."""
+
+    async def _drive() -> None:
+        app = _ToneApp()  # no slv → _announce no-ops, but the defer still runs
+        plugin = GraspPlugin(app)
+
+        async def _r() -> dict:
+            return {"success": False, "error": "no valid grasp",
+                    "found": False, "target": "盒子"}
+
+        task = asyncio.create_task(_r())
+        await task
+        plugin._on_grasp_done(task)  # noqa: SLF001
+
+        # Tone NOT played yet — deferred behind the spoken reason.
+        assert app.played == []
+        assert plugin._pending_ready_tone == "not_found"  # noqa: SLF001
+
+        # SLV finished the spoken reason → tone plays now.
+        await plugin.on_assistant_done()
+        assert len(app.played) == 1
+        assert plugin._pending_ready_tone is None  # noqa: SLF001
+
+        for t in asyncio.all_tasks() - {asyncio.current_task()}:
+            t.cancel()
+
+    asyncio.run(_drive())
+
+
+def test_success_tone_is_immediate_not_deferred() -> None:
+    """Success has no spoken reason, so the tone plays immediately (it already
+    IS the last output) and nothing is left pending."""
+
+    async def _drive() -> None:
+        app = _ToneApp()
+        plugin = GraspPlugin(app)
+
+        async def _r() -> dict:
+            return {"success": True, "grasp_pose": [0.0] * 6}
+
+        task = asyncio.create_task(_r())
+        await task
+        plugin._on_grasp_done(task)  # noqa: SLF001
+
+        assert len(app.played) == 1
+        assert plugin._pending_ready_tone is None  # noqa: SLF001
+
+    asyncio.run(_drive())
+
+
+def test_failure_tone_fallback_fires_without_assistant_done() -> None:
+    """If no tts_done ever arrives, the bounded fallback still plays the
+    deferred tone so the user is never left without the signal."""
+
+    async def _drive() -> None:
+        import ovs_agent.apps.voice_rebot_arm.grasp_plugin as gp
+
+        app = _ToneApp()
+        plugin = GraspPlugin(app)
+        plugin._pending_ready_tone = "fail"  # noqa: SLF001
+
+        orig = gp.asyncio.sleep
+
+        async def _fast(_s: float) -> None:
+            return None
+
+        gp.asyncio.sleep = _fast  # type: ignore[assignment]
+        try:
+            await plugin._ready_tone_fallback("fail")  # noqa: SLF001
+        finally:
+            gp.asyncio.sleep = orig  # type: ignore[assignment]
+
+        assert len(app.played) == 1
+        assert plugin._pending_ready_tone is None  # noqa: SLF001
+
+    asyncio.run(_drive())
+
+
+def test_assistant_done_noop_when_no_pending_tone() -> None:
+    """A normal TTS reply (e.g. the success preamble) must not trigger a stray
+    tone when nothing is pending."""
+
+    async def _drive() -> None:
+        app = _ToneApp()
+        plugin = GraspPlugin(app)
+        await plugin.on_assistant_done()
+        assert app.played == []
+
+    asyncio.run(_drive())

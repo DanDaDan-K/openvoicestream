@@ -225,3 +225,35 @@ async def test_consecutive_commands_during_reply_are_dropped(test_config):
             f"P3 baseline changed — barge-in command '挥手' got through: {latest!r}. "
             "If AEC/full-duplex was intentionally enabled, update this probe."
         )
+
+
+@pytest.mark.parametrize("tail_ms,react_ms", [(200, 120), (120, 120), (60, 120), (200, 350)])
+async def test_done_tone_tail_vs_onset(test_config, tail_ms, react_ms):
+    """P0/② TAIL SWEEP: after a completion tone the mic is suppressed for
+    `tail_ms` (grasp_plugin done-tone). If the user reacts in `react_ms` (< tail)
+    the command onset lands INSIDE the suppression window and is lost (suppress
+    drops audio AND clears pre-roll, so the gate pre-roll can't recover it).
+    Sweep to find the tail that doesn't eat a fast follow-up command's onset.
+    Reports ASR per (tail, react) so the production tail can be set on data."""
+    import time as _t
+
+    cfg = _rebot_voice_config(test_config)
+    audio = ScriptedAudioIO([])
+    async with run_agent(cfg, audio) as (app, probe):
+        await _wake(app, cfg)
+        await probe.wait_event("on_wake", timeout=5)
+        await asyncio.sleep(0.6)  # clear the wake-tone suppression first
+        # Simulate the done-tone's mic suppression window.
+        app._local_output_mic_suppress_until = _t.monotonic() + tail_ms / 1000.0
+        await asyncio.sleep(react_ms / 1000.0)  # user reaction time after the beep
+        audio.inject(WAV_DIR / "cmd_grab_box.wav")
+        try:
+            await probe.wait_event("on_user_utterance", timeout=25)
+        except AssertionError:
+            print(f"\n[tail={tail_ms} react={react_ms}] ASR = <none>")
+            raise
+        text = _last_user_text(app)
+        lost = "抓" not in text
+        print(f"\n[tail={tail_ms} react={react_ms}] ASR = {text!r}  onset_lost={lost}")
+        # Document, don't hard-fail on onset loss — this is a measurement sweep.
+        assert "盒子" in text, f"whole command lost: {text!r}"

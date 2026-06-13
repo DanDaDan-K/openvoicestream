@@ -329,10 +329,18 @@ metadata:
     # (high pitch = success, low = failure), so the user knows the arm is done
     # and ready for the next command — the spoken "好的" happens at START
     # (parallel mode) and there is no spoken completion. Set ms: 0 to disable.
+    # The tone is the reliable "your turn to speak" signal: on a FAILURE with a
+    # spoken reason it is deferred until AFTER the reason finishes, so the beep
+    # is always the last sound before the user may speak.
+    # mic_suppress_tail_ms: mic muted for (tone duration + tail) so the beep
+    # isn't heard as a command. 120ms (was 200): e2e tail-sweep on live ASR
+    # showed 200ms ate a fast follow-up command's onset (抓盒子→花盒子); 120ms
+    # keeps it. Raise if the tone's decay leaks into ASR on the real speaker.
     done_tone:
       hz_ok: 1175
       hz_fail: 330
       ms: 180
+      mic_suppress_tail_ms: 120
     # put_down FALLBACK place spot [x,y,z,roll,pitch,yaw] — only used when
     # there is no recorded grasp to put back to (e.g. the user manually closed
     # the gripper around something). The normal put_down path replays the last

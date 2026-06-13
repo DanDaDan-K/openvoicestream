@@ -65,6 +65,11 @@ class GraspPlugin(Plugin):
         # at the camera-visible spot it was picked from. Cleared on a
         # successful put_down.
         self._last_grasp: Optional[dict] = None
+        # Deferred completion tone (failure path): the "your turn" tone is
+        # played AFTER the spoken failure reason finishes (on_assistant_done),
+        # so the tone is always the LAST output — a reliable signal that the
+        # user may speak the next command. Holds the tone kind until played.
+        self._pending_ready_tone: Optional[str] = None
 
     # ── lifecycle ──────────────────────────────────────────────────
     def setup(self) -> bool:
@@ -755,21 +760,51 @@ class GraspPlugin(Plugin):
                     kind = "out_of_range"       # descending sweep
                 else:
                     kind = "fail"               # single low
+            # Ordering of the audible "your turn" signal:
+            #  * success / no-spoken-reason: play the tone NOW — it is already
+            #    the last output.
+            #  * failure WITH a spoken reason: announce WHY first, and DEFER
+            #    the tone until that reply finishes (on_assistant_done), so the
+            #    tone is always the final sound the user hears before speaking.
+            #    The voxedge CLIENT_TEXT path is a DIRECT text→TTS channel
+            #    (no LLM round), so the reason plays the moment the motion ends.
+            phrase = (
+                self._failure_phrase(kind, res)
+                if (kind != "ok" and self._announce_enabled())
+                else ""
+            )
+            if phrase:
+                self._pending_ready_tone = kind
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._announce(phrase), name="grasp-announce")
+                    loop.create_task(
+                        self._ready_tone_fallback(kind), name="grasp-ready-fallback"
+                    )
+                except RuntimeError:
+                    self._pending_ready_tone = None
+                    self._play_done_tone(kind)
+            else:
+                self._play_done_tone(kind)
+
+    async def on_assistant_done(self) -> None:
+        """SLV finished playing a TTS reply. If a failure announcement was just
+        spoken, the completion tone was deferred to land AFTER it — play it now
+        so the tone is the final "your turn" signal regardless of outcome."""
+        kind = self._pending_ready_tone
+        if kind is not None:
+            self._pending_ready_tone = None
             self._play_done_tone(kind)
-            # Spoken failure reason — the voxedge engine's CLIENT_TEXT path is
-            # a DIRECT text→TTS channel (conversation.py event loop feeds the
-            # session-lifetime tts buffer, no LLM round), so the agent can
-            # announce WHY it failed the moment the motion ends. Success
-            # stays tone-only (operator chose minimal chatter).
-            if kind != "ok" and self._announce_enabled():
-                phrase = self._failure_phrase(kind, res)
-                if phrase:
-                    try:
-                        asyncio.get_running_loop().create_task(
-                            self._announce(phrase), name="grasp-announce"
-                        )
-                    except RuntimeError:
-                        pass
+
+    async def _ready_tone_fallback(self, kind: str) -> None:
+        """Safety net: if no tts_done arrives for the failure announcement
+        (e.g. the direct-TTS path doesn't emit one), play the deferred tone
+        after a bounded wait so the user is never left without the signal."""
+        await asyncio.sleep(6.0)
+        if self._pending_ready_tone == kind:
+            self._pending_ready_tone = None
+            self._play_done_tone(kind)
+            logger.info("GraspPlugin: ready-tone fallback fired (no tts_done)")
 
     def _announce_enabled(self) -> bool:
         v = self.cfg.get("announce_failures", True)
@@ -862,12 +897,22 @@ class GraspPlugin(Plugin):
             else:  # fail
                 pcm = _seg(hz_fail, hz_fail, ms)
             notify(bytes(pcm))
-            # Suppress the mic while the tone plays so it isn't captured as a
-            # command (same pattern as the wake tone).
+            # Suppress the mic while the tone plays + a short tail for its
+            # decay, so the tone isn't captured as a command. Tail 200→120ms
+            # (2026-06-13, e2e tail-sweep on live ASR): at 200ms a command
+            # spoken fast after the beep lost its onset ('抓盒子'→'花盒子');
+            # ≤120ms keeps the onset even at a 120ms (super-fast) reaction,
+            # while typical human reaction (200-300ms) leaves margin. The tone
+            # spans the longer kinds too (not_found double beep, out_of_range
+            # 1.6× sweep), so suppress for the ACTUAL pcm duration, not `ms`.
+            tail_ms = float((self.cfg.get("done_tone") or {}).get(
+                "mic_suppress_tail_ms", 120.0
+            ))
+            tone_ms = len(pcm) / 2 / max(sr, 1) * 1000.0
             sup = getattr(self.app, "_local_output_mic_suppress_until", None)
             if sup is not None:
                 self.app._local_output_mic_suppress_until = max(
-                    float(sup), _time.monotonic() + (ms + 200.0) / 1000.0
+                    float(sup), _time.monotonic() + (tone_ms + tail_ms) / 1000.0
                 )
             logger.info("GraspPlugin: done tone kind=%s", kind)
         except Exception:  # pragma: no cover — defensive
