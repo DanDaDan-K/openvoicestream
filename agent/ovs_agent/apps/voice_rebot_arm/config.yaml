@@ -317,6 +317,20 @@ metadata:
     # grasp's recorded poses so the object lands back at the camera-visible
     # spot it was picked from and the next grasp_object can find it again.
     place_pose: [0.30, 0.00, 0.15, 0.0, 0.0, 0.0]
+    # Safe table region [x_min, x_max, y_min, y_max] (base frame, metres) for
+    # ANY put_down release point — including replayed grasp poses, which can
+    # legitimately sit at the table edge (the box was picked up there) where a
+    # release + jaw retreat nudges it off the table (real machine 2026-06-12
+    # night: box ended up on the floor). The release x/y is clamped into this
+    # box shrunk inward by place_margin_m. Empty list = clamp disabled.
+    # Calibrate with tools/table_bounds_calib.py (sweeps the camera, RANSAC
+    # plane-fits the table, prints these values). Calibrated 2026-06-13 on
+    # the B601-DM demo table: y_min -0.26 is a REAL drop-off edge (below-
+    # plane floor points along y≈-0.26 for x 0.3-0.7 in near_cloud_raw.npz);
+    # y_max 0.40 is the conservative FOV-verified extent; x_min 0.20 is the
+    # reach limit (base sits on the table); x_max 0.60 caps at reach.
+    place_bounds: [0.20, 0.60, -0.26, 0.40]
+    place_margin_m: 0.05
     # Safety: never open the jaw to the SDK full 0.09m during pre-grasp,
     # cancellation safe-park, or release; gentle compliant grasp force.
     open_distance_m: ${REBOT_GRASP_OPEN_DIST:-0.06}

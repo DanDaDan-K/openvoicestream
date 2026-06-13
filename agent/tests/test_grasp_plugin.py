@@ -387,3 +387,74 @@ def test_no_by_class_config_means_adaptive_for_everything() -> None:
 
     _, seen = _capture_run_kwargs(plugin, actuator, target="box")
     assert seen["adaptive_force"] is True
+
+
+def test_put_down_threads_place_bounds_from_config() -> None:
+    plugin, actuator = _make_plugin(torque=True)
+    actuator.robot = _HoldingRobot(holding=True)
+    plugin.cfg["place_bounds"] = [0.15, 0.48, -0.22, 0.22]
+    plugin.cfg["place_margin_m"] = "0.04"
+    plugin._last_grasp = {  # noqa: SLF001
+        "success": True,
+        "grasp_pose": [0.40, 0.0, 0.08, 0.0, 0.0, 0.0],
+        "pregrasp_pose": [0.38, 0.0, 0.16, 0.0, 0.0, 0.0],
+        "open_distance_m": 0.089,
+    }
+
+    seen = {}
+
+    def _fake_run_put_down_once(**kwargs):
+        seen.update(kwargs)
+        return {"success": True, "released": True}
+
+    import ovs_agent.apps.voice_rebot_arm.grasp_service as gs
+
+    orig = gs.run_put_down_once
+    gs.run_put_down_once = _fake_run_put_down_once
+    try:
+        async def _drive() -> dict:
+            res = await plugin._dispatch_put_down()  # noqa: SLF001
+            await plugin._grasp_task  # noqa: SLF001
+            return res
+
+        res = asyncio.run(_drive())
+    finally:
+        gs.run_put_down_once = orig
+
+    assert res["started"] is True
+    assert seen["place_bounds"] == [0.15, 0.48, -0.22, 0.22]
+    assert seen["place_margin_m"] == 0.04
+
+
+def test_put_down_bad_place_bounds_not_threaded() -> None:
+    plugin, actuator = _make_plugin(torque=True)
+    actuator.robot = _HoldingRobot(holding=True)
+    plugin.cfg["place_bounds"] = [0.15, 0.48]  # wrong arity
+    plugin._last_grasp = {  # noqa: SLF001
+        "success": True,
+        "grasp_pose": [0.40, 0.0, 0.08, 0.0, 0.0, 0.0],
+        "open_distance_m": 0.089,
+    }
+
+    seen = {}
+
+    def _fake_run_put_down_once(**kwargs):
+        seen.update(kwargs)
+        return {"success": True, "released": True}
+
+    import ovs_agent.apps.voice_rebot_arm.grasp_service as gs
+
+    orig = gs.run_put_down_once
+    gs.run_put_down_once = _fake_run_put_down_once
+    try:
+        async def _drive() -> dict:
+            res = await plugin._dispatch_put_down()  # noqa: SLF001
+            await plugin._grasp_task  # noqa: SLF001
+            return res
+
+        res = asyncio.run(_drive())
+    finally:
+        gs.run_put_down_once = orig
+
+    assert res["started"] is True
+    assert "place_bounds" not in seen

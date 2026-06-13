@@ -1217,3 +1217,69 @@ def test_side_grasp_skips_orientation_ladder():
         assert calls["ladder"] == 0          # ladder never consulted
         assert out["success"] is False       # move failed → honest failure
         assert out["error"] == "pregrasp IK failed"
+
+
+# ── put_down table-boundary clamp (box fell off the table, 2026-06-12) ──
+
+
+def test_put_down_clamps_edge_place_point_into_bounds() -> None:
+    """A recorded grasp pose at the table edge must be pulled inward by the
+    margin before release; the approach shifts by the same x/y delta so the
+    descent geometry is preserved."""
+    arm = PoseRecordingArm()
+    res = run_put_down_once(
+        arm=arm,
+        grasp_pose=[0.46, 0.20, 0.08, 0.0, 0.0, 0.3],
+        pregrasp_pose=[0.40, 0.18, 0.16, 0.0, 0.0, 0.3],
+        open_distance_m=0.089,
+        move_duration=0.02,
+        place_bounds=[0.15, 0.48, -0.22, 0.22],
+        place_margin_m=0.05,
+    )
+    assert res["success"] is True
+    assert res["place_clamped"] is True
+    assert res["place_original"] == [0.46, 0.20, 0.08]
+    # x 0.46 → 0.43 (0.48-0.05), y 0.20 → 0.17 (0.22-0.05)
+    assert res["placed_at"] == pytest.approx([0.43, 0.17, 0.08])
+    moves = [c[1] for c in arm.calls if c[0] == "move_to"]
+    # approach shifted by the same (-0.03, -0.03) delta.
+    assert moves[0] == pytest.approx((0.37, 0.15, 0.16))
+    assert moves[1] == pytest.approx((0.43, 0.17, 0.08))
+
+
+def test_put_down_inside_bounds_is_untouched() -> None:
+    arm = PoseRecordingArm()
+    res = run_put_down_once(
+        arm=arm,
+        grasp_pose=[0.30, 0.00, 0.08, 0.0, 0.0, 0.0],
+        pregrasp_pose=[0.28, 0.00, 0.16, 0.0, 0.0, 0.0],
+        move_duration=0.02,
+        place_bounds=[0.15, 0.48, -0.22, 0.22],
+    )
+    assert res["success"] is True
+    assert "place_clamped" not in res
+    assert res["placed_at"] == [0.30, 0.0, 0.08]
+
+
+def test_put_down_malformed_bounds_ignored() -> None:
+    arm = PoseRecordingArm()
+    for bad in ([0.1, 0.2, 0.3], ["a", "b", "c", "d"], [0.5, 0.1, -0.2, 0.2]):
+        res = run_put_down_once(
+            arm=arm,
+            grasp_pose=[0.46, 0.20, 0.08, 0.0, 0.0, 0.0],
+            move_duration=0.02,
+            place_bounds=bad,
+        )
+        assert res["success"] is True
+        assert "place_clamped" not in res
+        assert res["placed_at"] == [0.46, 0.2, 0.08]
+
+
+def test_clamp_place_xy_margin_swallowing_axis_centers() -> None:
+    import ovs_agent.apps.voice_rebot_arm.grasp_service as gs
+
+    # y span 0.06 with margin 0.05 each side → no room: center at 0.0.
+    out = gs._clamp_place_xy([0.50, 0.10, 0.08, 0, 0, 0], [0.2, 0.4, -0.03, 0.03], 0.05)
+    assert out is not None
+    assert out[0] == pytest.approx(0.35)  # 0.4 - 0.05
+    assert out[1] == pytest.approx(0.0)   # centered

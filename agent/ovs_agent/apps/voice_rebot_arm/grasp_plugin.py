@@ -520,6 +520,22 @@ class GraspPlugin(Plugin):
                 kwargs["place_pose"] = tuple(float(v) for v in pp)
             except (TypeError, ValueError):
                 logger.warning("GraspPlugin: ignoring malformed place_pose")
+        pb = self.cfg.get("place_bounds")
+        if pb:
+            try:
+                bounds = [float(v) for v in pb]
+                if len(bounds) == 4:
+                    kwargs["place_bounds"] = bounds
+                else:
+                    logger.warning("GraspPlugin: place_bounds needs 4 values")
+            except (TypeError, ValueError):
+                logger.warning("GraspPlugin: ignoring malformed place_bounds")
+        pm = self.cfg.get("place_margin_m")
+        if pm is not None:
+            try:
+                kwargs["place_margin_m"] = float(str(pm).strip())
+            except (TypeError, ValueError):
+                pass
         md = self.cfg.get("move_duration")
         if md is not None:
             try:

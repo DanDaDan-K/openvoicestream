@@ -89,6 +89,38 @@ def _gripper_holding(arm: Any, default: Optional[bool] = None) -> Optional[bool]
         return default
 
 
+def _clamp_place_xy(
+    place6: list, bounds: Any, margin_m: float
+) -> Optional[list]:
+    """Clamp a place pose's x/y into the table bounds shrunk inward by
+    ``margin_m`` (objects released at the very edge get nudged off the table
+    by the jaw retreat — real machine, 2026-06-12 night run). ``bounds`` is
+    ``[x_min, x_max, y_min, y_max]`` in the base frame (see
+    tools/table_bounds_calib.py). Returns the clamped pose, or None when the
+    point is already inside / bounds are malformed."""
+    try:
+        x_min, x_max, y_min, y_max = (float(v) for v in bounds)
+    except (TypeError, ValueError):
+        logger.warning("put_down: ignoring malformed place_bounds %r", bounds)
+        return None
+    if not (x_min < x_max and y_min < y_max):
+        logger.warning("put_down: ignoring inverted place_bounds %r", bounds)
+        return None
+    m = max(0.0, float(margin_m))
+
+    def _axis(v: float, lo: float, hi: float) -> float:
+        lo_m, hi_m = lo + m, hi - m
+        if lo_m > hi_m:  # margin swallows the axis → safest point is center
+            return (lo + hi) / 2.0
+        return min(max(v, lo_m), hi_m)
+
+    cx = _axis(place6[0], x_min, x_max)
+    cy = _axis(place6[1], y_min, y_max)
+    if abs(cx - place6[0]) < 1e-9 and abs(cy - place6[1]) < 1e-9:
+        return None
+    return [cx, cy, *place6[2:]]
+
+
 def _check_cancel(
     cancel_event: Optional[threading.Event],
     arm: Any,
@@ -821,6 +853,8 @@ def run_put_down_once(
     home_pose: tuple = (0.27, 0.0, 0.24, 0.0, 0.0, 0.0),
     cancel_event: Optional[threading.Event] = None,
     move_duration: float = 2.0,
+    place_bounds: Optional[list] = None,
+    place_margin_m: float = 0.05,
 ) -> dict:
     """Put the held object DOWN — preferably back where it was picked up.
 
@@ -867,6 +901,26 @@ def run_put_down_once(
         else:
             place6 = [float(v) for v in place_pose]
             approach6 = [place6[0], place6[1], place6[2] + 0.08, *place6[3:]]
+
+        # Table-boundary clamp: keep the release point away from the table
+        # edge (recorded grasp poses CAN be near the edge — the box was
+        # legitimately picked up there, but releasing there lets the retreat
+        # nudge it off). Shift the approach by the same delta so the descent
+        # stays vertical-ish and the recorded IK geometry survives.
+        if place_bounds:
+            clamped = _clamp_place_xy(place6, place_bounds, place_margin_m)
+            if clamped is not None:
+                result["place_clamped"] = True
+                result["place_original"] = place6[:3]
+                approach6[0] += clamped[0] - place6[0]
+                approach6[1] += clamped[1] - place6[1]
+                logger.warning(
+                    "put_down: place point (%.3f, %.3f) outside safe table "
+                    "bounds %s (margin %.2fm) — clamped to (%.3f, %.3f)",
+                    place6[0], place6[1], list(place_bounds), place_margin_m,
+                    clamped[0], clamped[1],
+                )
+                place6 = clamped
 
         # ── 1. approach above the place spot (IK-failure tolerated: fall
         # through to a direct move — the place pose itself is the gate). ──
