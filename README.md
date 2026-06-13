@@ -515,6 +515,12 @@ Pre-built `.so` files live in `patches/sherpa-onnx-lib/` (aarch64, Python 3.10, 
 
 ## Project Structure
 
+> **New here?** Read [ARCHITECTURE.md](ARCHITECTURE.md) first — it maps the three
+> repos (this product + `voxedge` library + `voxedge-engine`), the two processes,
+> and how to run the whole thing locally with no GPU. [DEVELOP.md](DEVELOP.md) is
+> the dev-box checklist; [docs/CONFIGURATION.md](docs/CONFIGURATION.md) covers
+> profiles and env vars.
+
 ```text
 openvoicestream/
 ├── server/                  # FastAPI voice service (the product server)

@@ -7,3 +7,9 @@ webrtcvad-wheels>=2.0.14  # VAD for long-audio segmentation (qwen3_asr bug A wor
 prometheus_client>=0.20,<1  # Week 2 production hardening: /metrics exposition
 python-json-logger>=2.0,<4  # Week 2 production hardening: structured JSON logging
 # sherpa-onnx: installed from CUDA wheel in Dockerfile
+#
+# voxedge: the edge voice library lives in its own repo (../voxedge) and is NOT
+# on PyPI, so it is intentionally not a pip-installable line here. Install it
+# explicitly — dev: `scripts/dev-setup.sh` (editable); image: the wheel staged
+# at deploy/wheels/ by `scripts/build_voxedge_wheel.sh`. See DEVELOP.md.
+#   import target: voxedge==0.0.1a0

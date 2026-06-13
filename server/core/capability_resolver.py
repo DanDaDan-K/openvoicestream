@@ -1,5 +1,11 @@
 """Unified concurrency-capability resolver.
 
+MIGRATION TWIN — this is the ACTIVE, profile/env-aware resolver used by the HTTP
+server. Its env-free counterpart is ``voxedge.engine.capability_resolver`` (the
+convergence target). Both follow docs/specs/concurrency-capability-framework.md.
+Prefer extending the voxedge copy; see ARCHITECTURE.md → "Known structural debt".
+
+
 Three sites previously re-implemented backend-capability resolution:
 
 - ``server.core.session_limiter`` — ``min(asr.max_concurrent, tts.max_concurrent)``
