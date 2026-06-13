@@ -139,14 +139,19 @@ API that makes later extraction safe. "TTS first" is only safe *after* the
 facade step; done before it, `tts_sequencer` is still mutated from the LLM and
 event paths.
 
-1. **`SessionState` + grouped transition methods** (open-ASR-generation, stamp
-   endpoint, clear-stale-endpoint, close-input, begin/end LLM turn, begin/end
-   TTS sentence). Migrate the dict in place, no behaviour change. Land + bench.
-2. **TTS facade in-place** (owns queue/buffer/flush; `enqueue_text`/`flush_text`/
-   `mark_flush`/`interrupt_and_clear`/`run`). Route `_event_loop`,
-   `_on_asr_final`, `_llm_turn_with_tools`, `_bargein_tts` through it. No file
-   move yet. Land + bench.
-3. Extract `tts_sequencer.py` (now genuinely self-contained). Land + bench.
+1. **[DONE — voxedge `3368c20`]** `SessionState` + grouped transition methods
+   (open-ASR-generation, stamp endpoint, clear-stale-endpoint, close-input,
+   deactivate-ASR). Migrated the dict in place, no behaviour change. Mac 221
+   passed; orin-nano orchestration subset 81/0.
+2. **[DONE — voxedge `b3feeba`]** In-place TTS facade `_TTSChannel` (owns
+   queue+buffer; `enqueue_text`/`flush_and_signal`/`interrupt_synth`/
+   `drain_and_reset`). Routed `_event_loop`, `_on_asr_final`,
+   `_llm_turn_with_tools`, `_bargein_tts` through it; no file move. The consumer
+   loop stays `Session._tts_out_task` (reads `self._tts.q`) and relocates with
+   the channel in step 3. Mac 221 passed; orin-nano 81/0.
+3. **[NEXT]** Extract `tts_sequencer.py` — move `_TTSChannel` **and** the
+   consumer loop (`_tts_out_task` → `_TTSChannel.run()`) into their own module,
+   severing the Session back-ref into explicit deps. Land + bench.
 4. Extract ASR turn helpers + `_asr_out_task` into `asr_loop.py`, **keeping
    `_on_asr_final` in `Session` as a callback**. Land + bench.
 5. Extract `audio_dispatcher.py` — only after ASR state transitions are
