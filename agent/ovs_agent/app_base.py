@@ -1512,6 +1512,27 @@ class BaseApp:
                                     "DIAG mic-gate OPEN rms=%.4f convstate=%s",
                                     rms, getattr(self, "_state", ConvState.IDLE).value,
                                 )
+                                # Pre-roll replay: the gate was CLOSED until this
+                                # chunk, so the low-energy ONSET of the command
+                                # (e.g. the unvoiced '抓' in '抓盒子') was sent to
+                                # SLV as zero-fill and the server ASR only heard
+                                # the loud tail ('盒子'). Replay the real audio
+                                # buffered just before the gate opened so ASR sees
+                                # the whole word. Apply makeup gain so it matches
+                                # the gated stream's level.
+                                for _buf in preroll.drain():
+                                    _ob = _buf
+                                    if makeup_gain != 1.0 and len(_ob):
+                                        try:
+                                            _gg = (
+                                                _np.frombuffer(_ob, dtype=_np.int16).astype(_np.float32)
+                                                * makeup_gain
+                                            )
+                                            _ob = _np.clip(_gg, -32768.0, 32767.0).astype(_np.int16).tobytes()
+                                        except Exception:  # pragma: no cover - defensive
+                                            pass
+                                    _diag_fwd_real += 1
+                                    await self._send_audio_nonblocking(_ob)
                             _gate_open_state = True
                             _gate_last_loud_ts = now_mono
                         elif rms < gate_close:
@@ -1536,6 +1557,14 @@ class BaseApp:
                                 _gate_open_state = False
                                 _diag_fwd_real = 0
                         if not _gate_open_state:
+                            # Gate closed: buffer the REAL chunk for pre-roll
+                            # (replayed at the next gate-open so the command
+                            # onset survives), but send zeros to SLV now to keep
+                            # the inter-utterance silence clean. The ring keeps
+                            # only the last ~preroll_max chunks, so a long
+                            # silence still replays just the moments before
+                            # speech, not stale audio.
+                            preroll.append(chunk)
                             if _gate_zeros is None or len(_gate_zeros) != len(chunk):
                                 _gate_zeros = b"\x00" * len(chunk)
                             out_chunk = _gate_zeros

@@ -36,6 +36,20 @@ def test_voice_rebot_arm_stays_resident_server_loop():
     assert {"grasp_object", "search_object", "put_down"} <= exempt
 
 
+def test_voice_rebot_arm_first_utterance_capture_tuning():
+    # 2026-06-13 "第一次没听到" fixes — lock the values so they can't drift back:
+    #  * reconnect_on_wake OFF so a hot/healthy wake doesn't drop the first
+    #    command in a 6s WS-rebuild window (health/idle reconnect still applies).
+    #  * energy gate ON (the path that needs the pre-roll onset recovery).
+    #  * wake-tone mic suppression trimmed so it can't eat a closely-following
+    #    command's onset.
+    cfg = _cfg()
+    assert cfg.reconnect_on_wake is False
+    assert cfg.energy_gate_enabled is True
+    tone = (getattr(cfg, "metadata", {}) or {}).get("wake_tone", {}) or {}
+    assert float(tone.get("mic_suppress_tail_ms", 600)) <= 300
+
+
 def test_voice_rebot_arm_enables_gated_tts_hardening():
     # dup-TTS drop + playback drain are opt-in framework features; the arm app
     # turns them on via config (they stay off everywhere else).

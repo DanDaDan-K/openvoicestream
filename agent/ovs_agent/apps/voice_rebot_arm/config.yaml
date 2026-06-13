@@ -62,7 +62,16 @@ gate_eos_min_speech_ms: 250
 gate_eos_delay_ms: 200
 vad_stall_eos_ms: 1500
 mic_drop_while_speaking: true
-reconnect_on_wake: true
+# reconnect_on_wake FALSE (2026-06-13): forcing a fresh SLV WebSocket on EVERY
+# wake rebuilt the ASR session + re-advertised tools (6s timeout window) and
+# dropped all mic audio during the reconnect — the FIRST command right after
+# waking landed in that window and was lost ("第一次没听到，要再说一次"). SLV
+# v1.15+ added an ASR-turn wall-clock timeout, so the old always-reconnect
+# workaround for degraded streaming-ASR workers is no longer needed. The
+# wake() path still reconnects when the WS is unhealthy OR idle >30s (session
+# may have been server-recycled), so empty-final recovery is preserved without
+# penalising the hot-dialogue first utterance.
+reconnect_on_wake: false
 
 # Opt-in TTS-output hardening (gated framework features; default off elsewhere).
 # Drop an identical TTS sentence repeated within this window, and defer turn
@@ -210,10 +219,15 @@ metadata:
   # fires, so the user knows the arm is listening. mic_suppress_tail_ms drops
   # mic input briefly after the tone so it isn't captured as a command. No
   # sleep_tone: in resident server-loop mode there is no single-turn sleep edge.
+  # 600→250ms (2026-06-13): the tone is only 150ms; a 600ms suppression tail
+  # ate the start of a command spoken right after the beep. 250ms covers the
+  # tone + brief reverb without swallowing the onset of a closely-following
+  # command (paired with the energy-gate pre-roll that recovers any onset that
+  # does slip through).
   wake_tone:
     hz: 880
     ms: 150
-    mic_suppress_tail_ms: 600
+    mic_suppress_tail_ms: 250
 
   wakeword:
     model: "${WAKEWORD_MODEL:-hey jarvis}"
