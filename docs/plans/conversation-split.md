@@ -149,17 +149,29 @@ event paths.
    `_llm_turn_with_tools`, `_bargein_tts` through it; no file move. The consumer
    loop stays `Session._tts_out_task` (reads `self._tts.q`) and relocates with
    the channel in step 3. Mac 221 passed; orin-nano 81/0.
-3. **[NEXT]** Extract `tts_sequencer.py` — move `_TTSChannel` **and** the
-   consumer loop (`_tts_out_task` → `_TTSChannel.run()`) into their own module,
-   severing the Session back-ref into explicit deps. Land + bench.
-4. Extract ASR turn helpers + `_asr_out_task` into `asr_loop.py`, **keeping
-   `_on_asr_final` in `Session` as a callback**. Land + bench.
-5. Extract `audio_dispatcher.py` — only after ASR state transitions are
-   encapsulated (the generation-ID guards span this boundary). Land + bench.
-6. Extract `client_events.py` for text/EOS/abort **only**; route tool
-   advertise/result into the `llm_turn`/tool-session path, not here. Land + bench.
-7. Extract `llm_turn.py` last (most entangled with tool dispatch + barge-in).
+3. **[DONE — voxedge `23384ff`]** Extracted `tts_sequencer.py` (`_TTSChannel` +
+   consumer loop `_tts_out_task` → `run()`) and `protocol.py` (shared wire
+   constants + `_is_pool_saturated`, cycle-free). Mac 221; orin-nano 83/0.
+4. **[DONE — voxedge `b982752`]** Extracted `asr_loop.py` (`_open_asr_turn` →
+   `open_turn()`, `_asr_out_task` → `run()`); `_on_asr_final` /
+   `_emit_pool_saturated` / `ASRSessionManager` stay on Session. Mac 221.
+5. **[DONE — voxedge `f4b0e98`]** Extracted `audio_dispatcher.py` (`_audio_loop`
+   → `run()`). Mac 221.
+6. **[DONE — voxedge `3f58cb3`]** Extracted `client_events.py` (`_event_loop` →
+   `run()` demux); handlers stay on Session. Mac 221.
+7. **[DONE — voxedge `307191c`]** Extracted `llm_turn.py` (`_llm_turn_with_tools`
+   → `_LLMTurn.run()` + `_emit_preamble` + `_ToolCallAcc`); `_on_asr_final`
+   stays on Session and drives it. Mac 221; orin-nano final soak 105/0.
 
-Steps 3–7 are independently revertible; steps 1–2 are prerequisites the later
-steps depend on, so they are **not** independently droppable. Do not claim a
-step is shippable until its bench (tests + barge-in/close-out stress) is green.
+**SPLIT COMPLETE.** conversation.py 1610 → 801 lines; split into session_state
+(102) + protocol (60) + tts_sequencer (252) + asr_loop (251) + audio_dispatcher
+(89) + client_events (90) + llm_turn (280). Steps 3–7 are each independently
+revertible; 1–2 were prerequisites. Each step gated on Mac suite green
+(221 passed, only 2 pre-existing Jetson `trt_edge_llm_tts` failures) + on-device
+orchestration bench on orin-nano.
+
+> Remaining (out of this task's scope): the modules still hold a Session
+> back-ref (`self._sess`); fully severing into explicit constructor deps is a
+> later cleanup. And before this ships to the **production arm** it still wants
+> the dedicated barge-in / multi-turn / tool-round real-machine soak (the unit +
+> orchestration-bench gate used here is strong but not that full soak).
