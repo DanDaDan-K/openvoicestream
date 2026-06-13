@@ -29,12 +29,18 @@ from ovs_agent.apps.voice_rebot_arm.tools.grasp_selfcheck import (  # noqa: E402
     _prime_camera,
 )
 
+# Mirror config.yaml metadata.grasp — keep in sync (this tool bypasses the
+# plugin's config threading, so drift here silently tests a different system
+# than production: move_duration 2.0-vs-1.4 and the old low scan poses both
+# shipped that way before 2026-06-13).
 SCAN_POSES = [
-    (0.27, 0.00, 0.26, 0.0, 0.0, 0.0),
-    (0.25, 0.10, 0.26, 0.0, 0.0, 0.35),
-    (0.25, -0.10, 0.26, 0.0, 0.0, -0.35),
+    (0.27, 0.00, 0.30, 0.0, 0.30, 0.0),
+    (0.25, 0.10, 0.30, 0.0, 0.30, 0.35),
+    (0.25, -0.10, 0.30, 0.0, 0.30, -0.35),
 ]
 PLAUSIBLE_BOX = [0.05, 0.85, -0.50, 0.50, -0.02, 0.50]
+PLACE_BOUNDS = [0.20, 0.60, -0.26, 0.40]
+MOVE_DURATION = 1.4
 
 
 def main() -> int:
@@ -45,6 +51,7 @@ def main() -> int:
     ap.add_argument("--force", type=float, default=0.8)
     ap.add_argument("--insertion", type=float, default=0.025)
     ap.add_argument("--max-consec-fail", type=int, default=2)
+    ap.add_argument("--move-duration", type=float, default=MOVE_DURATION)
     ap.add_argument("--save-frames", default=None,
                     help="dir to save first color jpg + depth npy")
     args = ap.parse_args()
@@ -108,6 +115,7 @@ def main() -> int:
                 if not isinstance(gcfg["open_distance_m"], (int, float))
                 else float(gcfg["open_distance_m"]),
                 plausible_box=PLAUSIBLE_BOX,
+                move_duration=args.move_duration,
             )
             grasps.append(res)
             print("GRASP", i + 1, json.dumps(res, ensure_ascii=False, default=str))
@@ -127,6 +135,8 @@ def main() -> int:
                 pregrasp_pose=res.get("pregrasp_pose"),
                 open_distance_m=float(res.get("open_distance_m", 0.09)),
                 cancel_event=threading.Event(),
+                move_duration=args.move_duration,
+                place_bounds=PLACE_BOUNDS,
             )
             putdowns.append(pd)
             print("PUTDOWN", i + 1, json.dumps(pd, ensure_ascii=False, default=str))
