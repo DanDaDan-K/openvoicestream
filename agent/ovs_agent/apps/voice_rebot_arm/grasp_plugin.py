@@ -384,10 +384,13 @@ class GraspPlugin(Plugin):
             "gripper. The arm sets it back down at the spot it was picked up "
             "from (so the camera can find it again), opens the gripper, and "
             "returns home. Use this whenever the user wants the held object "
-            "put down or returned, EVEN IF they name the object. Triggers: "
-            "'放下', '放下来', '放回去', '把盒子放回去', '放下盒子', '放回原处', "
-            "'放到桌上', '把它放下', 'put it down', 'put down', 'put the box "
-            "back', 'place it', 'set it down', 'drop it', 'release it'."
+            "put down or returned, EVEN IF they name the object — including "
+            "'放回原位' (the '放' verb means release the held object; '原位' "
+            "only says WHERE, do NOT confuse with go_home). Triggers: "
+            "'放下', '放下来', '放回去', '放回原位', '放好', '把盒子放回去', "
+            "'放下盒子', '放回原处', '放到桌上', '把它放下', 'put it down', "
+            "'put down', 'put the box back', 'place it', 'set it down', "
+            "'drop it', 'release it'."
         )
 
         @registry.tool(

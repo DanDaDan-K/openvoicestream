@@ -63,6 +63,12 @@ SYSTEM_PROMPT = (
     '    User: "把盒子放回去" → call put_down()\n'
     '       (putting DOWN the held object — even though an object is named,\n'
     '        this is put_down, NOT a new grasp)\n'
+    '    User: "放回原位"     → call put_down()\n'
+    '    User: "放回去"       → call put_down()\n'
+    "       ('放' = release the HELD object; '原位' / '去' only say WHERE it\n"
+    "        goes. The verb '放' decides put_down — do NOT pick go_home just\n"
+    "        because '原位' looks like '回到原位'. go_home moves the EMPTY\n"
+    '        arm home; put_down releases what the arm is holding.)\n'
     '  AFTER a motion tool returns, do NOT speak either — reply with an\n'
     '  EMPTY message (no words at all). The system plays a completion tone\n'
     '  when the motion finishes; any text you add only delays the next\n'
@@ -72,12 +78,14 @@ SYSTEM_PROMPT = (
     "  words in each tool's description. Trigger examples (not exhaustive):\n"
     "    '挥手' / '挥挥手' / '打招呼' → wave\n"
     "    '回到原位' / '回家' / '归位' / '复位' / 'home' / 'reset' → go_home\n"
+    "       (ONLY when the arm just moves home and nothing is placed — if the\n"
+    "        user says '放' something, it is put_down, NOT go_home)\n"
     "    '张开夹爪' / '松开' / '打开夹爪' → open_gripper\n"
     "    '闭合夹爪' / '夹紧' / '合上夹爪' → close_gripper\n"
     "    '指向' / '指一下' → point_at\n"
     "    '抓/拿起/夹住 + 物体名' → grasp_object\n"
     "    '找/搜索 + 物体名' → search_object\n"
-    "    '放下' / '放回去' → put_down\n"
+    "    '放下' / '放回去' / '放回原位' / '放好' / '放下来' → put_down\n"
     '  Never substitute a semantically-similar tool for a different action\n'
     "  the user named — if the user names an action no tool supports ('点头',\n"
     "  '转圈', '跳舞', 'nod', 'spin'), call NO tool and reply that you don't\n"
@@ -152,7 +160,7 @@ TOOLS = [
         "properties": {"object_name": {"type": "string", "description": "Catalog label of the object to find."}},
         "required": ["object_name"],
     }),
-    _fn("put_down", "Put down / place / release the object currently held by the gripper. The arm sets it back down at the spot it was picked up from (so the camera can find it again), opens the gripper, and returns home. Use this whenever the user wants the held object put down or returned, EVEN IF they name the object. Triggers: '放下', '放下来', '放回去', '把盒子放回去', '放下盒子', '放回原处', '放到桌上', '把它放下', 'put it down', 'put down', 'put the box back', 'place it', 'set it down', 'drop it', 'release it'."),
+    _fn("put_down", "Put down / place / release the object currently held by the gripper. The arm sets it back down at the spot it was picked up from (so the camera can find it again), opens the gripper, and returns home. Use this whenever the user wants the held object put down or returned, EVEN IF they name the object — including '放回原位' (the '放' verb means release the held object; '原位' only says where, do NOT confuse with go_home). Triggers: '放下', '放下来', '放回去', '放回原位', '放好', '把盒子放回去', '放下盒子', '放回原处', '放到桌上', '把它放下', 'put it down', 'put down', 'put the box back', 'place it', 'set it down', 'drop it', 'release it'."),
     _fn("time_now", "Return the current local time as ISO 8601."),
     _fn("set_mode", "Switch the agent to a different mode.", {
         "type": "object",
@@ -195,6 +203,12 @@ MATRIX = [
     ("把盒子放回去", "put_down", None),
     ("放回去", "put_down", None),
     ("put the box back", "put_down", None),
+    # '放回原位' DISAMBIGUATION: '放' (place the held object) must win over
+    # '原位' resembling go_home's '回到原位' — real-machine miss 2026-06-13,
+    # "放回原位" fired go_home (arm went home still holding the box).
+    ("放回原位", "put_down", None),
+    ("把盒子放回原位", "put_down", None),
+    ("放好", "put_down", None),
     # search_object
     ("找一下盒子", "search_object", "box"),
     ("看看有没有盒子", "search_object", "box"),
