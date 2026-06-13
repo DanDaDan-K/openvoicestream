@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reBot Arm Dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #14171c; color: #d8dee6;
+         font: 14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px;
+           padding: 10px 16px; background: #1b2027; border-bottom: 1px solid #2a313b; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .pill { padding: 2px 10px; border-radius: 999px; font-size: 12px;
+          background: #2a313b; }
+  .pill.busy { background: #7a4a12; color: #ffd9a0; }
+  .pill.idle { background: #1d4a2a; color: #a8f0bc; }
+  .grid { display: grid; gap: 12px; padding: 12px 16px;
+          grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  .card { background: #1b2027; border: 1px solid #2a313b; border-radius: 10px;
+          padding: 12px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; color: #8b96a5;
+             text-transform: uppercase; letter-spacing: .06em; }
+  .frames { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .frames img { width: 100%; border-radius: 6px; background: #000;
+                min-height: 120px; object-fit: contain; }
+  .frames .cap { font-size: 11px; color: #8b96a5; text-align: center; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  td, th { padding: 3px 6px; border-bottom: 1px solid #242b34; text-align: left; }
+  th { color: #8b96a5; font-weight: 500; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  .ev { margin: 0; padding: 0; list-style: none; max-height: 260px; overflow-y: auto; }
+  .ev li { padding: 5px 6px; border-bottom: 1px solid #242b34; font-size: 12.5px; }
+  .ev .ok { color: #7ee2a0; } .ev .fail { color: #f2918c; }
+  .ev .t { color: #707c8c; font-size: 11px; margin-right: 6px; }
+  .bars { display: flex; height: 14px; border-radius: 4px; overflow: hidden;
+          margin-top: 4px; }
+  .bars div { font-size: 9px; line-height: 14px; padding: 0 3px; overflow: hidden;
+              white-space: nowrap; color: #10131a; }
+  svg { width: 100%; background: #10131a; border-radius: 6px; }
+  .muted { color: #707c8c; }
+</style>
+</head>
+<body>
+<header>
+  <h1>reBot B601-DM</h1>
+  <span id="busyPill" class="pill idle">idle</span>
+  <span id="frameAge" class="pill">no frames</span>
+  <span id="conn" class="pill">connecting…</span>
+</header>
+<div class="grid">
+  <div class="card" style="grid-column: 1 / -1;">
+    <h2>相机 — 决策帧 / 空闲取景</h2>
+    <div class="frames">
+      <div><img id="imgColor" alt="annotated"><div class="cap" id="capColor">标注彩图</div></div>
+      <div><img id="imgDepth" alt="depth"><div class="cap">深度伪彩（黑=无返回）</div></div>
+    </div>
+    <table id="detTable" style="margin-top:8px;"></table>
+  </div>
+  <div class="card">
+    <h2>机械臂状态</h2>
+    <table id="armTable"><tr><td class="muted">等待数据…</td></tr></table>
+  </div>
+  <div class="card">
+    <h2>动作时间线</h2>
+    <ul class="ev" id="events"><li class="muted">暂无事件</li></ul>
+  </div>
+  <div class="card">
+    <h2>桌面俯视 — place_bounds</h2>
+    <svg id="topdown" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="muted" style="font-size:11px;margin-top:4px;">
+      绿框=安全放置区（margin 内收前），红点=臂基座，蓝点=最近放置点（橙=被 clamp 的原始点）
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let lastSeq = -1;
+
+const STAGE_COLORS = ["#7ee2a0","#7ec3e2","#e2d27e","#e29a7e","#c87ee2","#7e8ce2","#e27ea8"];
+
+function fmt(v) {
+  return (typeof v === "number") ? (Math.abs(v) < 1000 ? v.toFixed(3) : v.toFixed(0)) : String(v);
+}
+
+function renderArm(arm) {
+  const t = $("armTable");
+  if (!arm) { t.innerHTML = '<tr><td class="muted">observation server 不可达</td></tr>'; return; }
+  const keys = Object.keys(arm);
+  const pri = k => (/tcp|grip|pose/.test(k) ? 0 : /joint|pos/.test(k) ? 1 : 2);
+  keys.sort((a,b) => pri(a)-pri(b) || a.localeCompare(b));
+  t.innerHTML = keys.map(k =>
+    `<tr><th>${k}</th><td class="num">${fmt(arm[k])}</td></tr>`).join("");
+}
+
+function renderDets(meta) {
+  const t = $("detTable");
+  if (!meta) { t.innerHTML = ""; return; }
+  let rows = `<tr><th>阶段</th><td>${meta.stage}</td><th>检出</th><td>${(meta.detections||[]).length}</td></tr>`;
+  (meta.detections||[]).forEach(d => {
+    rows += `<tr><th>· ${d.class}</th><td class="num">${d.conf}</td><td></td><td></td></tr>`;
+  });
+  if (meta.best) {
+    const b = meta.best;
+    rows += `<tr><th>best</th><td>${b.class} ${b.conf}</td><th>方法/宽</th><td>${b.method} / ${b.jaw_width_m}m</td></tr>`;
+  }
+  t.innerHTML = rows;
+}
+
+function renderEvents(events) {
+  const ul = $("events");
+  if (!events || !events.length) return;
+  ul.innerHTML = events.slice().reverse().map(e => {
+    const ok = e.success || e.found;
+    const time = new Date(e.ts*1000).toLocaleTimeString();
+    let bars = "";
+    if (e.stage_ms) {
+      const total = Object.values(e.stage_ms).reduce((a,b)=>a+b,0) || 1;
+      let i = 0;
+      bars = '<div class="bars">' + Object.entries(e.stage_ms).map(([k,v]) =>
+        `<div style="width:${Math.max(2,100*v/total)}%;background:${STAGE_COLORS[i++%STAGE_COLORS.length]}" title="${k} ${v}ms">${k}</div>`
+      ).join("") + "</div>";
+    }
+    const extra = e.error ? ` <span class="fail">${e.error}</span>` :
+      (e.place_clamped ? ' <span class="fail">⚠ 放置点被 clamp</span>' : "");
+    return `<li><span class="t">${time}</span><span class="${ok?"ok":"fail"}">`
+      + `${e.kind} ${ok?"✓":"✗"}</span>${extra}${bars}</li>`;
+  }).join("");
+}
+
+function renderTopdown(bounds, events) {
+  const svg = $("topdown");
+  // world → svg: x(0..0.8m) downward→up, y(-0.45..0.45) → left-right
+  const W=100, H=100, X0=0.0, X1=0.80, Y0=-0.45, Y1=0.45;
+  const px = (x,y) => [ (y-Y0)/(Y1-Y0)*W, H - (x-X0)/(X1-X0)*H ];
+  let s = "";
+  if (bounds) {
+    const [a,b] = px(bounds[1], bounds[2]), [c,d] = px(bounds[0], bounds[3]);
+    s += `<rect x="${Math.min(a,c)}" y="${Math.min(b,d)}" width="${Math.abs(c-a)}" height="${Math.abs(d-b)}"
+          fill="rgba(126,226,160,.12)" stroke="#7ee2a0" stroke-width="0.6"/>`;
+  }
+  const [bx,by] = px(0,0);
+  s += `<circle cx="${bx}" cy="${by}" r="2.2" fill="#f2918c"/>`;
+  const lastPut = (events||[]).slice().reverse().find(e => e.placed_at);
+  if (lastPut) {
+    const [ux,uy] = px(lastPut.placed_at[0], lastPut.placed_at[1]);
+    s += `<circle cx="${ux}" cy="${uy}" r="2" fill="#7ec3e2"/>`;
+    if (lastPut.place_original) {
+      const [ox,oy] = px(lastPut.place_original[0], lastPut.place_original[1]);
+      s += `<circle cx="${ox}" cy="${oy}" r="1.6" fill="#e2a35e"/>
+            <line x1="${ox}" y1="${oy}" x2="${ux}" y2="${uy}" stroke="#e2a35e"
+              stroke-width="0.5" stroke-dasharray="2 1"/>`;
+    }
+  }
+  svg.innerHTML = s;
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/api/state", {cache: "no-store"});
+    const st = await r.json();
+    $("conn").textContent = "已连接";
+    const busy = st.busy;
+    $("busyPill").textContent = busy ? `执行中: ${busy}` : "idle";
+    $("busyPill").className = "pill " + (busy ? "busy" : "idle");
+    renderArm(st.arm);
+    renderEvents(st.events);
+    renderTopdown(st.place_bounds, st.events);
+    if (st.frame_seq !== lastSeq && st.frame_meta) {
+      lastSeq = st.frame_seq;
+      $("imgColor").src = "/api/frame.jpg?s=" + lastSeq;
+      $("imgDepth").src = "/api/depth.jpg?s=" + lastSeq;
+      $("capColor").textContent = `标注彩图 — ${st.frame_meta.stage} (#${lastSeq})`;
+      renderDets(st.frame_meta);
+    }
+    if (st.frame_meta) {
+      const age = Math.max(0, Date.now()/1000 - st.frame_meta.ts);
+      $("frameAge").textContent = age < 5 ? "帧: 实时" : `帧: ${age.toFixed(0)}s 前`;
+    }
+  } catch (e) {
+    $("conn").textContent = "连接断开";
+  }
+}
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

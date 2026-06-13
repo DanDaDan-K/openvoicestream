@@ -53,6 +53,13 @@ class GraspPlugin(Plugin):
         self._grasp_task: Optional[asyncio.Task] = None
         self._prime_task: Optional[asyncio.Task] = None
         self._registered = False
+        # Single-reader camera discipline: the pipeline (motion) and the idle
+        # dashboard observer never read the Orbbec concurrently. Motion holds
+        # the lock for its whole run; the idle observer try-acquires per frame
+        # (worst case it delays a grasp start by one ~100ms read).
+        self._cam_lock = threading.Lock()
+        self._idle_stop = threading.Event()
+        self._idle_thread: Optional[threading.Thread] = None
         # Last successful grasp result (grasp_pose / pregrasp_pose /
         # open_distance_m). put_down replays it so the object is placed back
         # at the camera-visible spot it was picked from. Cleared on a
@@ -94,6 +101,16 @@ class GraspPlugin(Plugin):
             self._prime_task = asyncio.create_task(
                 asyncio.to_thread(self._prime_perception), name="grasp-prime"
             )
+        # Idle dashboard observer: low-rate "detection viewfinder" frames when
+        # the arm is NOT moving (demo prep: place the object, glance at the
+        # dashboard, confirm it is detected before speaking). Off → decision
+        # frames still flow during motions.
+        if self.cfg.get("enabled", True) is not False and self._idle_frames_enabled():
+            self._idle_stop.clear()
+            self._idle_thread = threading.Thread(
+                target=self._idle_observer, name="grasp-idle-frames", daemon=True
+            )
+            self._idle_thread.start()
 
     def _ggcnn_enabled(self) -> bool:
         v = self.cfg.get("ggcnn_refiner", False)
@@ -137,6 +154,84 @@ class GraspPlugin(Plugin):
                 exc_info=True,
             )
 
+    def _idle_frames_enabled(self) -> bool:
+        v = self.cfg.get("idle_frames", True)
+        return v if isinstance(v, bool) else str(v).strip().lower() not in {"0", "false", "no"}
+
+    def _idle_interval_s(self) -> float:
+        try:
+            return max(0.5, float(str(self.cfg.get("idle_frame_interval_s", 2.0)).strip()))
+        except (TypeError, ValueError):
+            return 2.0
+
+    def _idle_observer(self) -> None:
+        """Background thread: one frame + detection every interval while the
+        arm is idle. Strictly a second-class camera citizen: skips the tick
+        whenever a motion is in flight or holds the camera lock."""
+        while not self._idle_stop.wait(self._idle_interval_s()):
+            if self._busy_motion_name() is not None:
+                continue
+            cam, seg = self._camera, self._segmenter
+            if cam is None or seg is None:
+                continue
+            if not self._cam_lock.acquire(blocking=False):
+                continue
+            try:
+                if self._busy_motion_name() is not None:
+                    continue
+                color, depth = cam.get_frame()
+                if color is None or depth is None:
+                    continue
+                try:
+                    conf = float(str(self.cfg.get("conf", 0.25)).strip() or 0.25)
+                except (TypeError, ValueError):
+                    conf = 0.25
+                results = seg.predict(color, conf=conf)
+                self._publish_frame(color, depth, results, None, "idle")
+            except Exception:
+                logger.debug("idle observer tick failed", exc_info=True)
+            finally:
+                self._cam_lock.release()
+
+    def _run_locked(self, fn, *args, **kwargs):
+        """Run a pipeline function holding the camera lock (worker thread)."""
+        with self._cam_lock:
+            return fn(*args, **kwargs)
+
+    def _publish_frame(self, color_bgr, depth_mm, results, best, stage) -> None:
+        """frame_sink for the pipeline + idle observer → dashboard bus.
+        Annotation/encode is ~10ms; failures must never reach the pipeline."""
+        try:
+            from .dashboard_bus import BUS
+            from .perception.annotate import annotate_frame, depth_colormap
+
+            dets = []
+            for r in results or []:
+                names = getattr(r, "names", {}) or {}
+                for b in getattr(r, "boxes", []) or []:
+                    import numpy as _np
+
+                    dets.append({
+                        "class": str(names.get(int(_np.asarray(b.cls).reshape(-1)[0]),
+                                               "?")),
+                        "conf": round(float(_np.asarray(b.conf).reshape(-1)[0]), 3),
+                    })
+            meta: dict = {"stage": str(stage), "detections": dets}
+            if best is not None:
+                meta["best"] = {
+                    "class": str(getattr(best, "class_name", "?")),
+                    "conf": round(float(getattr(best, "conf", 0.0)), 3),
+                    "jaw_width_m": round(float(getattr(best, "jaw_width_m", 0.0)), 4),
+                    "method": str(getattr(best, "method", "?")),
+                    "center_px": [int(v) for v in getattr(best, "center_px", (0, 0))],
+                }
+            jpg = annotate_frame(color_bgr, results, best, label=str(stage))
+            depth_jpg = depth_colormap(depth_mm) if depth_mm is not None else None
+            if jpg:
+                BUS.publish_frame(jpg, depth_jpg, meta)
+        except Exception:
+            logger.debug("dashboard frame publish failed", exc_info=True)
+
     def _busy_motion_name(self) -> Optional[str]:
         """Name of our in-flight motion (e.g. 'grasp-box'), or None."""
         task = self._grasp_task
@@ -149,6 +244,12 @@ class GraspPlugin(Plugin):
 
     async def stop(self) -> None:
         await super().stop()
+        # Idle dashboard observer first — it must stop touching the camera
+        # before perception teardown.
+        self._idle_stop.set()
+        if self._idle_thread is not None:
+            self._idle_thread.join(timeout=3.0)
+            self._idle_thread = None
         # Wind down the boot-time perception priming first (it only loads the
         # model / pulls frames — bounded work, brief wait then abandon).
         if self._prime_task is not None and not self._prime_task.done():
@@ -383,6 +484,7 @@ class GraspPlugin(Plugin):
             else:
                 params["adaptive_force"] = True
             return await asyncio.to_thread(
+                self._run_locked,
                 run_grasp_once,
                 target,
                 arm=arm,
@@ -392,6 +494,7 @@ class GraspPlugin(Plugin):
                 T_hand_eye=self._hand_eye,
                 cancel_event=cancel_event,
                 ggcnn=self._ggcnn,
+                frame_sink=self._publish_frame,
                 **params,
             )
 
@@ -440,6 +543,7 @@ class GraspPlugin(Plugin):
             from .grasp_service import run_search_once
 
             return await asyncio.to_thread(
+                self._run_locked,
                 run_search_once,
                 target,
                 arm=arm,
@@ -448,6 +552,7 @@ class GraspPlugin(Plugin):
                 camera=self._camera,
                 T_hand_eye=self._hand_eye,
                 cancel_event=cancel_event,
+                frame_sink=self._publish_frame,
                 **self._search_params(),
             )
 
@@ -620,6 +725,17 @@ class GraspPlugin(Plugin):
         if res and res.get("success") and res.get("grasp_pose"):
             self._last_grasp = dict(res)
         logger.info("GraspPlugin: grasp result: %s", res)
+        if res:
+            try:
+                from .dashboard_bus import BUS
+
+                BUS.publish_event(
+                    str(task.get_name() or "motion"),
+                    {k: v for k, v in res.items()
+                     if isinstance(v, (str, int, float, bool, list, dict))},
+                )
+            except Exception:
+                logger.debug("dashboard event publish failed", exc_info=True)
         # Audible completion feedback: the parallel tool result returned long
         # ago ("好的"), so without this the user cannot tell when the arm is
         # done and safe to command again. Skip on cancel — the user stopped it

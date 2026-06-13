@@ -399,3 +399,15 @@ metadata:
     # 2026-06-12; a grasp at x=0.596 succeeded the same minute, so reach
     # comfortably exceeds the old 0.44 assumption).
     plausible_box: [0.05, 0.85, -0.50, 0.50, -0.02, 0.50]
+    # Dashboard idle "detection viewfinder": when NO motion is in flight, grab
+    # one frame + detection every interval and publish to the dashboard (demo
+    # prep: place the object, confirm it is seen before speaking). Strictly a
+    # second-class camera reader — any motion preempts it instantly.
+    idle_frames: true
+    idle_frame_interval_s: 2.0
+  dashboard:
+    # Read-only web dashboard (frames / arm state / event timeline / table
+    # topdown). No control endpoints, safe to expose on the LAN. The container
+    # must publish this port (recreate script: -p 8776:8776).
+    enabled: true
+    port: ${ARM_DASHBOARD_PORT:-8776}

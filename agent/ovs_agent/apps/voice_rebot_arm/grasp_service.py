@@ -217,6 +217,7 @@ def run_grasp_once(
     servo_correct: bool = True,
     ggcnn: Any = None,
     release_after: bool = False,
+    frame_sink: Any = None,
 ) -> dict:
     """Run a single cancellable grasp attempt for ``target``.
 
@@ -296,6 +297,7 @@ def run_grasp_once(
             servo_correct=servo_correct,
             ggcnn=ggcnn,
             release_after=release_after,
+            frame_sink=frame_sink,
         )
         res["attempt"] = attempt
         retriable = bool(res.pop("_retriable", False))
@@ -340,6 +342,7 @@ def _grasp_attempt(
     servo_correct: bool,
     ggcnn: Any,
     release_after: bool,
+    frame_sink: Any = None,
 ) -> dict:
     """One full detect→grasp→carry attempt. Returns the result dict; a
     ``_retriable: True`` key marks failures worth a fresh attempt."""
@@ -409,6 +412,13 @@ def _grasp_attempt(
                         ggcnn=ggcnn,
                     )
                 )
+                if frame_sink is not None:
+                    # Dashboard decision-frame tee — never let visualization
+                    # break (or measurably slow) the grasp itself.
+                    try:
+                        frame_sink(color_bgr, depth_mm, results, b, stage)
+                    except Exception:
+                        logger.debug("frame_sink failed", exc_info=True)
                 if b is not None:
                     return b, Kl, nd
             return None, Kl, nd
@@ -1035,6 +1045,7 @@ def run_search_once(
     warm_up_frames: int = 3,
     frames: int = 6,
     indicate: bool = True,
+    frame_sink: Any = None,
 ) -> dict:
     """Sweep the eye-in-hand camera across ``scan_poses`` to find ``target``.
 
@@ -1080,6 +1091,11 @@ def run_search_once(
                 results = segmenter.predict(color_bgr, conf=conf, only_names={target})
                 results = _filter_results_to_target(results, target)
                 cand = select_best_grasp(estimate_grasps(results, depth_mm, K))
+                if frame_sink is not None:
+                    try:
+                        frame_sink(color_bgr, depth_mm, results, cand, f"search:{idx}")
+                    except Exception:
+                        logger.debug("frame_sink failed", exc_info=True)
                 if cand is not None and (best is None or cand.conf > best.conf):
                     best = cand
             if best is None:
