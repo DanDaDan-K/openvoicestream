@@ -97,9 +97,13 @@ built wheel:
                                                           device image  ──▶  orin-nano / rk3576 / rpi
 ```
 
-`deploy/wheels/` is git-ignored — the wheel is a build artifact, regenerated
-from source, never hand-committed. The `.BUILD.txt` sidecar records which
-voxedge commit a given wheel came from. The `Dockerfile.*.voxedge-patch` images
+The wheel (a ~200KB pure-Python artifact) **is committed** to git, so a fresh
+checkout can `docker build` with no "rebuild the wheel first" step (the images
+have no `git` for a `git+https` install, and we don't publish to PyPI). The rest
+of `deploy/wheels/` is git-ignored; rebuild + commit the wheel when voxedge
+changes (`scripts/build_voxedge_wheel.sh`, see DEVELOP.md). The `.BUILD.txt`
+sidecar records which voxedge commit a given wheel came from. The
+`Dockerfile.*.voxedge-patch` images
 `--force-reinstall` just this wheel onto a running base image for fast,
 Python-only iteration without a full rebuild. See [DEVELOP.md](DEVELOP.md).
 

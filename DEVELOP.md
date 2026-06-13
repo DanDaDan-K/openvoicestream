@@ -37,17 +37,24 @@ The images do **not** bind-mount voxedge. Every device Dockerfile
 (`Dockerfile.*.voxedge-patch`) `--force-reinstall` just that wheel onto a base
 image for fast Python-only iteration.
 
-**The wheel is a build artifact of `../voxedge`.** Rebuild it whenever voxedge
-source changes, before building/deploying any image:
+**The wheel is committed to git** (a ~200KB pure-Python build artifact of
+`../voxedge`). That's deliberate: the device images have no `git` (so a
+`pip install git+https://…` isn't an option) and we don't publish to PyPI, so
+committing the wheel means a fresh checkout can build/deploy any image with **no
+"rebuild the wheel first" step**. `deploy/wheels/` is otherwise git-ignored;
+only the wheel + its `voxedge.BUILD.txt` are tracked (see `.gitignore`).
+
+**When `../voxedge` changes, rebuild AND commit the wheel:**
 
 ```bash
-scripts/build_voxedge_wheel.sh
+scripts/build_voxedge_wheel.sh        # regenerates wheel + voxedge.BUILD.txt
+git add -f deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl deploy/wheels/voxedge.BUILD.txt
+git commit -m "deps(voxedge): rebuild wheel @<sha>"
 ```
 
-This regenerates the wheel from `../voxedge` and writes
-`deploy/wheels/voxedge.BUILD.txt` recording the source git SHA, dirty flag, and
-build date — so you can always tell which voxedge a deployed wheel was built
-from. Commit the wheel and its `.BUILD.txt` together.
+`voxedge.BUILD.txt` records the source git SHA / dirty flag / build date, so you
+can always tell which voxedge commit the committed wheel came from (and CI/review
+can assert it matches `../voxedge`).
 
 > The wheel filename is version-stable (`0.0.1a0`, pinned in
 > `voxedge/pyproject.toml`) so the Dockerfiles never need editing on a rebuild;
