@@ -11,6 +11,7 @@ dependencies = [
     "openai>=1.40",
     "pyyaml>=6.0",
     "aiohttp>=3.9",
+    "voxedge>=0.0.1a0",
 ]
 
 [project.optional-dependencies]
@@ -78,6 +79,9 @@ packages = ["ovs_agent"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.uv.sources]
+voxedge = { path = "../../voxedge", editable = true }
 
 [dependency-groups]
 dev = [
