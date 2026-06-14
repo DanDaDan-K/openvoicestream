@@ -349,7 +349,7 @@ class GraspPlugin(Plugin):
             name="grasp_object",
             description=grasp_desc,
             timeout_s=2.0,
-            preamble_text="好的，正在抓取。",
+            preamble_text="Okay, grasping.",
             response_mode="parallel",
         )
         async def grasp_object(object_name: str) -> dict:  # noqa: ANN001
@@ -374,7 +374,7 @@ class GraspPlugin(Plugin):
             name="search_object",
             description=search_desc,
             timeout_s=2.0,
-            preamble_text="好的，正在寻找。",
+            preamble_text="Okay, looking for it.",
             response_mode="parallel",
         )
         async def search_object(object_name: str) -> dict:  # noqa: ANN001
@@ -402,7 +402,7 @@ class GraspPlugin(Plugin):
             name="put_down",
             description=put_down_desc,
             timeout_s=2.0,
-            preamble_text="好的，正在放回。",
+            preamble_text="Okay, putting it back.",
             response_mode="parallel",
         )
         async def put_down() -> dict:
@@ -813,22 +813,22 @@ class GraspPlugin(Plugin):
     @staticmethod
     def _failure_phrase(kind: str, res: dict) -> str:
         err = str(res.get("error") or "")
-        target = str(res.get("target") or "目标")
+        target = str(res.get("target") or "object")
         if kind == "not_found":
-            return f"没有找到{target}。"
+            return f"I couldn't find the {target}."
         if kind == "out_of_range":
             if "jaw width" in err or "太宽" in err:
-                return "目标太宽，夹不住。"
+                return "It's too wide to grip."
             if "too low" in err:
-                return "目标位置太低了。"
-            return "目标超出可达范围，请挪近一点。"
+                return "The target is too low."
+            return "That's out of reach. Please move it closer."
         if "release failed" in err:
-            return "没有放下来，请检查夹爪。"
+            return "I couldn't put it down. Please check the gripper."
         if "nothing held" in err or "lost during carry" in err:
-            return "没抓住，请再试一次。"
+            return "I didn't grab it. Please try again."
         if "IK failed" in err:
-            return "这个位置够不到。"
-        return "动作没有成功。"
+            return "I can't reach that position."
+        return "The action didn't succeed."
 
     async def _announce(self, text: str) -> None:
         """Direct text→TTS via the SLV CLIENT_TEXT channel (no LLM)."""
