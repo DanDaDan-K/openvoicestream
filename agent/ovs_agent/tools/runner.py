@@ -11,9 +11,9 @@ The *loop algorithm* now lives in
 remains the agent's public entrypoint: it wires the driver's seams to
 the agent's private concepts (``Session`` history mirroring, allowlist →
 schema, prefix-cache injection on iter >0, iteration-limit EventBus
-event, the ``session`` llm kwarg, and the final-text return value) and
-pins the client strategy (``preamble_dedup="index"``,
-``template_fastpath="any_first"``).
+event, the ``session`` llm kwarg, and the final-text return value). The
+driver has a single behaviour (name-keyed preamble dedup + all_join
+template fast-path) since P2a — the client no longer pins a strategy.
 
 The shim mutates ``session.history`` AND the caller-supplied
 ``messages`` list in lock-step. On cancel or iteration-cap it rolls
@@ -213,8 +213,8 @@ async def stream_with_tools(
     algorithm lives in the driver; this function provides the agent's
     private adaptations (allowlist→schema, prefix-cache injection on
     iter >0, iteration-limit event, ``session`` llm kwarg, dual-write
-    history, final-text return) and pins the client strategy
-    (``preamble_dedup="index"``, ``template_fastpath="any_first"``).
+    history, final-text return). The driver has a single behaviour since
+    P2a (name-keyed preamble dedup + all_join template fast-path).
 
     Returns the final assistant text (also appended to
     ``session.history``). Mutates both ``session.history`` and the
@@ -289,8 +289,6 @@ async def stream_with_tools(
             ctx=ctx,
             llm_params=base_kwargs,
             max_rounds=max_iterations,
-            preamble_dedup="index",
-            template_fastpath="any_first",
             tools_schema=tools_schema,
             llm_params_for_round=_params_for_round,
             on_iteration_limit=_on_iteration_limit,
