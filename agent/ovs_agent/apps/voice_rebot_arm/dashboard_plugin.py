@@ -157,20 +157,24 @@ class ArmDashboardPlugin(Plugin):
             "inject_wav: feeding %d PCM bytes (%.2fs @ %dHz) as a spoken utterance",
             len(pcm), len(pcm) / 2 / sr, sr,
         )
-        # Wake → clear wake-tone suppression → feed audio → trailing silence →
-        # force EOS so the SLV finalizes the utterance.
+        # Wake → clear wake-tone suppression → feed audio → generous trailing
+        # silence so the SLV's (silero) server VAD detects speech-end and
+        # finalizes the utterance NATURALLY — exactly like a real spoken command.
+        #
+        # We deliberately do NOT force asr_eos: a forced EOS preempts the
+        # streaming/offline-segment ASR before it produces a final for SHORT
+        # utterances (observed 2026-06-14: short English inject → empty final,
+        # while the offline /asr transcribes the very same audio cleanly). Real
+        # voice never force-EOSes; letting the server VAD endpoint routes short
+        # commands (<6s) through the offline-segment path, which transcribes
+        # English fine. The THINKING watchdog recovers if the VAD never fires.
         try:
             await self.app.wake(source="inject_wav")
         except Exception:
             logger.debug("inject_wav: wake failed", exc_info=True)
         await asyncio.sleep(0.4)
         await audio.inject_pcm(pcm)
-        await audio.inject_pcm(b"\x00\x00" * int(sr * 0.3))  # trailing silence
-        await asyncio.sleep(0.3)  # let the mic pump drain to SLV before EOS
-        try:
-            await self.app.send_asr_eos_once()
-        except Exception:
-            logger.debug("inject_wav: asr_eos failed", exc_info=True)
+        await audio.inject_pcm(b"\x00\x00" * int(sr * 1.0))  # 1.0s trailing silence
         return web.json_response({"ok": True, "pcm_bytes": len(pcm), "sr": sr})
 
     async def _api_state(self, request):  # noqa: ANN001
