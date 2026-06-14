@@ -275,11 +275,14 @@ async def test_done_tone_tail_vs_onset(test_config, tail_ms, react_ms):
         assert "盒子" in text, f"whole command lost: {text!r}"
 
 
-# Known live-ASR confusions for the Qwen3-TTS corpus (real findings, surfaced
-# by this very suite). xfail(strict=False) so the suite is green but the issue
-# stays visible and auto-flips to PASS if the voice/ASR improves.
-#   挥手 (huī shǒu, "wave") → Paraformer hears 回首 (huí shǒu, "look back");
-#   a tone-1/2 difference on the first syllable, consistent across reruns.
+# Known-bad corpus fixtures. xfail(strict=False) so the suite stays green but
+# the issue stays visible (auto-flips to PASS if the fixture is regenerated).
+#   tts_q_wave: the orin-nano Qwen3-TTS rendering of 挥手 (huī shǒu) is mis-
+#   synthesised with a tone the ASR hears as 回首 (huí shǒu). This is a
+#   TTS-FIXTURE artifact, NOT an ASR weakness — BOTH paraformer_trt AND qwen3
+#   (trt_edgellm) transcribe this WAV as 回首, while the macOS `say` 挥手
+#   (cmd_wave.wav, test_command_word_asr_accuracy) is recognised correctly.
+#   To fix: regenerate tts_q_wave with clearer synthesis.
 _ASR_KNOWN_BAD = {"tts_q_wave"}
 
 
@@ -290,7 +293,9 @@ _ASR_KNOWN_BAD = {"tts_q_wave"}
         pytest.param(
             w, c,
             marks=pytest.mark.xfail(
-                reason="live ASR confuses 挥手→回首 (tone 1/2)", strict=False
+                reason="TTS fixture artifact: Qwen3-TTS 挥手 renders as 回首 "
+                "(both ASR engines agree); regenerate the WAV to fix",
+                strict=False,
             ),
         )
         if w in _ASR_KNOWN_BAD else (w, c)

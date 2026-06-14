@@ -32,10 +32,10 @@ WAV_SCRIPT = [
     ("hello.wav",         "你好"),
     ("weather.wav",       "今天天气怎么样"),
     ("story_request.wav", "请详细讲一个五百字的小故事"),
-    # Use "别说了" (not "停下来") — macOS `say -v Tingting` enunciates
-    # "停" with too soft a /t/ for Paraformer-streaming, which then
-    # transcribes "停下来" as "听下来" and the stop_words match fails.
-    # "别说了" is reliably recognized and is in the default stop_words.
+    # Use "别说了" (not "停下来"): it is an EXACT entry in the default
+    # stop_words and macOS `say -v Tingting` enunciates it cleanly, so it
+    # matches reliably across ASR engines. ("停下来" was historically
+    # mis-transcribed as "听下来" by the streaming ASR, failing the match.)
     ("stop_zh.wav",       "别说了"),
     ("stop_en.wav",       "stop please"),
     ("stopwatch.wav",     "stopwatch"),
@@ -205,10 +205,10 @@ async def agent_factory(test_config):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Tolerate the known remote-ASR flake (Paraformer drops `asr_final`
-    under back-to-back multi-turn load). This is an environmental flake on
-    the live remote engine, NOT a code bug — so mark every collected e2e
-    item flaky to auto-retry. Scoped to this e2e conftest only; the unit
+    """Tolerate the known remote-ASR flake (the live streaming ASR can drop
+    `asr_final` under back-to-back multi-turn load). This is an environmental
+    flake on the live remote engine, NOT a code bug — so mark every collected
+    e2e item flaky to auto-retry. Scoped to this e2e conftest only; the unit
     suite is unaffected.
     """
     for item in items:
