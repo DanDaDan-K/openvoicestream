@@ -26,7 +26,8 @@ launch with `OVS_V2V_SERVER_LOOP=1`, drive `ServerToolCall` events via a
 **Batch 1 (P0 — highest demo risk):**
 - TC-001/002/003 — server-loop tool-call basics: command→preamble→action; preamble-TTS barge dropped; action-body (IDLE) speech captured. *(needs the stub-tool harness)*
 - TC-006/008/009/010/010b/012/014 — tool failure+retry / sequential / wrong-tool-corrected / slow-non-blocking / async-timeout→ok=False / concurrent / dead-WS-drop. **(DONE — `test_server_loop_tool_scenarios.py`)**
-- TC-007/011/013 — interrupt-during-tool (barge), 4429-during-tool. TC-013's agent-side behavior == TC-014 (both the `connect_if_dead=False` drop). TC-007/011 need barge mechanics → sim_pump or real-SLV.
+- TC-007/011 — **interrupt-during-tool: barge-in interrupts SPEECH but leaves the in-flight tool/arm running (no on_sleep); explicit sleep() halts the arm via the on_sleep plugin hook, not tool-task cancel (DONE — `test_barge_during_tool.py`)**. PRODUCT-OBSERVATION: no barge-in→arm-abort path today (talking over the robot ≠ stop the arm); flagged.
+- TC-013 — 4429-during-tool: agent-side behavior == TC-014 (both the `connect_if_dead=False` drop).
 - MT-006/008/011/013 — N>4 dialogue; dialogue×tool interleave; coreference "放回去"; one-sentence chat+command.
 - ER-001/009/011 — empty final ignored; **arm unavailable/perception-fail → clean ok=False once (DONE)**; **wake failure (DONE — test_wake_reconnect_policy)**. (ER-001/009 in `test_server_loop_tool_scenarios.py`.)
 - ER-005/008 — mid-speech disconnect; SLV-side LLM timeout. Both need real-SLV (server owns the LLM/timeout in server-loop) → not deterministically faithful agent-side.
@@ -57,6 +58,9 @@ launch with `OVS_V2V_SERVER_LOOP=1`, drive `ServerToolCall` events via a
 - lifecycle FSM: LC-002 (auto-sleep timer + idle→sleep→wake + in-flight delay),
   LC-008 (sleep()-cancels vs command-return-preserves the in-flight tool)
   (`test_lifecycle_sleep_wake.py`).
+- barge/stop during tool: TC-011 (barge interrupts speech, not the tool/arm),
+  TC-007 (sleep() halts arm via on_sleep hook, not tool-task cancel)
+  (`test_barge_during_tool.py`).
 
 ## PRODUCT-OBSERVATION correction (per-tool timeout)
 There IS an agent-side per-tool timeout, contrary to the earlier note:
