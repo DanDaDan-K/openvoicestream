@@ -29,16 +29,18 @@ Run: pytest tests/e2e/test_scenario_accuracy.py -v -s   (needs orin-nx live)
 The VALUE is the printed matrix; the test only sanity-asserts the baseline so
 it doesn't flap on the exploratory cells.
 
-FINDING (2026-06-14, this harness's first run, dev SLV on Qwen3-ASR / trt_edgellm):
-  after_action_idle = 0/3 — a 2ND consecutive command, spoken after the 1st
-  turn's reply ended (agent back to IDLE, TTS done), is NOT transcribed. The
-  gap diag (test_consecutive_gap_diag) confirms: at 2.5/5/8s the state is IDLE
-  & not playing, the 2nd command's audio reaches the mic pump (loud on_mic_rms,
-  max RMS 0.16), yet the SLV returns 0 partials / 0 final. test_multi_turn (the
-  energy-VAD path) fails the same way (2nd turn no assistant_done). So it is
-  engine/profile-level, NOT reBot-gate-specific: the trt_edgellm ASR backend
-  does not finalise a 2nd utterance on a persistent WS (multi_utterance). Was
-  green on paraformer_trt. Root-cause in progress.
+FINDING (2026-06-14) — RESOLVED by server commit 9b084a5:
+  This harness's first run surfaced after_action_idle = 0/3 — a 2ND consecutive
+  command, spoken after the 1st turn's reply ended (agent back to IDLE, TTS
+  done), was NOT transcribed. The gap diag (test_consecutive_gap_diag) showed
+  the 2nd command's audio reached the mic pump (loud on_mic_rms) yet the SLV
+  returned 0 partials/final; a forced reconnect recovered it
+  (test_reconnect_recovers_2nd_turn) → per-session ASR state, not reset per
+  utterance. Root cause: in no-VAD mode the server's lazy ASR-stream open was
+  gated by the one-shot `asr_started_once` latch (server/main.py), so on a
+  persistent multi_utterance session only the 1st utterance opened a stream.
+  Fix: re-open per utterance in multi_utterance. Post-fix after_action_idle is
+  3/3 and test_multi_turn passes.
 """
 from __future__ import annotations
 
@@ -102,8 +104,15 @@ async def _scn_donetone(react_s):
 
 async def _scn_during_reply(app, probe, audio, wav):
     await _inject_read(app, probe, audio, _WARMUP, nth=1)  # turn 1
-    await asyncio.sleep(0.4)  # reply is being generated / spoken → mic dropped
-    audio.inject(WAV_DIR / f"{wav}.wav")
+    # Inject ONLY once the reply is actually being spoken (state==speaking), so
+    # this measures the echo gate (mic_drop_while_speaking), not a gap where the
+    # short reply has already finished. (No prior speaking exists before turn 1,
+    # so wait_state catches turn-1's reply, not a stale transition.)
+    try:
+        await probe.wait_state("speaking", timeout=12)
+    except (TimeoutError, AssertionError):
+        pass  # reply too fast to catch SPEAKING — inject anyway
+    audio.inject(WAV_DIR / f"{wav}.wav")  # barge in mid-reply → echo gate should drop
     ok = await _wait_utterance_count(probe, 2, timeout=12)
     return _last_user_text(app) if ok else None
 
@@ -221,3 +230,30 @@ async def test_consecutive_gap_diag(test_config, gap_s):
         print(f"[gap={gap_s}s] events-after-cmd2={dict(hist)}")
         print(f"[gap={gap_s}s] mic_rms count={len(mic_rms)} loud(>0.02)={len(loud)} "
               f"max={max(mic_rms) if mic_rms else None} partials={len(partials)}")
+
+
+@pytest.mark.asyncio
+async def test_reconnect_recovers_2nd_turn(test_config):
+    """Diagnostic for the after_action_idle=0/3 root cause: does forcing a fresh
+    SLV WS between turns recover the 2nd utterance? If YES, the trt_edgellm ASR
+    decode state is per-WS-session and not reset per-utterance (a new WS clears
+    it) — corroborates the multi_utterance root cause and explains the field
+    observation that the 2nd command 'sometimes' works (a wake/idle reconnect
+    refreshes the ASR session). Run alongside test_consecutive_gap_diag (which
+    shows it FAILS without a reconnect)."""
+    cfg = _rebot_voice_config(test_config)
+    audio = ScriptedAudioIO([])
+    async with run_agent(cfg, audio) as (app, probe):
+        await _wake(app, cfg)
+        await probe.wait_event("on_wake", timeout=5)
+        t1 = await _inject_read(app, probe, audio, _WARMUP, nth=1)  # turn 1
+        await asyncio.sleep(3.0)  # turn-1 reply finishes → IDLE
+        # Force a fresh WS / ASR session before turn 2.
+        await asyncio.wait_for(app.slv.reconnect(), timeout=6.0)
+        await asyncio.sleep(0.5)
+        audio.inject(WAV_DIR / "tts_q_put_back.wav")
+        ok = await _wait_utterance_count(probe, 2, timeout=25)
+        t2 = _last_user_text(app) if ok else None
+        print(f"\n[reconnect-between-turns] t1={t1!r} t2={t2!r} captured2={ok} "
+              f"(if captured2=True a fresh WS heals the 2nd utterance → per-session "
+              f"ASR state not reset per-utterance)")
