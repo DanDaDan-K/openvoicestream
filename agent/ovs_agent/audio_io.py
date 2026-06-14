@@ -163,6 +163,25 @@ class AudioIO:
                     pass
                 self._device_watcher_task = None
 
+    async def inject_pcm(self, pcm: bytes, *, chunk_ms: float = 64.0) -> int:
+        """DEBUG: feed raw PCM (``input_sr`` mono int16) into the live capture
+        queue as if it came from the mic, paced at ``chunk_ms`` so the energy
+        gate / VAD / ASR see a coherent utterance rather than one burst.
+
+        Used by the env-gated reBot inject endpoint for remote, mic-less
+        end-to-end testing (server-loop: the chunks are forwarded to SLV by the
+        normal mic pump). Returns the number of bytes fed. Raises if capture
+        hasn't started (no queue to push into)."""
+        q = self._in_queue
+        if q is None:
+            raise RuntimeError("capture not started; cannot inject_pcm")
+        # input_sr samples/s * chunk_ms/1000 s * 2 bytes/sample, frame-aligned.
+        step = max(2, int(self.input_sr * (chunk_ms / 1000.0)) * 2)
+        for i in range(0, len(pcm), step):
+            await q.put(pcm[i:i + step])
+            await asyncio.sleep(chunk_ms / 1000.0)
+        return len(pcm)
+
     def _build_and_start_input_stream(self):
         """Construct + start a fresh RawInputStream. Closes the stream
         handle on start() failure to avoid leaks (Codex review #2)."""

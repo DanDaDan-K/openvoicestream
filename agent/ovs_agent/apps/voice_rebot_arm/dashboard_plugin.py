@@ -33,6 +33,35 @@ logger = logging.getLogger(__name__)
 _PAGE = Path(__file__).with_name("static_dashboard.html")
 
 
+def _wav_bytes_to_pcm16_mono(data: bytes, target_sr: int = 16000) -> bytes:
+    """Decode WAV bytes → mono int16 PCM at ``target_sr`` (linear resample).
+    Used by the debug inject endpoint; mirrors tests/e2e/fake_audio."""
+    import io
+    import wave
+
+    import numpy as np
+
+    with wave.open(io.BytesIO(data), "rb") as wf:
+        sr = wf.getframerate()
+        nch = wf.getnchannels()
+        sw = wf.getsampwidth()
+        raw = wf.readframes(wf.getnframes())
+    if sw == 1:
+        arr = (np.frombuffer(raw, dtype=np.uint8).astype(np.int16) - 128) << 8
+    elif sw == 4:
+        arr = (np.frombuffer(raw, dtype=np.int32) >> 16).astype(np.int16)
+    else:
+        arr = np.frombuffer(raw, dtype=np.int16)
+    if nch > 1:
+        arr = arr.reshape(-1, nch).mean(axis=1).astype(np.int16)
+    if sr != target_sr and arr.size:
+        n_out = int(len(arr) * target_sr / sr)
+        x0 = np.linspace(0, 1, len(arr), endpoint=False)
+        x1 = np.linspace(0, 1, n_out, endpoint=False)
+        arr = np.interp(x1, x0, arr.astype(np.float32)).astype(np.int16)
+    return arr.tobytes()
+
+
 class ArmDashboardPlugin(Plugin):
     name = "arm_dashboard"
 
@@ -57,6 +86,11 @@ class ArmDashboardPlugin(Plugin):
         web_app.router.add_get("/api/state", self._api_state)
         web_app.router.add_get("/api/frame.jpg", self._api_frame)
         web_app.router.add_get("/api/depth.jpg", self._api_depth)
+        # DEBUG-ONLY remote audio inject (mic-less e2e). Always registered, but
+        # the handler refuses unless OVS_REBOT_DEBUG_INJECT=1 — so production is
+        # inert until explicitly enabled (+ restart). Works in server-loop: the
+        # injected PCM is forwarded to SLV by the normal mic pump.
+        web_app.router.add_post("/api/control/inject_wav", self._api_inject_wav)
         self._runner = web.AppRunner(web_app)
         await self._runner.setup()
         bind = os.environ.get("OVS_ARM_DASHBOARD_BIND", "0.0.0.0").strip() or "0.0.0.0"
@@ -86,6 +120,58 @@ class ArmDashboardPlugin(Plugin):
         if _PAGE.exists():
             return web.FileResponse(path=str(_PAGE))
         return web.Response(text="dashboard page missing", status=500)
+
+    async def _api_inject_wav(self, request):  # noqa: ANN001
+        """DEBUG-ONLY: POST a WAV body → fed into the mic capture queue as a
+        spoken utterance, mic-less. In server-loop the normal mic pump forwards
+        it to SLV → ASR → LLM → tool_call → arm. Gated behind
+        OVS_REBOT_DEBUG_INJECT=1 (default OFF) because a remote caller could
+        otherwise move the physical arm. Forces asr_eos after feeding so the
+        SLV finalizes regardless of the VAD/endpoint config."""
+        from aiohttp import web
+
+        if os.environ.get("OVS_REBOT_DEBUG_INJECT") != "1":
+            return web.json_response(
+                {"ok": False, "error": "inject disabled; set "
+                 "OVS_REBOT_DEBUG_INJECT=1 and restart the agent"},
+                status=403,
+            )
+        data = await request.read()
+        if not data:
+            return web.json_response(
+                {"ok": False, "error": "empty body; POST raw WAV bytes"}, status=400
+            )
+        audio = getattr(self.app, "audio", None)
+        if audio is None or getattr(audio, "_in_queue", None) is None:
+            return web.json_response(
+                {"ok": False, "error": "mic capture not active"}, status=409
+            )
+        try:
+            sr = int(getattr(audio, "input_sr", 16000))
+            pcm = _wav_bytes_to_pcm16_mono(data, target_sr=sr)
+        except Exception as e:  # noqa: BLE001
+            return web.json_response(
+                {"ok": False, "error": f"bad wav: {e}"}, status=400
+            )
+        logger.warning(
+            "inject_wav: feeding %d PCM bytes (%.2fs @ %dHz) as a spoken utterance",
+            len(pcm), len(pcm) / 2 / sr, sr,
+        )
+        # Wake → clear wake-tone suppression → feed audio → trailing silence →
+        # force EOS so the SLV finalizes the utterance.
+        try:
+            await self.app.wake(source="inject_wav")
+        except Exception:
+            logger.debug("inject_wav: wake failed", exc_info=True)
+        await asyncio.sleep(0.4)
+        await audio.inject_pcm(pcm)
+        await audio.inject_pcm(b"\x00\x00" * int(sr * 0.3))  # trailing silence
+        await asyncio.sleep(0.3)  # let the mic pump drain to SLV before EOS
+        try:
+            await self.app.send_asr_eos_once()
+        except Exception:
+            logger.debug("inject_wav: asr_eos failed", exc_info=True)
+        return web.json_response({"ok": True, "pcm_bytes": len(pcm), "sr": sr})
 
     async def _api_state(self, request):  # noqa: ANN001
         from aiohttp import web
