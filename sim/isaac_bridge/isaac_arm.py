@@ -39,7 +39,7 @@ def _R_to_rpy(R):
 
 
 class IsaacArm:
-    def __init__(self, articulation, world, dt_settle_steps=80, tool_offset_x=0.128):
+    def __init__(self, articulation, world, dt_settle_steps=80, tool_offset_x=-0.128):
         """articulation: SingleArticulation (already initialized & in a reset World).
         world: isaacsim World (for stepping).
         """
@@ -48,8 +48,12 @@ class IsaacArm:
         self._art = articulation
         self._world = world
         self._settle = dt_settle_steps
-        # jaw-center sits this far along end_link +X beyond the end_link origin
-        # (gripper_base_joint is identity; measured finger-pad x - end_link x).
+        # REAL CAD gripper: approach axis = tool -X (URDF header line 33: "body &
+        # fingers extend toward -X"). The jaw/TCP (finger contact) sits along end_link
+        # local X by tool_offset_x; tool_offset_x is NEGATIVE (-0.128) so the jaw lands
+        # at end_link + (-0.128)*X_local = the real -X finger contact (was +0.128 for
+        # the OLD wrong +X box gripper). pad_center() reuses this signed value so it
+        # auto-corrects with the sign flip.
         self.tool_offset_x = float(tool_offset_x)
 
         self.model = pin.buildModelFromUrdf(FIXEND_URDF)
@@ -81,7 +85,8 @@ class IsaacArm:
 
     def get_tcp_pose(self):
         """4x4 base<-JAW (TCP) at current sim joint state. The jaw frame is
-        end_link translated +tool_offset_x along its local X (forward)."""
+        end_link translated by tool_offset_x (-0.128, i.e. toward tool -X = the real
+        CAD approach axis) along its local X."""
         M = self._fk(self._arm_q())
         T = np.eye(4); T[:3, :3] = M.rotation
         T[:3, 3] = M.translation + M.rotation[:, 0] * self.tool_offset_x
@@ -281,12 +286,13 @@ class IsaacArm:
         import omni.usd
         from pxr import UsdGeom, Usd
         stage = omni.usd.get_context().get_stage()
-        # The finger LINK origin sits at the gripper base (joint), but the physical
-        # collision pad center is +0.128 m along the finger link local +X (matches
-        # the URDF collision-box origin = real CAD finger-contact at 127.8 mm from
-        # the flange). Reading the bare link origin under-reports the pad by the full
-        # finger length, so add the offset along each finger's world +X axis.
-        PAD_OFF = float(self.tool_offset_x)  # 0.128 (collision-box origin in link frame)
+        # The finger LINK origin sits at the gripper base (joint = end_link origin in
+        # X), but the physical collision pad center is tool_offset_x (-0.128 m) along
+        # the finger link local X = toward tool -X (real CAD finger-contact ~128 mm
+        # toward -X from the flange). Reading the bare link origin under-reports the
+        # pad by the full finger length, so add the signed offset along each finger's
+        # world X axis (negative => -X, matching get_tcp_pose).
+        PAD_OFF = float(self.tool_offset_x)  # -0.128 (signed; collision-box origin in link frame)
         pts = []
         for link in ("left_finger", "right_finger"):
             prim = stage.GetPrimAtPath(f"/World/rebot/{link}")

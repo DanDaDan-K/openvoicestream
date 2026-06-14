@@ -1,17 +1,33 @@
-"""run_held2.py — top-down grasp using the VERIFIED reachable column.
+"""run_held2.py — top-down grasp probe on the CORRECTED (real-CAD, -X approach) gripper.
 
-Reachability map (probe_reach on the CURRENT corrected USD):
+CORRECTED GEOMETRY (tool_offset_x = -0.128, approach axis = tool -X per URDF header
+line 33 "body & fingers extend toward -X"). get_tcp_pose()==pad_center() now land at
+the real -X finger contact (verified jaw_X = end_link.x - 0.128, jaw==pad to 0.5mm).
+
+KINEMATIC WALL (exhaustive many-seed IK, probe_negpitch.py):
+  The arm's joint limits cap joint2,joint3 <= 0 (elbow-down only; upper=[2.8,0,0,1.57,
+  1.57,3.14]). To aim the -X approach DOWN (-X . -Z = +1) the wrist would need +X UP,
+  i.e. pitch ~ -1.57 -> UNREACHABLE everywhere. Best reachable -X . -Z is only ~0.39
+  (-X still points UP). At every reachable top-down orientation the FINGERS extend
+  UPWARD from the flange: at pitch=1.4 the flange sits at z~0.01 but the pad is at
+  z~0.13 (+0.12m ABOVE the flange). So the -X gripper CANNOT descend its fingers onto
+  a table box -> insertion is NEGATIVE (pad above box top) for the whole grid. This is
+  the inverse of the OLD (wrong) +X box gripper, whose +X pointed down and could
+  descend. Reported as a hard kinematic finding; the columns below were the closest
+  reachable top-down attempt.
+
+Reachability map (probe_reach, top-down yaw=0 column; -X approach points up):
   yaw=0, pitch=1.00 : z reachable [0.04,0.21] at every x 0.26..0.44 (full tall column)
   yaw=0, pitch=1.20 : z [0.04,0.17]
   yaw=0, pitch=1.40 : z [0.04,0.11]
-  yaw=90            : z max 0.06 (USELESS for a tall descent) -> the old run_held.py
-                      used yaw=90 and could never reach the above-pose, so it
-                      free-fell from home and knocked the box.
+  yaw=90            : z max 0.06 (USELESS for a tall descent).
 
 Fingers separate along WORLD Y at yaw=0 (sep vector [0,0.0848,0] open). So the box
 must fit between the blades in Y; the blades come down on the +Y/-Y faces of the box.
-JAW frame == pad center (corrected geometry, tool_offset 0.128). The blade tips reach
-~box mid when the jaw is at box mid-height.
+JAW frame == pad center (corrected geometry, tool_offset_x = -0.128, toward -X). The
+blade tips reach ~box mid when the jaw is at box mid-height -- but see KINEMATIC WALL
+above: with -X the pad sits ABOVE the flange, so the open jaw cannot actually descend
+beside a table box (insertion < 0).
 
 Strategy: yaw=0, pitch=1.00 (tall clean column). Start high above the box with jaw
 OPEN (85mm) so blades clearly straddle the box in Y. Descend straight down in small
@@ -272,10 +288,93 @@ def run_trial(rig, dims, pose, pitch=1.00, close_margin=0.004, log=print, geom_o
     return out
 
 
+def run_side_geom_trial(rig, dims, pose, roll=0.0, pitch=0.0, log=print):
+    """SIDE/FORWARD geometric eval: gripper approaches the box horizontally from
+    the front (+X side) along the tool -X axis, OPEN fingers straddling the box in
+    world Y. Stage in front, advance toward the box center, then read geometry:
+      reach          : IK feasible at box-mid height beside the body
+      pad_xy_err_mm  : pad on the box footprint (xy)
+      fwd_insertion  : (box_front_face_x - pad.x)*1000; POSITIVE => pad behind the
+                       front face = pad INSIDE the body (the side-grasp analogue of
+                       top-down insertion, now positive instead of negative)
+      straddle       : open finger pads sit on opposite +Y/-Y sides of the box
+      knock_mm       : box displacement during the forward advance (clean = small)
+    NO friction/close/lift. Mirrors the top-down --geom contract but for side entry."""
+    import omni.usd
+    from pxr import UsdGeom, Usd
+    rig.spawn_box(dims, pose)
+    for _ in range(30):
+        rig.world.step(render=False)
+    box0 = rig.box_pos()
+    cx, cy, table_z, yaw = pose
+    lx, ly, lz = dims
+    box_top = table_z + lz
+    box_mid = table_z + lz / 2.0
+    bhx, bhy = lx / 2.0, ly / 2.0
+    front_face = cx + bhx
+    stage = omni.usd.get_context().get_stage()
+
+    def finger_pads():
+        out = {}
+        for link in ("left_finger", "right_finger"):
+            prim = stage.GetPrimAtPath(f"/World/rebot/{link}")
+            m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            t = m.ExtractTranslation()
+            xa = np.array([m[0][0], m[0][1], m[0][2]], float); xa /= np.linalg.norm(xa) + 1e-12
+            out[link] = np.array([t[0], t[1], t[2]], float) + (-0.128) * xa
+        return out
+
+    out = dict(dims=dims, pose=pose, roll=roll, pitch=pitch)
+    # reach check at box-mid height beside the body
+    ok_ik, err_ik = rig.arm.check_ik(cx, cy, box_mid, roll, pitch, yaw, tol=6e-3)
+    out["ik_grasp"] = (bool(ok_ik), round(float(err_ik), 5))
+
+    rig.arm.go_home(); rig.arm.open_gripper(0.085)
+    stage_x = cx + 0.14
+    rig.arm.move_to(stage_x, cy, box_mid, roll, pitch, yaw, settle_steps=120)
+    # advance toward box center, continuous (no branch jump)
+    for t in np.linspace(0.0, 1.0, 12)[1:]:
+        rig.arm.move_to(stage_x + (cx - stage_x) * t, cy, box_mid, roll, pitch, yaw,
+                        settle_steps=25, continuous=True)
+    rig.arm._step(40)
+
+    pad = rig.arm.pad_center()
+    appr = -rig.arm.get_tcp_pose()[:3, 0]          # tool -X world = approach dir
+    pl = finger_pads(); padL = pl["left_finger"]; padR = pl["right_finger"]
+    boxN = rig.box_pos()
+    knock_mm = round(float(np.linalg.norm(boxN[:2] - box0[:2]) * 1000), 1)
+    pad_xy_err_mm = round(float(np.linalg.norm(pad[:2] - box0[:2]) * 1000), 1)
+    fwd_insertion_mm = round(float((front_face - pad[0]) * 1000), 1)   # + => pad inside body (forward)
+    pad_in_body_z = bool(pad[2] > table_z + 0.003 and pad[2] < box_top - 0.003)
+    straddle = bool((padL[1] > bhy * 0.5 and padR[1] < -bhy * 0.5) or
+                    (padR[1] > bhy * 0.5 and padL[1] < -bhy * 0.5))
+    appr_down = round(float(-appr[2]), 3)
+    reach = bool(out["ik_grasp"][0])
+    geom_ok = bool(reach and straddle and pad_in_body_z and fwd_insertion_mm > 0.0
+                   and pad_xy_err_mm < 12.0 and knock_mm < 8.0)
+    out.update(box_top=round(box_top, 4), box_mid=round(box_mid, 4),
+               front_face=round(front_face, 4), appr_down=appr_down,
+               pad=[round(v, 4) for v in pad.tolist()],
+               padL=[round(v, 4) for v in padL.tolist()],
+               padR=[round(v, 4) for v in padR.tolist()],
+               reach=reach, pad_xy_err_mm=pad_xy_err_mm,
+               fwd_insertion_mm=fwd_insertion_mm, pad_in_body_z=pad_in_body_z,
+               straddle=straddle, knock_mm=knock_mm, geom_ok=geom_ok)
+    out["geom_fail"] = (None if geom_ok else
+                        ("UNREACH" if not reach else
+                         "KNOCK" if knock_mm >= 8.0 else
+                         "NO_STRADDLE" if not straddle else
+                         "PAD_OFF" if pad_xy_err_mm >= 12.0 else
+                         "PAD_ABOVE_BODY" if not pad_in_body_z else
+                         "NEG_INSERTION" if fwd_insertion_mm <= 0.0 else "?"))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sweep", action="store_true")
     ap.add_argument("--geom", action="store_true")   # geometric eval (pos/depth/reach/clearance, NO friction)
+    ap.add_argument("--geomside", action="store_true")   # SIDE/FORWARD geometric eval (horizontal approach)
     # DEFAULTS = the verified reproducible HELD config (lift 40mm, disp 0.7mm).
     ap.add_argument("--pitch", type=float, default=1.40)   # near-vertical blades, no X-catch
     ap.add_argument("--lz", type=float, default=0.08)      # box_top 0.10 <= ceiling 0.10/0.11
@@ -290,7 +389,7 @@ def main():
     def log(*a):
         line = " ".join(str(x) for x in a); rf.write(line + "\n"); rf.flush(); print(line, flush=True)
 
-    if not args.sweep and not args.geom:
+    if not args.sweep and not args.geom and not args.geomside:
         dims = (args.lw, args.lw, args.lz)
         pose = (args.x, 0.0, TABLE_TOP_Z, 0.0)
         log("=== HELD2 ATTEMPT ===")
@@ -351,8 +450,36 @@ def main():
                 r.get("pad_xy_err_mm"),r.get("insertion_mm"),r.get("box_disp_descend_mm")))
         cf.close()
         log("\nGEOM_SWEEP_DONE")
+    if args.geomside:
+        import csv
+        cf = open("/root/sim_bridge/geom_side_sweep.csv", "w", newline="")
+        wr = csv.writer(cf)
+        wr.writerow(["lx","ly","lz","x","roll","pitch","geom_ok","geom_fail","reach",
+                     "pad_xy_err_mm","fwd_insertion_mm","pad_in_body_z","straddle","knock_mm","appr_down"])
+        sweep = []
+        # SIDE/FORWARD geom eval. Horizontal approach (pit~0) is the reachable band
+        # at box-mid height (probe_tradeoff). Footprint x height x x position grid.
+        for lz in (0.04, 0.05, 0.06, 0.08):
+            for lw in (0.03, 0.04, 0.05):
+                for x in (0.30, 0.34, 0.38, 0.42):
+                    sweep.append(((lw, lw, lz), (x, 0.0, TABLE_TOP_Z, 0.0), 0.0, 0.0))
+        log("=== GEOM SIDE/FORWARD SWEEP n=%d (horizontal approach, NO friction) ===" % len(sweep))
+        for i, (dims, pose, roll, pit) in enumerate(sweep):
+            r = run_side_geom_trial(rig, dims, pose, roll=roll, pitch=pit)
+            wr.writerow([dims[0],dims[1],dims[2],pose[0],roll,pit,r.get("geom_ok"),
+                         r.get("geom_fail"),r.get("reach"),r.get("pad_xy_err_mm"),
+                         r.get("fwd_insertion_mm"),r.get("pad_in_body_z"),r.get("straddle"),
+                         r.get("knock_mm"),r.get("appr_down")])
+            cf.flush()
+            log("side %2d/%d dims=%s x=%.2f -> ok=%s fail=%s pad=%smm fwd_ins=%smm in_z=%s straddle=%s knock=%smm" % (
+                i+1,len(sweep),dims,pose[0],r.get("geom_ok"),r.get("geom_fail"),
+                r.get("pad_xy_err_mm"),r.get("fwd_insertion_mm"),r.get("pad_in_body_z"),
+                r.get("straddle"),r.get("knock_mm")))
+        cf.close()
+        log("\nGEOM_SIDE_SWEEP_DONE")
     rf.close()
     sim_app.close()
 
 
-main()
+if __name__ == "__main__":
+    main()
