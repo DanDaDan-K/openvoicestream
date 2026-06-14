@@ -55,17 +55,16 @@ energy_gate_open_rms: 0.020
 energy_gate_close_rms: 0.010
 energy_gate_hangover_ms: 300
 mic_makeup_gain: 3.0
-# gate_drive_eos OFF (2026-06-14): the gate-driven asr_eos fired 200ms after
-# gate-close, which preempted the streaming ASR finalize for SHORT ENGLISH
-# commands — English needs more subword tokens than Chinese and the decode
-# (with stream_unfixed_tokens=5 holdback) hadn't emitted output yet → empty
-# asr_final (while offline /asr transcribes the same audio cleanly). Let the
-# SLV-side silero VAD (vad:silero, vad_silence_ms:600) own end-of-utterance
-# instead — it gives the decode time and works for both zh/en (codex root-cause
-# 2026-06-14). vad_stall_eos_ms below is the backstop if VAD never fires.
-gate_drive_eos: false
+# NB (2026-06-14): gate_drive_eos:false was tried to fix the SHORT-ENGLISH empty
+# asr_final, but real-machine test ruled it out — the gate EOS is NOT the cause.
+# The bug is SLV-side: the streaming ASR finalize returns empty for short English
+# (offline /asr transcribes the same audio fine; short Chinese streams fine). Fix
+# belongs in voxedge's streaming finalize (offline-segment fallback). Keep the
+# original gate-driven EOS tuning here (it was tuned for first-utterance capture).
+gate_drive_eos: true
 gate_eos_min_speech_ms: 250
-# (unused while gate_drive_eos:false) grace after gate-close before asr_eos.
+# Grace after the gate-close chunk before the explicit asr_eos — preserves WS
+# ordering of the speech tail and gives SLV a processing window on short cmds.
 gate_eos_delay_ms: 200
 vad_stall_eos_ms: 1500
 mic_drop_while_speaking: true
