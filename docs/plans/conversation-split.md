@@ -1,6 +1,14 @@
 # Plan: split `voxedge/engine/conversation.py`
 
-**Status:** designed, **not started**. Deliberately deferred — see "Why not now".
+**Status: substantially LANDED (2026-06).** The staged split has shipped:
+`session_state.py`, `asr_loop.py`, `audio_dispatcher.py`, `client_events.py`,
+`tts_sequencer.py`, and `llm_turn.py` are extracted, and the LLM↔tool pump that
+lived in `_llm_turn_with_tools` is now the provider-agnostic
+`turn_driver.run_turn` shared by both the server-loop and client-loop
+(see [turn-driver-unification.md](turn-driver-unification.md)). `conversation.py`
+is now an ~810-LOC `Session` coordinator (down from ~1600). Each step shipped
+byte-equivalent through the perf/behavioral bench gate. The original design below
+is retained for reference / provenance.
 
 ## Problem
 

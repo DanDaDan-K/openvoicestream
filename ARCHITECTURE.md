@@ -61,7 +61,7 @@ separately from product code.
 | HTTP/WS API contract | `server/main.py` | `/asr/stream`, `/tts/stream`, `/v2v/stream`, admin, health |
 | Backend registry + hot-reload | `server/core/{asr,tts}_backend.py`, `backend_manager.py` | wraps voxedge backends; state machine for live swaps |
 | env/profile → backend config | `server/core/voxedge_backend_config.py` | voxedge itself is env-free; this is the adapter |
-| Conversation orchestration (VAD→ASR→LLM→TTS) | `voxedge/engine/conversation.py` | the engine; used by `/v2v` when `OVS_V2V_ENGINE=voxedge` |
+| Conversation orchestration (VAD→ASR→LLM→TTS) | `voxedge/engine/` (`conversation.py` coordinator + `asr_loop`/`audio_dispatcher`/`client_events`/`llm_turn`/`turn_driver`/`tts_sequencer`) | the engine; used by `/v2v` when `OVS_V2V_ENGINE=voxedge`. The LLM↔tool pump itself lives in `turn_driver.run_turn` (shared by both loop modes) |
 | Backend interfaces (ABCs) | `voxedge/backends/base.py` | `ASRBackend`, `TTSBackend`, `VADBackend`, `LLMBackend` |
 | Concrete inference | `voxedge/backends/{jetson,rk,sherpa}/` | lazy-import heavy runtimes; never at module load |
 | Native TRT engine | `voxedge-engine` | prebuilt worker; product/voxedge only drive it |
@@ -74,14 +74,26 @@ There are exactly **two production processes**, and they are decoupled by the
 `/v2v/stream` WebSocket:
 
 1. **server** (`uvicorn server.main:app`, port 8000 in-container) — owns the
-   models. Stateless across turns; the LLM+tool loop runs here when
-   `OVS_V2V_ENGINE=voxedge` ("server-loop" architecture).
+   models (ASR/TTS/VAD) for every client.
 2. **agent** (`ovs-agent run <app>`) — owns the device I/O (mic, speaker,
-   wakeword, robot arm). It advertises tools and executes tool calls the server
-   dispatches back; it never orchestrates the LLM itself.
+   wakeword, robot arm) and the tool implementations.
 
-This is why the same server serves a dumb captioning client and a robot arm: the
-intelligence is server-side, the device-specific actuation is agent-side.
+**Where the LLM↔tool loop runs is a deployment choice, not a fixed property** —
+two modes, both driven by the *same* pump (`voxedge.engine.turn_driver.run_turn`):
+
+- **server-loop** (`OVS_V2V_SERVER_LOOP=1`, the production robot-arm mode) — the
+  server runs the LLM and tool loop; the agent advertises its tool schemas at
+  session open and executes the `SERVER_TOOL_CALL`s the server dispatches back.
+  The intelligence is server-side, the actuation agent-side — which is why one
+  server can drive both a dumb captioning client and a robot arm.
+- **client-loop** (`OVS_AGENT_SERVER_LOOP` off, the default) — the agent runs the
+  LLM and tool loop itself (bring-your-own LLM / off-box brain) and re-feeds the
+  reply to the server as `CLIENT_TEXT` for TTS.
+
+Both modes execute the identical multi-round pump; they differ only in which
+process hosts it and in a few agent-private seams (tool allowlist, edge-llm
+prefix-cache, event bus). The agent therefore now imports `voxedge` too (the pump
+is shared) — see [docs/plans/turn-driver-unification.md](docs/plans/turn-driver-unification.md).
 
 ## How voxedge reaches a device (the wheel flow)
 
@@ -154,11 +166,15 @@ To exercise the HTTP API instead, start the server and use the clients in
   the env-free target the product is converging onto. They share a spec
   (`docs/specs/concurrency-capability-framework.md`). Don't add features to the
   server copies — see their header comments.
-- **`voxedge/engine/conversation.py` is ~1600 LOC** — the orchestration is
-  correct and well-commented but concentrated. A staged split is designed in
-  [docs/plans/conversation-split.md](docs/plans/conversation-split.md); it is
-  deliberately **not** done yet because that file is shared with the production
-  robot-arm stack and needs the full perf/behavioral bench gate, not a smoke test.
+- **`voxedge/engine/conversation.py` split — substantially landed.** It was
+  ~1600 LOC; the staged split in
+  [docs/plans/conversation-split.md](docs/plans/conversation-split.md) has since
+  extracted `session_state`, `asr_loop`, `audio_dispatcher`, `client_events`,
+  `tts_sequencer`, `llm_turn`, and the provider-agnostic `turn_driver` pump
+  (see [turn-driver-unification.md](docs/plans/turn-driver-unification.md)),
+  leaving `conversation.py` an ~810-LOC coordinator. Each step shipped
+  byte-equivalent through the full perf/behavioral bench gate (the file is shared
+  with the production robot-arm stack).
 - **Config has two layers** — mature flat JSON profiles, plus an optional newer
   "leaf composition" YAML system gated behind a profile key. See
   [docs/CONFIGURATION.md](docs/CONFIGURATION.md).

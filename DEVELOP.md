@@ -28,6 +28,16 @@ registry (`server/core/asr_backend.py` / `tts_backend.py`) points at
 `voxedge.backends.*`; `server/core/voxedge_backend_config.py` builds each
 backend's config from env/profile (voxedge backends are env-free).
 
+> **The agent now imports voxedge too (turn-driver unification, 2026-06).**
+> `agent/ovs_agent/tools/runner.py` imports `voxedge.engine.turn_driver` at module
+> load — both loop modes share one pump — so `voxedge` is a declared dep in
+> `agent/pyproject.toml` (`[tool.uv.sources]` editable path). Bare `voxedge` is
+> numpy-only, so this is cheap. **Deployment note:** the agent *images*
+> (`voice-rebot-arm`, `voice-arm`) must therefore also ship voxedge; the
+> production server-loop deployment still runs an older agent image without it
+> (server-loop never calls the agent's pump), so rolling this to a device is a
+> separate image rebuild — see `docs/plans/turn-driver-unification.md`.
+
 ### Deployment (docker) — wheel install
 
 The images do **not** bind-mount voxedge. Every device Dockerfile
@@ -69,7 +79,11 @@ can assert it matches `../voxedge`).
 ## Tests
 
 ```bash
-pytest tests/                      # server integration tests (27)
-pytest agent/tests/                # agent framework tests (94)
-( cd ../voxedge && pytest )        # library tests (28, mock-based, no GPU)
+pytest tests/                              # server integration tests (~175)
+uv run --project agent pytest agent/tests/ # agent framework tests (~660; agent has its own venv)
+( cd ../voxedge && pytest )                # library tests (~225, mock-based, no GPU)
 ```
+
+> Agent tests run in the agent's own venv (`agent/.venv`), so use
+> `uv run --project agent`. `agent/tests/e2e/` needs a live SLV and the
+> `rebot`/`arm` optional extras (cv2/onnxruntime); skip those off-device.
