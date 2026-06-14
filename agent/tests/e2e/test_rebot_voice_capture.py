@@ -211,35 +211,40 @@ async def test_command_word_asr_accuracy(test_config, wav, must_contain):
 
 
 @pytest.mark.asyncio
-async def test_consecutive_commands_during_reply_are_dropped(test_config):
-    """P3 PROBE (known limitation, not yet fixed): mic_drop_while_speaking=true
-    means a command spoken WHILE the agent is still replying/acting is dropped.
-    This documents the behaviour with a real injection so a future AEC-based
-    full-duplex change has a regression baseline to flip.
+async def test_command_during_speaking_is_dropped(test_config):
+    """Echo gate: with mic_drop_while_speaking=true a command spoken WHILE the
+    agent is SPEAKING (playing its own TTS) must be dropped BEFORE reaching the
+    SLV — otherwise the mic would transcribe the agent's own TTS echo into a
+    false command. Barge-in during SPEAKING is intentionally OFF (no hardware-
+    AEC echo verification yet), so this asserts the drop.
 
-    Inject a 2nd command 0.5s after the 1st (well within the 1st turn's TTS
-    reply) → only the FIRST command should be transcribed."""
+    We hold the agent in SPEAKING across the injection for a deterministic echo
+    window — real replies are too short to reliably overlap, and (since the
+    multi_utterance ASR fix, server 9b084a5) a command landing after the reply
+    ends IS now transcribed, which is correct and covered by
+    test_scenario_accuracy::after_action_idle. The pure mic-gate mechanism is
+    also unit-tested in tests/test_bargein_mic_forward.py."""
+    from ovs_agent.state import ConvState
+
     cfg = _rebot_voice_config(test_config)
     audio = ScriptedAudioIO([])
     async with run_agent(cfg, audio) as (app, probe):
         await _wake(app, cfg)
         await probe.wait_event("on_wake", timeout=5)
-        await asyncio.sleep(0.5)
-        audio.inject(WAV_DIR / "cmd_grab_box_full.wav")   # "把盒子抓起来"
-        await probe.wait_event("on_user_utterance", timeout=25)
-        first = _last_user_text(app)
-        # Barge in with a different command while the reply is playing.
-        await asyncio.sleep(0.3)
-        audio.inject(WAV_DIR / "cmd_wave.wav")            # "挥手"
+        await asyncio.sleep(0.6)  # clear the wake-tone suppression
+        n_before = sum(1 for e in probe.events if e.get("event") == "on_user_utterance")
+        # Hold SPEAKING across the injection (the echo-gate window).
+        app._state = ConvState.SPEAKING
+        audio.inject(WAV_DIR / "cmd_grab_box.wav")  # spoken "over" the agent's TTS
         await asyncio.sleep(4.0)
-        latest = _last_user_text(app)
-        print(f"\n[P3 during-reply] first={first!r} latest={latest!r}")
-        # The barge-in command did NOT replace the transcript — it was dropped.
-        # (When P3 is fixed with AEC this assertion should be revisited.)
-        assert "抓" in first, f"first command not captured: {first!r}"
-        assert "挥手" not in latest, (
-            f"P3 baseline changed — barge-in command '挥手' got through: {latest!r}. "
-            "If AEC/full-duplex was intentionally enabled, update this probe."
+        app._state = ConvState.IDLE
+        n_after = sum(1 for e in probe.events if e.get("event") == "on_user_utterance")
+        print(f"\n[echo-gate] utterances before={n_before} after={n_after}")
+        assert n_after == n_before, (
+            "a command spoken while SPEAKING must be dropped by the echo gate "
+            "(mic_drop_while_speaking) — it reached the SLV and was transcribed. "
+            "If barge-in-during-TTS was intentionally enabled (AEC verified), "
+            "update this test."
         )
 
 
