@@ -176,6 +176,22 @@ class ArmDashboardPlugin(Plugin):
         except Exception:
             logger.debug("inject_wav: wake failed", exc_info=True)
         await asyncio.sleep(0.5)  # let the wake tone finish (drop_while_speaking)
+        # wake() may have triggered an SLV WS reconnect (idle>30s / unhealthy).
+        # Feeding PCM before the reconnected /v2v stream is accepted drops it into
+        # a closing / not-yet-open connection → the ASR never sees it (observed
+        # real-machine: PCM arrived 60-115ms BEFORE the new stream opened, so the
+        # injected utterance was lost; real voice never hits this because the user
+        # pauses ~1-2s between wake word and command). Wait for the WS to be ready.
+        slv = getattr(self.app, "slv", None)
+        if slv is not None:
+            for _ in range(60):  # up to ~6s
+                try:
+                    if not slv.is_reconnecting() and slv.is_healthy():
+                        break
+                except Exception:
+                    break
+                await asyncio.sleep(0.1)
+            await asyncio.sleep(0.3)  # settle margin after the stream is ready
         step = max(2, int(sr * 0.064) * 2)  # ~64ms frames, even-aligned
         for i in range(0, len(pcm), step):
             await send(pcm[i:i + step])
