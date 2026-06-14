@@ -1309,6 +1309,14 @@ class BaseApp:
         chunks. Pre-roll is still preserved for the *current* speech
         segment whose onset already won the VAD race.
         """
+        # Debug inject (dashboard /api/control/inject_wav) feeds a clip STRAIGHT
+        # to the SLV WS; while it does, suppress real-mic forwarding so the live
+        # mic stream doesn't interleave with / drown the injected audio on the
+        # SAME WS (observed real-machine: SLV transcribed ambient room audio
+        # instead of the injected command). The inject sends via slv.send_audio
+        # directly, so it bypasses this gate.
+        if getattr(self, "_injecting", False):
+            return
         # Race #3 fast path: while SLV is actively reconnecting, skip the
         # send_lock entirely — otherwise every mic chunk queues behind the
         # reconnect's grace+_open_with_retry chain (~50-2000ms), the 0.5s

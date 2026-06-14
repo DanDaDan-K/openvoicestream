@@ -154,54 +154,55 @@ class ArmDashboardPlugin(Plugin):
             return web.json_response(
                 {"ok": False, "error": f"bad wav: {e}"}, status=400
             )
-        send = getattr(self.app, "_send_audio_nonblocking", None)
-        if send is None:
+        slv = getattr(self.app, "slv", None)
+        if slv is None or not hasattr(slv, "send_audio"):
             return web.json_response(
                 {"ok": False, "error": "agent has no SLV audio path"}, status=409
             )
         logger.warning(
             "inject_wav: feeding %d PCM bytes (%.2fs @ %dHz) straight to SLV "
-            "(bypassing the energy gate)", len(pcm), len(pcm) / 2 / sr, sr,
+            "(bypassing energy gate + mic pump)", len(pcm), len(pcm) / 2 / sr, sr,
         )
         # Wake so the agent is connected/advertised + listening, then feed the PCM
-        # STRAIGHT to the SLV WS — bypassing the energy-gated mic pump. Feeding via
-        # the mic queue let the gate (energy_gate + drop_while_speaking during the
-        # wake tone) discard low-energy syllables and the onset, so injected clips
-        # arrived truncated or empty. Sending direct delivers the whole utterance.
-        # A forced asr_eos then finalizes it (short-English empty-final is handled
-        # SLV-side by the voxedge offline-transcribe fallback). Pace ~real-time so
-        # the streaming ASR sees a coherent utterance.
+        # STRAIGHT to the SLV WS — three things had to be bypassed to make injected
+        # clips arrive intact (all observed real-machine 2026-06-14):
+        #  1. the energy-gated mic pump discarded low-energy syllables / the onset
+        #     → send direct (slv.send_audio), not via the mic queue;
+        #  2. wake() can trigger an SLV WS reconnect (idle>30s) and PCM fed before
+        #     the new /v2v stream accepts is lost → wait for the WS to be ready;
+        #  3. the REAL mic pump runs concurrently on the SAME WS and its frames
+        #     interleave with / drown the injection (SLV transcribed ambient room
+        #     audio instead of the clip) → set app._injecting to suppress real-mic
+        #     forwarding (gated in _send_audio_nonblocking) for the inject window.
+        # A forced asr_eos finalizes; short-English empty-final is handled SLV-side
+        # by the voxedge offline-transcribe fallback. Real voice hits none of this.
         try:
             await self.app.wake(source="inject_wav")
         except Exception:
             logger.debug("inject_wav: wake failed", exc_info=True)
         await asyncio.sleep(0.5)  # let the wake tone finish (drop_while_speaking)
-        # wake() may have triggered an SLV WS reconnect (idle>30s / unhealthy).
-        # Feeding PCM before the reconnected /v2v stream is accepted drops it into
-        # a closing / not-yet-open connection → the ASR never sees it (observed
-        # real-machine: PCM arrived 60-115ms BEFORE the new stream opened, so the
-        # injected utterance was lost; real voice never hits this because the user
-        # pauses ~1-2s between wake word and command). Wait for the WS to be ready.
-        slv = getattr(self.app, "slv", None)
-        if slv is not None:
-            for _ in range(60):  # up to ~6s
-                try:
-                    if not slv.is_reconnecting() and slv.is_healthy():
-                        break
-                except Exception:
+        for _ in range(60):  # wait up to ~6s for the (possibly reconnected) WS
+            try:
+                if not slv.is_reconnecting() and slv.is_healthy():
                     break
-                await asyncio.sleep(0.1)
-            await asyncio.sleep(0.3)  # settle margin after the stream is ready
+            except Exception:
+                break
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.3)  # settle margin after the stream is ready
         step = max(2, int(sr * 0.064) * 2)  # ~64ms frames, even-aligned
-        for i in range(0, len(pcm), step):
-            await send(pcm[i:i + step])
-            await asyncio.sleep(0.064)
-        await send(b"\x00\x00" * int(sr * 0.3))  # trailing silence
-        await asyncio.sleep(0.2)
+        self.app._injecting = True  # suppress real-mic forwarding during the inject
         try:
-            await self.app.send_asr_eos_once()
-        except Exception:
-            logger.debug("inject_wav: asr_eos failed", exc_info=True)
+            for i in range(0, len(pcm), step):
+                await slv.send_audio(pcm[i:i + step])
+                await asyncio.sleep(0.064)
+            await slv.send_audio(b"\x00\x00" * int(sr * 0.3))  # trailing silence
+            await asyncio.sleep(0.2)
+            try:
+                await self.app.send_asr_eos_once()
+            except Exception:
+                logger.debug("inject_wav: asr_eos failed", exc_info=True)
+        finally:
+            self.app._injecting = False
         return web.json_response(
             {"ok": True, "pcm_bytes": len(pcm), "sr": sr, "via": "slv_direct"}
         )
