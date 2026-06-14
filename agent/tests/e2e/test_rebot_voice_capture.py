@@ -44,6 +44,22 @@ _REBOT_CMDS = [
 # (clean `say` output starts loud and never trips the gate-truncation bug).
 _FADEIN = [("cmd_grab_box", 300), ("cmd_put_back_full", 300)]
 
+# Natural-voice corpus synthesised on orin-nano (Qwen3 TRT TTS, 24kHz — the
+# e2e loader auto-resamples to 16k). Committed WAVs; no `say` dependency. More
+# natural onsets/homophones than `say -v Tingting`, so this is the production-
+# representative ASR-quality probe. (wav stem, expected substring in the final).
+_REBOT_TTS_CMDS = [
+    ("tts_q_grab_box", "盒子"),
+    ("tts_q_grab_box_full", "盒子"),
+    ("tts_q_put_back", "放回"),
+    ("tts_q_put_back_full", "放回"),
+    ("tts_q_wave", "挥手"),
+    ("tts_q_go_home", "回"),
+    ("tts_q_search_box", "盒子"),
+    ("tts_q_stop", "停"),
+    ("tts_q_grab_cup", "杯子"),
+]
+
 
 def _ensure_rebot_wavs() -> None:
     WAV_DIR.mkdir(parents=True, exist_ok=True)
@@ -257,3 +273,41 @@ async def test_done_tone_tail_vs_onset(test_config, tail_ms, react_ms):
         print(f"\n[tail={tail_ms} react={react_ms}] ASR = {text!r}  onset_lost={lost}")
         # Document, don't hard-fail on onset loss — this is a measurement sweep.
         assert "盒子" in text, f"whole command lost: {text!r}"
+
+
+# Known live-ASR confusions for the Qwen3-TTS corpus (real findings, surfaced
+# by this very suite). xfail(strict=False) so the suite is green but the issue
+# stays visible and auto-flips to PASS if the voice/ASR improves.
+#   挥手 (huī shǒu, "wave") → Paraformer hears 回首 (huí shǒu, "look back");
+#   a tone-1/2 difference on the first syllable, consistent across reruns.
+_ASR_KNOWN_BAD = {"tts_q_wave"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "wav,must_contain",
+    [
+        pytest.param(
+            w, c,
+            marks=pytest.mark.xfail(
+                reason="live ASR confuses 挥手→回首 (tone 1/2)", strict=False
+            ),
+        )
+        if w in _ASR_KNOWN_BAD else (w, c)
+        for w, c in _REBOT_TTS_CMDS
+    ],
+)
+async def test_qwen_corpus_asr_accuracy(test_config, wav, must_contain):
+    """Natural-voice (Qwen3 TTS) reBot command corpus through the live SLV ASR.
+    Validates the committed orin-nano corpus end to end AND gives a production-
+    representative ASR-quality regression — these onsets/homophones are closer
+    to real mic input than the robotic `say -v Tingting` fixtures."""
+    cfg = _rebot_voice_config(test_config)
+    audio = ScriptedAudioIO([(1200, WAV_DIR / f"{wav}.wav")])
+    async with run_agent(cfg, audio) as (app, probe):
+        await _wake(app, cfg)
+        await probe.wait_event("on_wake", timeout=5)
+        await probe.wait_event("on_user_utterance", timeout=25)
+        text = _last_user_text(app)
+        print(f"\n[qwen asr {wav}] = {text!r}  (need {must_contain!r})")
+        assert must_contain in text, f"{wav}: got {text!r}, missing {must_contain!r}"
