@@ -122,12 +122,13 @@ class ArmDashboardPlugin(Plugin):
         return web.Response(text="dashboard page missing", status=500)
 
     async def _api_inject_wav(self, request):  # noqa: ANN001
-        """DEBUG-ONLY: POST a WAV body → fed into the mic capture queue as a
-        spoken utterance, mic-less. In server-loop the normal mic pump forwards
-        it to SLV → ASR → LLM → tool_call → arm. Gated behind
+        """DEBUG-ONLY: POST a WAV body → fed STRAIGHT to the SLV as a spoken
+        utterance, mic-less (bypasses the energy-gated mic pump, which otherwise
+        drops low-energy syllables / the onset and delivered truncated or empty
+        clips). In server-loop: SLV → ASR → LLM → tool_call → arm. Gated behind
         OVS_REBOT_DEBUG_INJECT=1 (default OFF) because a remote caller could
-        otherwise move the physical arm. Forces asr_eos after feeding so the
-        SLV finalizes regardless of the VAD/endpoint config."""
+        otherwise move the physical arm. Forces asr_eos after feeding so the SLV
+        finalizes regardless of VAD/endpoint config."""
         from aiohttp import web
 
         if os.environ.get("OVS_REBOT_DEBUG_INJECT") != "1":
@@ -153,29 +154,41 @@ class ArmDashboardPlugin(Plugin):
             return web.json_response(
                 {"ok": False, "error": f"bad wav: {e}"}, status=400
             )
+        send = getattr(self.app, "_send_audio_nonblocking", None)
+        if send is None:
+            return web.json_response(
+                {"ok": False, "error": "agent has no SLV audio path"}, status=409
+            )
         logger.warning(
-            "inject_wav: feeding %d PCM bytes (%.2fs @ %dHz) as a spoken utterance",
-            len(pcm), len(pcm) / 2 / sr, sr,
+            "inject_wav: feeding %d PCM bytes (%.2fs @ %dHz) straight to SLV "
+            "(bypassing the energy gate)", len(pcm), len(pcm) / 2 / sr, sr,
         )
-        # Wake → clear wake-tone suppression → feed audio → generous trailing
-        # silence so the SLV's (silero) server VAD detects speech-end and
-        # finalizes the utterance NATURALLY — exactly like a real spoken command.
-        #
-        # We deliberately do NOT force asr_eos: a forced EOS preempts the
-        # streaming/offline-segment ASR before it produces a final for SHORT
-        # utterances (observed 2026-06-14: short English inject → empty final,
-        # while the offline /asr transcribes the very same audio cleanly). Real
-        # voice never force-EOSes; letting the server VAD endpoint routes short
-        # commands (<6s) through the offline-segment path, which transcribes
-        # English fine. The THINKING watchdog recovers if the VAD never fires.
+        # Wake so the agent is connected/advertised + listening, then feed the PCM
+        # STRAIGHT to the SLV WS — bypassing the energy-gated mic pump. Feeding via
+        # the mic queue let the gate (energy_gate + drop_while_speaking during the
+        # wake tone) discard low-energy syllables and the onset, so injected clips
+        # arrived truncated or empty. Sending direct delivers the whole utterance.
+        # A forced asr_eos then finalizes it (short-English empty-final is handled
+        # SLV-side by the voxedge offline-transcribe fallback). Pace ~real-time so
+        # the streaming ASR sees a coherent utterance.
         try:
             await self.app.wake(source="inject_wav")
         except Exception:
             logger.debug("inject_wav: wake failed", exc_info=True)
-        await asyncio.sleep(0.4)
-        await audio.inject_pcm(pcm)
-        await audio.inject_pcm(b"\x00\x00" * int(sr * 1.0))  # 1.0s trailing silence
-        return web.json_response({"ok": True, "pcm_bytes": len(pcm), "sr": sr})
+        await asyncio.sleep(0.5)  # let the wake tone finish (drop_while_speaking)
+        step = max(2, int(sr * 0.064) * 2)  # ~64ms frames, even-aligned
+        for i in range(0, len(pcm), step):
+            await send(pcm[i:i + step])
+            await asyncio.sleep(0.064)
+        await send(b"\x00\x00" * int(sr * 0.3))  # trailing silence
+        await asyncio.sleep(0.2)
+        try:
+            await self.app.send_asr_eos_once()
+        except Exception:
+            logger.debug("inject_wav: asr_eos failed", exc_info=True)
+        return web.json_response(
+            {"ok": True, "pcm_bytes": len(pcm), "sr": sr, "via": "slv_direct"}
+        )
 
     async def _api_state(self, request):  # noqa: ANN001
         from aiohttp import web
