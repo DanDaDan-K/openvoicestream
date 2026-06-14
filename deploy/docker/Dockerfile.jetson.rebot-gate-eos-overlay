@@ -1,0 +1,12 @@
+# Thin overlay: gate_drive_eos=false (stop the energy-gate asr_eos from
+# preempting short-English streaming ASR). Pure config change on top of the
+# English agent image. See config.yaml comment + codex root-cause 2026-06-14.
+ARG BASE
+FROM ${BASE}
+ARG BASE
+COPY agent/ovs_agent/apps/voice_rebot_arm/config.yaml \
+     /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/config.yaml
+RUN grep -q "gate_drive_eos: false" /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/config.yaml \
+    && echo "gate_drive_eos:false overlay ok"
+LABEL build.overlay="rebot-gate-eos-fix"
+LABEL build.base="${BASE}"
