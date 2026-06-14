@@ -146,8 +146,20 @@ def estimate_grasp(
         # view / too wide). Each construction keeps the legacy camera-ray
         # approach (transform sign convention + the measured IK envelope:
         # pitch 0.2-0.9 is the 93-99% feasible band, pure down-press is not).
-        if top is not None and top[3] > 0.085 and side_cands:
-            top = None  # top face too wide for the jaw — try the side path
+        # Reject an over-wide TOP fit even when there is NO side candidate to
+        # fall back to. A tall box's compromise plane (box-top + upper side
+        # fused under the ±0.12m depth band) aligns with up >0.85 and RETURNS
+        # as a "top face" with a hugely inflated width (real machine
+        # 2026-06-13: 0.270m on a ~0.06m box) at _top_face_grasp's first
+        # accepted plane — BEFORE the side-candidate collector runs — so
+        # side_cands is empty and the old `and side_cands` guard let that bogus
+        # width through to the plausibility gate (rejected → grasp lost). Drop
+        # the top fit on width alone; the code below then takes a side
+        # candidate if one exists, else falls through to the legacy silhouette
+        # / GG-CNN path. Normal flat boxes (top width < the 0.085 jaw limit)
+        # never trip this — their path stays byte-identical.
+        if top is not None and top[3] > 0.085:
+            top = None
         if top is None and side_cands:
             best_side = min(
                 (c for c in side_cands if c[3] <= 0.085),

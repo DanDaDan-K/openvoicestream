@@ -1283,3 +1283,69 @@ def test_clamp_place_xy_margin_swallowing_axis_centers() -> None:
     assert out is not None
     assert out[0] == pytest.approx(0.35)  # 0.4 - 0.05
     assert out[1] == pytest.approx(0.0)   # centered
+
+
+# ── over-wide top-face rejection (tall-box compromise plane, 2026-06-13) ──
+
+
+def _fake_top(width: float, fill_side=None):
+    """A stand-in _top_face_grasp returning a fixed width. fill_side, if given,
+    is appended to side_out (simulating a collected side candidate)."""
+    def _impl(mask, depth_mm, K, up_cam, *a, side_out=None, **kw):
+        if fill_side is not None and side_out is not None:
+            side_out.append(fill_side)
+        # (center_cam, open_axis_cam, approach_cam, width, length, n_inliers)
+        return (np.array([0.0, 0.0, 0.4]), np.array([1.0, 0.0, 0.0]),
+                np.array([0.0, 0.0, -1.0]), float(width), 0.12, 300)
+    return _impl
+
+
+def test_overwide_top_rejected_without_side_candidate(monkeypatch):
+    """A tall box's compromise plane returns as 'top' with an inflated width
+    BEFORE any side candidate is collected (side_out empty). The arbitration
+    must still reject it (drop the 0.085+ width) and fall through to legacy —
+    not pass the bogus 0.27m width to the plausibility gate."""
+    import ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp as og
+
+    monkeypatch.setattr(og, "_top_face_grasp", _fake_top(0.27))  # no side filled
+    color, depth, K = _scene()
+    grasps = og.estimate_grasps([_make_result()], depth, K,
+                                up_hint_cam=np.array([0.0, 0.0, -1.0]))
+    valid = [g for g in grasps if g.is_valid]
+    assert valid, "should still produce a grasp via the legacy fallback"
+    assert valid[0].method != "top_face", (
+        f"over-wide top must be rejected, got method={valid[0].method!r} "
+        f"width={valid[0].jaw_width_m}"
+    )
+
+
+def test_normal_width_top_still_used(monkeypatch):
+    """A normal flat box (top width < 0.085 jaw limit) keeps the top-face path
+    byte-identically — the over-wide rejection must NOT touch it."""
+    import ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp as og
+
+    monkeypatch.setattr(og, "_top_face_grasp", _fake_top(0.06))
+    color, depth, K = _scene()
+    grasps = og.estimate_grasps([_make_result()], depth, K,
+                                up_hint_cam=np.array([0.0, 0.0, -1.0]))
+    valid = [g for g in grasps if g.is_valid]
+    assert valid and valid[0].method == "top_face"
+    assert abs(valid[0].jaw_width_m - 0.06) < 1e-6
+
+
+def test_overwide_top_prefers_side_candidate_when_available(monkeypatch):
+    """When a side candidate WAS collected, an over-wide top still yields a
+    side_face grasp (the original arbitration intent, now also reached when
+    side_cands is the only viable path)."""
+    import ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp as og
+
+    # side candidate: (centroid, horiz, n_cam, h_width<=0.085, v_len, n_in)
+    side = (np.array([0.05, 0.0, 0.42]), np.array([1.0, 0.0, 0.0]),
+            np.array([0.0, 0.0, -1.0]), 0.058, 0.18, 250)
+    monkeypatch.setattr(og, "_top_face_grasp", _fake_top(0.27, fill_side=side))
+    color, depth, K = _scene()
+    grasps = og.estimate_grasps([_make_result()], depth, K,
+                                up_hint_cam=np.array([0.0, 0.0, -1.0]))
+    valid = [g for g in grasps if g.is_valid]
+    assert valid and valid[0].method == "side_face"
+    assert valid[0].jaw_width_m <= 0.085
