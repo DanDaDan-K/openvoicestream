@@ -30,7 +30,9 @@ launch with `OVS_V2V_SERVER_LOOP=1`, drive `ServerToolCall` events via a
 - MT-006/008/011/013 — N>4 dialogue; dialogue×tool interleave; coreference "放回去"; one-sentence chat+command.
 - ER-001/009/011 — empty final ignored; **arm unavailable/perception-fail → clean ok=False once (DONE)**; **wake failure (DONE — test_wake_reconnect_policy)**. (ER-001/009 in `test_server_loop_tool_scenarios.py`.)
 - ER-005/008 — mid-speech disconnect; SLV-side LLM timeout. Both need real-SLV (server owns the LLM/timeout in server-loop) → not deterministically faithful agent-side.
-- LC-002/003/005/006/008 — idle→sleep→wake; long idle>30s reconnect; 4429 boot/runtime; explicit sleep cancels in-flight tool.
+- LC-002/008 — **idle→sleep→wake cycle + auto-sleep timer + in-flight-turn-delays-sleep (DONE); explicit sleep() cancels in-flight tool vs command-return does not (DONE)** — `test_lifecycle_sleep_wake.py`.
+- LC-003/006 — **long idle>30s reconnect + unhealthy/failed-reconnect-stays-SLEEPING (DONE — `test_wake_reconnect_policy.py`)**.
+- LC-005 — 4429 boot/runtime: connection-level (SLVClient `_open_with_retry`/limiter race) → needs real-SLV or a WS-level harness, not the FSM layer.
 - AC-003/005/009 — noise prefix; far-field/low-gain; mid-utterance VAD split.
 
 **Batch 2 (P1):** TC-014/015/016; MT-007/009/010/012/014/015; ER-002/007/010/012/014/015/018; LC-007/009; AC-004/006/007/008/010/011/014; SP-005/006.
@@ -52,6 +54,9 @@ launch with `OVS_V2V_SERVER_LOOP=1`, drive `ServerToolCall` events via a
   (started=False→ok=False), background dispatch, env quote-strip, no-local-LLM.
 - server-loop tool-flow scenarios: TC-006/008/009/010/010b/012/014, ER-001/009
   (`test_server_loop_tool_scenarios.py`).
+- lifecycle FSM: LC-002 (auto-sleep timer + idle→sleep→wake + in-flight delay),
+  LC-008 (sleep()-cancels vs command-return-preserves the in-flight tool)
+  (`test_lifecycle_sleep_wake.py`).
 
 ## PRODUCT-OBSERVATION correction (per-tool timeout)
 There IS an agent-side per-tool timeout, contrary to the earlier note:
