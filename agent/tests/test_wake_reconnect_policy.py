@@ -18,7 +18,8 @@ from ovs_agent.app_base import BaseApp
 from ovs_agent.state import ConvState
 
 
-def _wake_app(*, reconnect_on_wake: bool, healthy: bool, idle_s: float):
+def _wake_app(*, reconnect_on_wake: bool, healthy: bool, idle_s: float,
+              reconnect_exc: Exception | None = None):
     app = BaseApp.__new__(BaseApp)
     app.config = Config(
         system_prompt="SYS",
@@ -42,14 +43,20 @@ def _wake_app(*, reconnect_on_wake: bool, healthy: bool, idle_s: float):
 
         async def reconnect(self):
             self.reconnect_count += 1
+            if reconnect_exc is not None:
+                raise reconnect_exc
 
     app.slv = _SLV()
     app._slv_reconnect_count = 0
+    app._broadcasts: list[tuple[str, object]] = []
+
+    async def _record_broadcast(name, data=None):
+        app._broadcasts.append((name, data))
 
     async def _noop_async(*a, **k):
         return None
 
-    app._broadcast = _noop_async  # type: ignore[assignment]
+    app._broadcast = _record_broadcast  # type: ignore[assignment]
     app._readvertise_after_reconnect = _noop_async  # type: ignore[assignment]
     app._set_state = lambda s: setattr(app, "_state", s)  # type: ignore[assignment]
     app._reset_sleep_timer = lambda: None  # type: ignore[assignment]
@@ -97,3 +104,23 @@ async def test_flag_true_restores_always_reconnect():
     app = _wake_app(reconnect_on_wake=True, healthy=True, idle_s=5.0)
     await app.wake(source="openwakeword")
     assert app.slv.reconnect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_wake_failure_stays_sleeping_and_is_visible():
+    """ER-011: a dead WS whose reconnect ALSO fails must NOT pretend to wake.
+    Stay SLEEPING and broadcast on_wake_failed so the user sees the failure
+    instead of speaking into a silently-muted stream (the 'mute bug')."""
+    from ovs_agent.slv_client import SLVReconnectError
+
+    app = _wake_app(
+        reconnect_on_wake=False, healthy=False, idle_s=5.0,
+        reconnect_exc=SLVReconnectError("dead ws"),
+    )
+    await app.wake(source="openwakeword")
+    names = [n for n, _ in app._broadcasts]
+    assert app._state == ConvState.SLEEPING, (
+        f"must stay SLEEPING on a failed reconnect, not pretend to wake; state={app._state}"
+    )
+    assert "on_wake_failed" in names, f"expected on_wake_failed broadcast; got {names}"
+    assert "on_wake" not in names, "must not broadcast on_wake when the reconnect failed"
