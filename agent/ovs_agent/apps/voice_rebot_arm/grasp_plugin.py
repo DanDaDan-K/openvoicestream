@@ -336,13 +336,11 @@ class GraspPlugin(Plugin):
         catalog_str = ", ".join(repr(c) for c in catalog) or "'box'"
         grasp_desc = (
             "Pick up / grasp an object using the camera-guided arm when the "
-            "user asks to grab/pick something up ('抓','拿起','夹起','抓取',"
-            "'grab','pick up'). "
+            "user asks to grab/pick something up ('grab','pick up','grasp'). "
             f"object_name MUST be exactly one of these catalog labels: [{catalog_str}]. "
             "Map the user's spoken object to the closest catalog label and pass "
-            "that English label verbatim (e.g. user says '抓盒子'/'把箱子拿起来' "
-            "-> object_name='box'). Do NOT pass the user's Chinese words; the "
-            "detector only knows the catalog labels above."
+            "that label verbatim (e.g. user says 'grab the box' -> "
+            "object_name='box'). The detector only knows the catalog labels above."
         )
 
         @registry.tool(
@@ -362,12 +360,12 @@ class GraspPlugin(Plugin):
         search_desc = (
             "Search for / locate an object by sweeping the camera around when "
             "the user asks to FIND or LOOK FOR something but not (yet) pick it "
-            "up ('找一下','找找','搜索','看看有没有','find','look for','search "
-            "for'). The arm scans several viewpoints, stops when it sees the "
-            "object and points at it WITHOUT grasping. "
+            "up ('find','look for','search for'). The arm scans several "
+            "viewpoints, stops when it sees the object and points at it "
+            "WITHOUT grasping. "
             f"object_name MUST be exactly one of these catalog labels: [{catalog_str}]. "
             "Map the user's spoken object to the closest catalog label "
-            "(e.g. '找一下盒子' -> object_name='box')."
+            "(e.g. 'find the box' -> object_name='box')."
         )
 
         @registry.tool(
@@ -389,13 +387,11 @@ class GraspPlugin(Plugin):
             "gripper. The arm sets it back down at the spot it was picked up "
             "from (so the camera can find it again), opens the gripper, and "
             "returns home. Use this whenever the user wants the held object "
-            "put down or returned, EVEN IF they name the object — including "
-            "'放回原位' (the '放' verb means release the held object; '原位' "
-            "only says WHERE, do NOT confuse with go_home). Triggers: "
-            "'放下', '放下来', '放回去', '放回原位', '放好', '把盒子放回去', "
-            "'放下盒子', '放回原处', '放到桌上', '把它放下', 'put it down', "
-            "'put down', 'put the box back', 'place it', 'set it down', "
-            "'drop it', 'release it'."
+            "put down or returned, EVEN IF they name the object. 'put it back' "
+            "means release the HELD object (put_down); do NOT confuse with "
+            "go_home, which moves the empty arm home. Triggers: 'put it down', "
+            "'put down', 'put it back', 'put the box back', 'place it', "
+            "'set it down', 'drop it', 'release it'."
         )
 
         @registry.tool(

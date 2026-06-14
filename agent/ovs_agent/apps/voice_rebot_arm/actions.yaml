@@ -26,8 +26,8 @@ sequences:
   # Return to the safe ready/home pose (IK-validated; FK lands within 0.6mm).
   go_home:
     description: >-
-      Return the arm to its home / ready position. Triggers: "回到原位",
-      "回家", "归位", "go home", "home", "reset position".
+      Return the arm to its home / ready position. Triggers: "go home",
+      "home", "reset position".
     frames:
       - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
         delay: 2.0
@@ -40,8 +40,8 @@ sequences:
   # instead of releasing and the object is never let go.
   open_gripper:
     description: >-
-      Open the gripper / release. Triggers: "张开夹爪", "松开", "打开夹爪",
-      "把夹爪打开", "夹爪打开", "open gripper", "release", "let go".
+      Open the gripper / release. Triggers: "open gripper", "release",
+      "let go".
     frames:
       - joints: {gripper: 0.09}
         delay: 1.0
@@ -51,8 +51,7 @@ sequences:
   # ~1.84 N·m at the closed position). Use a larger |force| for a firmer hold.
   close_gripper:
     description: >-
-      Close the gripper / grasp. Triggers: "闭合夹爪", "夹紧", "抓住",
-      "合上夹爪", "关闭夹爪", "close gripper", "grasp", "grab".
+      Close the gripper / grasp. Triggers: "close gripper", "grasp", "grab".
     frames:
       - joints: {gripper: -0.2}
         delay: 1.0
@@ -61,8 +60,7 @@ sequences:
   # then return. All 6 waypoints IK-validated on hardware.
   wave:
     description: >-
-      Wave hello by swinging the arm side to side. Triggers: "挥手",
-      "挥一下手", "挥挥手", "打招呼", "打个招呼", "wave", "say hi".
+      Wave hello by swinging the arm side to side. Triggers: "wave", "say hi".
     frames:
       - joints: {x: 0.27, y:  0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
         delay: 0.4
@@ -89,8 +87,8 @@ sequences:
   # (point reach x=0.32 gave the lowest IK error, 7.3e-5).
   point_at:
     description: >-
-      Point forward at an object. Triggers: "指向", "指一下", "point at",
-      "point", "show me". Do not use for head nodding: "点头" is unsupported.
+      Point forward at an object. Triggers: "point at", "point", "show me".
+      Do not use for head nodding: "nod" is unsupported.
     frames:
       - joints: {x: 0.32, y: 0.00, z: 0.20, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
         delay: 1.5
