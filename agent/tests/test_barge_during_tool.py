@@ -19,10 +19,10 @@ Locking this prevents two regressions: (a) a barge-in silently killing a
 legitimately-running motion, or (b) a "stop!" failing to reach the arm because
 someone wired the abort to the tool-task cancel instead of the ``on_sleep`` hook.
 
-PRODUCT-OBSERVATION: there is no barge-in→tool-abort path today. If product
-wants "talk over the robot = halt the arm", that needs an explicit hook (route
-barge-in through the on_sleep-style abort, or cancel _pending_tool_tasks in the
-barge path) — flagged, not made.
+PRODUCT-DECISION (confirmed 2026-06-14): barge-in deliberately does NOT stop the
+arm — talking over the robot interrupts only its speech, never its motion. To
+halt a motion the user must say 停/睡觉 (sleep → on_sleep → GraspPlugin abort).
+No barge→arm-abort hook will be added; these tests pin that intended boundary.
 """
 from __future__ import annotations
 

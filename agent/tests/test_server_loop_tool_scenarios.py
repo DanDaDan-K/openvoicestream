@@ -447,8 +447,11 @@ async def test_tc010b_async_tool_timeout_returns_ok_false_error():
     This is the agent-side per-tool timeout the catalog asked for — it DOES
     exist at the registry layer (``registry.py:299``), contrary to the older
     'no per-tool timeout' note. It applies to coroutine handlers only; a
-    blocking *sync* handler is not wrapped and would not time out here (that
-    gap is the real PRODUCT-OBSERVATION). A hung tool therefore surfaces as a
+    blocking *sync* handler is not wrapped and would not time out here. Audit
+    2026-06-14: every production arm tool is already ``async def`` + wraps the
+    blocking serial motion in ``asyncio.to_thread``
+    (``plugins/actuator_actions.py``), so they all inherit this timeout; the
+    sync caveat only governs future tools. A hung tool therefore surfaces as a
     clean failure the server-loop LLM can react to, not an indefinite stall."""
     reg = ToolRegistry()
 

@@ -26,7 +26,7 @@ launch with `OVS_V2V_SERVER_LOOP=1`, drive `ServerToolCall` events via a
 **Batch 1 (P0 — highest demo risk):**
 - TC-001/002/003 — server-loop tool-call basics: command→preamble→action; preamble-TTS barge dropped; action-body (IDLE) speech captured. *(needs the stub-tool harness)*
 - TC-006/008/009/010/010b/012/014 — tool failure+retry / sequential / wrong-tool-corrected / slow-non-blocking / async-timeout→ok=False / concurrent / dead-WS-drop. **(DONE — `test_server_loop_tool_scenarios.py`)**
-- TC-007/011 — **interrupt-during-tool: barge-in interrupts SPEECH but leaves the in-flight tool/arm running (no on_sleep); explicit sleep() halts the arm via the on_sleep plugin hook, not tool-task cancel (DONE — `test_barge_during_tool.py`)**. PRODUCT-OBSERVATION: no barge-in→arm-abort path today (talking over the robot ≠ stop the arm); flagged.
+- TC-007/011 — **interrupt-during-tool: barge-in interrupts SPEECH but leaves the in-flight tool/arm running (no on_sleep); explicit sleep() halts the arm via the on_sleep plugin hook, not tool-task cancel (DONE — `test_barge_during_tool.py`)**. PRODUCT-DECISION (confirmed 2026-06-14): barge-in does NOT stop the arm — that is the intended behavior. To halt a motion the user says 停/睡觉 (sleep→on_sleep→GraspPlugin). No barge→arm-abort hook will be added.
 - TC-013 — 4429-during-tool: agent-side behavior == TC-014 (both the `connect_if_dead=False` drop).
 - MT-006/008/011/013 — N>4 dialogue; dialogue×tool interleave; coreference "放回去"; one-sentence chat+command.
 - ER-001/009/011 — empty final ignored; **arm unavailable/perception-fail → clean ok=False once (DONE)**; **wake failure (DONE — test_wake_reconnect_policy)**. (ER-001/009 in `test_server_loop_tool_scenarios.py`.)
@@ -62,15 +62,21 @@ launch with `OVS_V2V_SERVER_LOOP=1`, drive `ServerToolCall` events via a
   TC-007 (sleep() halts arm via on_sleep hook, not tool-task cancel)
   (`test_barge_during_tool.py`).
 
-## PRODUCT-OBSERVATION correction (per-tool timeout)
-There IS an agent-side per-tool timeout, contrary to the earlier note:
-`ToolRegistry.dispatch` wraps **coroutine** handlers in
-`asyncio.wait_for(..., timeout_s)` (default 10s, `tools/registry.py:299`) →
-overrun returns `{"success": False, "error": "...timed out..."}` → ok=False
-(asserted by TC-010b). The real gap is narrower: a **blocking sync** handler is
-run unwrapped (`t.fn(**clean)` not awaited through wait_for), so it would not
-time out and would tie up its dispatch task. Arm motion handlers should be async
-(or internally bounded) to inherit the timeout.
+## PRODUCT-OBSERVATION — per-tool timeout (RESOLVED 2026-06-14)
+There IS an agent-side per-tool timeout: `ToolRegistry.dispatch` wraps
+**coroutine** handlers in `asyncio.wait_for(..., timeout_s)` (default 10s,
+`tools/registry.py:299`) → overrun returns `{"success": False, "error":
+"...timed out..."}` → ok=False (asserted by TC-010b). The theoretical gap is a
+**blocking sync** handler (run unwrapped, no timeout).
+**Audit (2026-06-14): all production arm tools are already safe** — every motion
+tool (`wave`/`go_home`/`point_at`/`open_gripper`/`close_gripper` in
+`tools/action_tools.py`, `grasp_object`/`put_down` in `grasp_plugin.py`) is
+`async def` and wraps the blocking serial motion in `asyncio.to_thread`
+(`plugins/actuator_actions.py:322,383`), so it both inherits the timeout AND
+doesn't block the loop. The only sync tools (`time_now`/`set_mode` in
+`builtin.py`) are instant (no I/O). So the "make arm handlers async" item is
+**already done in prod**; the sync-handler caveat now only governs FUTURE tools
+(keep blocking handlers `async` + `to_thread`).
 - Wake policy + failure: reconnect decision matrix + wake-failure stays-SLEEPING
   (`test_wake_reconnect_policy`).
 
