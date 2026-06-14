@@ -31,6 +31,12 @@ Scenarios:
             mixing greeting + command still dispatches the tool.
   * ER     test_server_loop_tool_failure_is_graceful — a refusing tool
             ({"started": False}) resolves to an assistant reply, no hang/crash.
+  * ER     test_server_loop_server_side_tool_timeout — a hung tool (never
+            returns) is timed out server-side by the SLV; the turn doesn't wedge.
+  * MT-011 test_server_loop_coreference_put_back — grab X, then "put it back"
+            resolves to put_down (object carried across turns).
+  * TC     test_server_loop_tool_failure_retry_bounded — an always-failing tool
+            retries within the iteration cap and ends (no infinite loop).
 
 ────────────────────────────────────────────────────────────────────────────
 GATED: skipped unless ``OVS_E2E_SERVER_LOOP=1``. The dev orin-nx SLV runs
@@ -84,11 +90,13 @@ def _stub_registry(
     tools: tuple[str, ...] = ("grasp_object",),
     *,
     fail_tools: tuple[str, ...] = (),
+    hang_tools: tuple[str, ...] = (),
 ):
     """Build a registry of recording stubs. Each dispatch appends
-    ``{"tool": name, "args": {...}}`` to ``sink`` (the assertion surface). A
-    tool listed in ``fail_tools`` returns the parallel-mode refusal shape
-    ``{"started": False, "error": ...}`` so the server-loop reports ok=False."""
+    ``{"tool": name, "args": {...}}`` to ``sink`` (the assertion surface).
+    ``fail_tools`` → returns ``{"started": False, ...}`` (ok=False). ``hang_tools``
+    → the handler awaits 60s (registered timeout_s=60 so the agent-side registry
+    does NOT short it) — used to exercise the SLV's own server-side tool timeout."""
     from ovs_agent.tools.registry import ToolRegistry
 
     reg = ToolRegistry()
@@ -97,16 +105,34 @@ def _stub_registry(
         @reg.tool(
             name="grasp_object",
             description=(
-                "抓取/拿起指定的物体。当用户要求抓、拿、抓起某个东西时调用。"
-                "Grab/pick up a named object."
+                "抓取/拿起指定的物体。Grab/pick up a named object. "
+                "Triggers: 抓/拿/抓起, grab, pick up, grasp."
             ),
             preamble_text="好的，正在抓取。",
+            timeout_s=60.0,
         )
-        def grasp_object(object_name: str) -> dict:  # noqa: ANN001
+        async def grasp_object(object_name: str = "box") -> dict:  # noqa: ANN001
             sink.append({"tool": "grasp_object", "args": {"object_name": object_name}})
+            if "grasp_object" in hang_tools:
+                await asyncio.sleep(60)  # never returns in time → SLV must time out
             if "grasp_object" in fail_tools:
                 return {"started": False, "error": "perception: object not found"}
             return {"started": True, "object_name": object_name}
+
+    if "put_down" in tools:
+        @reg.tool(
+            name="put_down",
+            description=(
+                "把当前拿着的物体放下/放回。Put down / put back the held object. "
+                "Triggers: 放下/放回/放回去, put it back, put down, release it."
+            ),
+            preamble_text="好的，正在放回。",
+        )
+        def put_down() -> dict:
+            sink.append({"tool": "put_down", "args": {}})
+            if "put_down" in fail_tools:
+                return {"started": False, "error": "nothing held"}
+            return {"started": True, "action": "put_down"}
 
     if "go_home" in tools:
         @reg.tool(
@@ -338,3 +364,84 @@ async def test_server_loop_tool_failure_is_graceful(test_config):
             f"failing tool did not resolve into an assistant reply (possible "
             f"hang). calls={calls} errors={probe.errors}"
         )
+
+
+# ── ER: server-side tool timeout — a hung tool must not wedge the SLV turn ─
+
+
+@pytest.mark.asyncio
+async def test_server_loop_server_side_tool_timeout(test_config):
+    """Server-side tool timeout: the tool never returns (awaits 60s, registered
+    timeout_s=60 so the AGENT-side registry does NOT short it). The SLV's own
+    server-side tool_result budget (~15s) must fire and end the turn, rather than
+    wedging forever. Asserts the turn terminates (assistant reply OR FSM back to
+    a resting state) within the budget."""
+    calls: list[dict] = []
+    reg = _stub_registry(calls, tools=("grasp_object",), hang_tools=("grasp_object",))
+    async with _server_loop_agent(test_config, reg) as (app, audio, probe):
+        audio.inject(WAV_DIR / "cmd_en_grab_box.wav")  # "grab the box"
+        assert await _wait_for(lambda: bool(calls), timeout=30), (
+            f"tool never dispatched: {calls}"
+        )
+        # Tool is now hung. The SLV must time it out server-side and resolve the
+        # turn — NOT hang. Recovery = an assistant reply OR FSM back to rest.
+        def _recovered() -> bool:
+            if _assistant_done_count(probe) >= 1:
+                return True
+            sh = probe.state_history
+            return bool(sh) and sh[-1][1] in ("idle", "listening", "sleeping")
+        recovered = await _wait_for(_recovered, timeout=35)
+        evts = [e.get("event") for e in probe.events][-30:]
+        assert recovered, (
+            f"SLV did not recover from a hung tool within the server budget "
+            f"(possible server-side timeout gap). state_history={probe.state_history[-5:]} "
+            f"events={evts}"
+        )
+
+
+# ── MT-011: coreference — grab X, then 'put it back' → put_down ───────
+
+
+@pytest.mark.asyncio
+async def test_server_loop_coreference_put_back(test_config):
+    """MT-011: grab an object, then 'put it back' must resolve to put_down — the
+    LLM carries the just-grasped object across turns on one server-loop session.
+    Real-LLM semantic; generous timeout."""
+    calls: list[dict] = []
+    reg = _stub_registry(calls, tools=("grasp_object", "put_down"))
+    async with _server_loop_agent(test_config, reg) as (app, audio, probe):
+        audio.inject(WAV_DIR / "cmd_en_grab_box.wav")  # "grab the box"
+        assert await _wait_for(
+            lambda: any(c["tool"] == "grasp_object" for c in calls), timeout=45
+        ), f"turn 1 grasp not dispatched: {calls}"
+        assert await _wait_for(lambda: _assistant_done_count(probe) >= 1, timeout=45), (
+            "turn 1 produced no assistant reply"
+        )
+        await asyncio.sleep(1.0)  # let turn-1 TTS finish (echo-gate clear)
+        audio.inject(WAV_DIR / "cmd_en_put_back.wav")  # "put it back"
+        assert await _wait_for(
+            lambda: any(c["tool"] == "put_down" for c in calls), timeout=45
+        ), f"'put it back' did not resolve to put_down (coreference miss): {calls}"
+
+
+# ── TC: tool-failure retry is bounded (no infinite loop) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_server_loop_tool_failure_retry_bounded(test_config):
+    """An ALWAYS-failing tool ({"started": False}): the server-loop LLM may retry,
+    but must give up within the iteration cap and end the turn with an assistant
+    reply — never an infinite retry loop. Asserts the tool fired ≥1, bounded, and
+    the turn terminated. Records the observed retry count (model behavior)."""
+    calls: list[dict] = []
+    reg = _stub_registry(calls, tools=("grasp_object",), fail_tools=("grasp_object",))
+    async with _server_loop_agent(test_config, reg) as (app, audio, probe):
+        audio.inject(WAV_DIR / "cmd_en_grab_box.wav")  # "grab the box" → always fails
+        assert await _wait_for(lambda: bool(calls), timeout=45), "tool never dispatched"
+        assert await _wait_for(lambda: _assistant_done_count(probe) >= 1, timeout=60), (
+            f"failing tool did not terminate into a reply (possible retry loop). "
+            f"calls so far={len(calls)}"
+        )
+        await asyncio.sleep(1.0)  # let any in-flight retry settle
+        print(f"\n[server-loop-e2e] always-failing tool retry count = {len(calls)}")
+        assert 1 <= len(calls) <= 8, f"retry count out of bounds (cap regression?): {len(calls)}"
