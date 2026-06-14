@@ -22,8 +22,9 @@ Harness design (how it injects + captures):
   drain:   tool handlers run as background tasks (#F4), so tests await
            ``_drain_tool_tasks(app)`` before asserting the captured results.
 
-Scenarios implemented (catalog IDs): TC-006, TC-008, TC-010, TC-012,
-TC-014, ER-001. See module-level test docstrings for per-scenario notes.
+Scenarios implemented (catalog IDs): TC-006, TC-008, TC-009, TC-010,
+TC-010b, TC-012, TC-014, ER-001, ER-009. See module-level test docstrings
+for per-scenario notes.
 """
 from __future__ import annotations
 
@@ -283,15 +284,16 @@ async def test_tc012_concurrent_tool_calls_run_as_background_tasks():
 
 @pytest.mark.asyncio
 async def test_tc010_slow_tool_does_not_block_dispatch_loop():
-    """TC-010 (adjusted to real behavior — see PRODUCT-OBSERVATION).
+    """TC-010 (#F4 non-blocking contract).
 
-    The catalog asks for a *timeout → error result* assertion, but
-    ``_handle_server_tool_call`` has **no per-tool timeout** today (the server
-    side owns the 15s tool_result timeout). So the deterministic, faithful
-    assertion is the #F4 contract that holds regardless of handler duration:
-    a slow/hung tool does NOT block ``_dispatch_one`` — subsequent events keep
-    flowing — and once it finishes the result is delivered. A pure agent-side
-    timeout assertion would require a product change (flagged, not made)."""
+    There ARE two timeout layers (see TC-010b for the agent-side one):
+    ``ToolRegistry.dispatch`` wraps *async* handlers in
+    ``asyncio.wait_for(..., timeout_s)`` (default 10s), and the SLV owns a
+    separate ~15s tool_result budget. This test asserts the orthogonal #F4
+    contract that holds regardless of either timeout: a slow/hung tool does
+    NOT block ``_dispatch_one`` — subsequent events keep flowing — and once it
+    finishes the result is delivered. (Released before its 10s default, so no
+    timeout fires here; TC-010b covers the timeout path.)"""
     reg = ToolRegistry()
     release = asyncio.Event()
     other_ran: list[str] = []
@@ -386,6 +388,123 @@ async def test_tc014_tool_result_dropped_on_dead_ws_no_reconnect():
 
     frame = _json.loads(sent[0])
     assert frame["call_id"] == "call_live" and frame["ok"] is True
+
+
+# ── TC-009: wrong tool dispatched, then corrected — both resolve clean ─
+
+
+@pytest.mark.asyncio
+async def test_tc009_wrong_tool_then_corrected_resolves_cleanly():
+    """TC-009: the server-loop LLM first selects the WRONG tool (``wave`` when
+    the user asked to grasp), the user corrects, and the LLM then selects the
+    RIGHT tool (``grasp_object``). Both calls are independent SERVER_TOOL_CALLs.
+
+    Faithful agent-side assertion: each call resolves ok=True on its own id,
+    in order, each handler runs exactly once, and the wrong first call leaves
+    NO residue that strands or mis-routes the corrected call. (The agent can't
+    know ``wave`` was 'wrong' — selection is the SLV LLM's job; the agent's
+    contract is that every dispatched call resolves cleanly and independently.)
+    """
+    reg = ToolRegistry()
+    ran: list[str] = []
+
+    @reg.tool(name="wave", description="wave hello")
+    def wave() -> dict:
+        ran.append("wave")
+        return {"started": True, "action": "wave"}
+
+    @reg.tool(name="grasp_object", description="grasp")
+    def grasp_object(label: str = "box") -> dict:
+        ran.append("grasp_object")
+        return {"started": True, "action": "grasp_object", "label": label}
+
+    app = _make_app(registry=reg)
+
+    # Wrong tool first, then the corrected tool (sequential: await each).
+    await _inject(app, ServerToolCall(id="w1", name="wave", arguments={}))
+    await _inject(
+        app, ServerToolCall(id="g1", name="grasp_object", arguments={"label": "box"})
+    )
+
+    results = app.slv.tool_results
+    assert [r["id"] for r in results] == ["w1", "g1"]
+    assert [r["name"] for r in results] == ["wave", "grasp_object"]
+    assert all(r["ok"] is True for r in results)
+    assert ran == ["wave", "grasp_object"]  # each ran once, in order
+    assert results[1]["result"]["label"] == "box"  # corrected call carried its args
+
+
+# ── TC-010b: async tool exceeding its timeout_s → ok=False (real path) ─
+
+
+@pytest.mark.asyncio
+async def test_tc010b_async_tool_timeout_returns_ok_false_error():
+    """TC-010b: an *async* tool that runs past its registered ``timeout_s``
+    is cancelled by ``ToolRegistry.dispatch`` (``asyncio.wait_for``) and the
+    registry returns ``{"success": False, "error": "tool ... timed out ..."}``
+    → ``_handle_server_tool_call`` reports ok=False with that error.
+
+    This is the agent-side per-tool timeout the catalog asked for — it DOES
+    exist at the registry layer (``registry.py:299``), contrary to the older
+    'no per-tool timeout' note. It applies to coroutine handlers only; a
+    blocking *sync* handler is not wrapped and would not time out here (that
+    gap is the real PRODUCT-OBSERVATION). A hung tool therefore surfaces as a
+    clean failure the server-loop LLM can react to, not an indefinite stall."""
+    reg = ToolRegistry()
+
+    @reg.tool(name="slow_grasp", description="overruns", timeout_s=0.05)
+    async def slow_grasp() -> dict:
+        await asyncio.sleep(5.0)  # far past the 0.05s budget
+        return {"started": True, "action": "slow_grasp"}  # never reached
+
+    app = _make_app(registry=reg)
+
+    await _inject(app, ServerToolCall(id="t1", name="slow_grasp", arguments={}))
+
+    assert len(app.slv.tool_results) == 1
+    r = app.slv.tool_results[0]
+    assert r["id"] == "t1" and r["name"] == "slow_grasp"
+    assert r["ok"] is False
+    assert "timed out" in (r["error"] or ""), r
+    assert not app._pending_tool_tasks  # the timed-out task was drained, not leaked
+
+
+# ── ER-009: arm unavailable / perception-fail → clean ok=False, no loop ─
+
+
+@pytest.mark.asyncio
+async def test_er009_arm_unavailable_surfaces_ok_false_once():
+    """ER-009: the arm/perception is unavailable, so the motion handler
+    refuses with ``{"started": False, "error": ...}`` (the parallel-mode
+    refusal shape). The agent must report ok=False with that error EXACTLY
+    ONCE — never ok=True (which made the real arm loop the same motion every
+    round until the iteration cap, 2026-06-12) — and the dispatch must not
+    strand. Covers both the explicit refusal dict and a handler that *raises*
+    (``ToolRegistry.dispatch`` catches → ``success:False``)."""
+    reg = ToolRegistry()
+
+    @reg.tool(name="grasp_object", description="grasp")
+    def grasp_object(label: str = "box") -> dict:
+        return {"started": False, "error": "arm offline: motor bridge not connected"}
+
+    @reg.tool(name="put_down", description="put down")
+    def put_down() -> dict:
+        raise RuntimeError("perception: no plane detected")
+
+    app = _make_app(registry=reg)
+
+    await _inject(app, ServerToolCall(id="a1", name="grasp_object", arguments={}))
+    await _inject(app, ServerToolCall(id="a2", name="put_down", arguments={}))
+
+    refusal, crash = app.slv.tool_results
+    assert refusal["id"] == "a1" and refusal["ok"] is False
+    assert refusal["error"] == "arm offline: motor bridge not connected"
+    assert refusal["result"] is None  # ok=False frames carry error, not result
+    # A raising handler is caught by the registry and also surfaces ok=False
+    # (never crashes the dispatch task or strands the server turn).
+    assert crash["id"] == "a2" and crash["ok"] is False
+    assert "perception: no plane detected" in (crash["error"] or "")
+    assert not app._pending_tool_tasks
 
 
 # ── ER-001: empty asr_final ignored (deterministic-sim layer) ─────────
