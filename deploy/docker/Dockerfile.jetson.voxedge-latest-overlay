@@ -22,10 +22,11 @@ FROM ${BASE}
 ARG BASE
 
 # Replace the baked voxedge with the branch wheel (pure-python; --no-deps keeps
-# the image's numpy/runtime untouched).
-COPY deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl /tmp/voxedge.whl
-RUN python3 -m pip install --no-deps --force-reinstall /tmp/voxedge.whl \
-    && rm -f /tmp/voxedge.whl \
+# the image's numpy/runtime untouched). Keep the PEP-427 wheel filename — pip
+# rejects a renamed wheel ("not a valid wheel filename").
+COPY deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl /tmp/voxedge-0.0.1a0-py3-none-any.whl
+RUN python3 -m pip install --no-deps --force-reinstall /tmp/voxedge-0.0.1a0-py3-none-any.whl \
+    && rm -f /tmp/voxedge-0.0.1a0-py3-none-any.whl \
     && python3 -c "import voxedge, voxedge.engine.turn_driver as t; print('voxedge ok:', t.__file__)"
 
 # Keep the /v2v no-VAD multi-turn fix (idempotent; no-op if base already fixed).
