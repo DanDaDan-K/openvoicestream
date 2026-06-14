@@ -22,9 +22,15 @@ Scenarios:
             command dispatches it.
   * TC-002  test_server_loop_selects_correct_tool  — TWO tools advertised; the
             command must select the right one and NOT the other.
+  * TC-003  test_server_loop_sequential_tools      — two command turns dispatch
+            two different tools in order on one session.
   * MT-008  test_server_loop_chat_then_command     — a chitchat turn fires NO
             tool (false-trigger guard); a following command turn fires it, on
             one persistent server-loop session.
+  * MT-013  test_server_loop_mixed_chat_command_one_sentence — one utterance
+            mixing greeting + command still dispatches the tool.
+  * ER     test_server_loop_tool_failure_is_graceful — a refusing tool
+            ({"started": False}) resolves to an assistant reply, no hang/crash.
 
 ────────────────────────────────────────────────────────────────────────────
 GATED: skipped unless ``OVS_E2E_SERVER_LOOP=1``. The dev orin-nx SLV runs
@@ -73,9 +79,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _stub_registry(sink: list[dict], tools: tuple[str, ...] = ("grasp_object",)):
+def _stub_registry(
+    sink: list[dict],
+    tools: tuple[str, ...] = ("grasp_object",),
+    *,
+    fail_tools: tuple[str, ...] = (),
+):
     """Build a registry of recording stubs. Each dispatch appends
-    ``{"tool": name, "args": {...}}`` to ``sink`` (the assertion surface)."""
+    ``{"tool": name, "args": {...}}`` to ``sink`` (the assertion surface). A
+    tool listed in ``fail_tools`` returns the parallel-mode refusal shape
+    ``{"started": False, "error": ...}`` so the server-loop reports ok=False."""
     from ovs_agent.tools.registry import ToolRegistry
 
     reg = ToolRegistry()
@@ -91,6 +104,8 @@ def _stub_registry(sink: list[dict], tools: tuple[str, ...] = ("grasp_object",))
         )
         def grasp_object(object_name: str) -> dict:  # noqa: ANN001
             sink.append({"tool": "grasp_object", "args": {"object_name": object_name}})
+            if "grasp_object" in fail_tools:
+                return {"started": False, "error": "perception: object not found"}
             return {"started": True, "object_name": object_name}
 
     if "go_home" in tools:
@@ -101,6 +116,8 @@ def _stub_registry(sink: list[dict], tools: tuple[str, ...] = ("grasp_object",))
         )
         def go_home() -> dict:
             sink.append({"tool": "go_home", "args": {}})
+            if "go_home" in fail_tools:
+                return {"started": False, "error": "arm offline"}
             return {"started": True, "action": "go_home"}
 
     return reg
@@ -244,3 +261,80 @@ async def test_server_loop_chat_then_command(test_config):
         evts = [e.get("event") for e in probe.events][-30:]
         assert fired, f"command turn did not dispatch the tool. calls={calls} events={evts}"
         assert calls[0]["tool"] == "grasp_object", calls
+
+
+# ── TC-003: two commands in sequence → two tools, in order ────────────
+
+
+@pytest.mark.asyncio
+async def test_server_loop_sequential_tools(test_config):
+    """TC-003: two command turns on one server-loop session dispatch two
+    different tools in order — "抓盒子" → grasp_object, then "回家" → go_home.
+    Proves sequential tool dispatch over a persistent session (each turn's
+    SERVER_TOOL_CALL resolved before the next), no cross-talk."""
+    calls: list[dict] = []
+    reg = _stub_registry(calls, tools=("grasp_object", "go_home"))
+    async with _server_loop_agent(test_config, reg) as (app, audio, probe):
+        audio.inject(WAV_DIR / "tts_q_grab_box.wav")  # "抓盒子"
+        assert await _wait_for(lambda: any(c["tool"] == "grasp_object" for c in calls),
+                               timeout=45), f"turn 1 grasp not dispatched. calls={calls}"
+        # Turn 1's tool fires mid-turn, BEFORE its TTS reply plays. Injecting
+        # turn 2 now would land it in turn-1's echo-gated playback window and it
+        # would never finalize. Wait for turn 1 to fully complete (assistant
+        # reply done) + a drain margin before the next utterance.
+        assert await _wait_for(lambda: _assistant_done_count(probe) >= 1, timeout=45), (
+            "turn 1 never completed its assistant reply"
+        )
+        await asyncio.sleep(1.0)  # clear the post-TTS echo-gate / mic-suppress tail
+
+        audio.inject(WAV_DIR / "tts_q_go_home.wav")  # "回家"
+        assert await _wait_for(lambda: any(c["tool"] == "go_home" for c in calls),
+                               timeout=45), f"turn 2 go_home not dispatched. calls={calls}"
+
+        order = [c["tool"] for c in calls]
+        assert order.index("grasp_object") < order.index("go_home"), (
+            f"tools fired out of order: {order}"
+        )
+
+
+# ── MT-013: one sentence mixing greeting + command still fires the tool ─
+
+
+@pytest.mark.asyncio
+async def test_server_loop_mixed_chat_command_one_sentence(test_config):
+    """MT-013: a single utterance mixing chitchat and a command
+    ("你好，帮我把盒子抓起来") must still dispatch the command's tool. Lenient on
+    the greeting (LLM may or may not verbalize it); the load-bearing assertion
+    is that the embedded command is honored, not swallowed by the chat framing."""
+    calls: list[dict] = []
+    reg = _stub_registry(calls, tools=("grasp_object",))
+    async with _server_loop_agent(test_config, reg) as (app, audio, probe):
+        audio.inject(WAV_DIR / "cmd_hello_grab.wav")  # "你好，帮我把盒子抓起来"
+        fired = await _wait_for(lambda: bool(calls), timeout=45)
+        utt = [e.get("data") for e in probe.events if e.get("event") == "on_user_utterance"]
+        assert fired, f"mixed chat+command did not dispatch the tool. utt={utt} calls={calls}"
+        assert calls[0]["tool"] == "grasp_object", calls
+
+
+# ── ER: a failing tool surfaces gracefully (no hang/crash) ────────────
+
+
+@pytest.mark.asyncio
+async def test_server_loop_tool_failure_is_graceful(test_config):
+    """A tool that refuses ({"started": False}) must surface as ok=False to the
+    server-loop without hanging or crashing the turn: the tool fires, and the
+    LLM loop still terminates with an assistant reply (it tells the user). We
+    assert graceful termination, NOT a specific retry count (model-dependent) —
+    the retry *mechanics* are pinned deterministically by TC-006."""
+    calls: list[dict] = []
+    reg = _stub_registry(calls, tools=("grasp_object",), fail_tools=("grasp_object",))
+    async with _server_loop_agent(test_config, reg) as (app, audio, probe):
+        audio.inject(WAV_DIR / "tts_q_grab_box.wav")  # "抓盒子" → stub refuses
+        fired = await _wait_for(lambda: bool(calls), timeout=45)
+        assert fired, f"tool never dispatched. calls={calls}"
+        # The turn must still resolve (assistant reply), not hang on the failure.
+        replied = await _wait_for(lambda: _assistant_done_count(probe) >= 1, timeout=45)
+        assert replied, (
+            f"failing tool did not resolve into an assistant reply (possible "
+            f"hang). calls={calls} errors={probe.errors}"
+        )
