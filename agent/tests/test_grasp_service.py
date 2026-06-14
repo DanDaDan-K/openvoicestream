@@ -1349,3 +1349,80 @@ def test_overwide_top_prefers_side_candidate_when_available(monkeypatch):
     valid = [g for g in grasps if g.is_valid]
     assert valid and valid[0].method == "side_face"
     assert valid[0].jaw_width_m <= 0.085
+
+
+# ── reachability-aware multi-candidate selection (sim-grounded, 2026-06-15) ──
+def _grasp(conf, pos, method="legacy"):
+    """Minimal valid GraspPose at camera-frame position ``pos``."""
+    from ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp import GraspPose
+    return GraspPose(
+        class_name="box", conf=float(conf), bbox_xyxy=(0, 0, 10, 10),
+        center_px=(5, 5), position=np.asarray(pos, dtype=np.float32),
+        rotation=np.eye(3, dtype=np.float32),
+        tcp_rotation=np.eye(3, dtype=np.float32),
+        jaw_width_m=0.05, object_length_m=0.1, angle_deg=0.0,
+        rect_points=np.zeros((4, 2), dtype=np.float32),
+        short_edge_points=np.zeros((2, 2), dtype=np.float32),
+        valid_depth_pixels=100, method=method,
+    )
+
+
+class _ReachArm:
+    """check_ik feasible only when the base-frame x reach is below ``x_max``."""
+    def __init__(self, x_max=0.5):
+        self.x_max = x_max
+        self.checks = 0
+
+    def check_ik(self, x, y, z, roll=0.0, pitch=0.0, yaw=0.0):
+        self.checks += 1
+        return (abs(x) <= self.x_max, None)
+
+
+def test_reach_rank_prefers_reachable_over_higher_conf():
+    """Two candidates: the higher-conf one transforms out of the IK envelope,
+    the lower-conf one is reachable → the reachable one must win."""
+    from ovs_agent.apps.voice_rebot_arm.grasp_service import _select_reachable_grasp
+    T = np.eye(4, dtype=np.float64)  # camera frame == base frame
+    near = _grasp(0.60, [0.30, 0.0, 0.0])   # base x≈0.30 reachable
+    far = _grasp(0.95, [0.80, 0.0, 0.0])    # base x≈0.80 out of envelope
+    pick = _select_reachable_grasp([far, near], _ReachArm(x_max=0.5), T,
+                                   pregrasp_offset_m=0.08, insertion_depth_m=0.015)
+    assert pick is near
+
+
+def test_reach_rank_falls_back_to_conf_when_none_reachable():
+    """If no candidate is reachable, keep the plain max-confidence pick (no
+    regression vs the old select_best_grasp behaviour)."""
+    from ovs_agent.apps.voice_rebot_arm.grasp_service import _select_reachable_grasp
+    T = np.eye(4, dtype=np.float64)
+    a = _grasp(0.60, [0.90, 0.0, 0.0])
+    b = _grasp(0.95, [0.95, 0.0, 0.0])
+    pick = _select_reachable_grasp([a, b], _ReachArm(x_max=0.5), T,
+                                   pregrasp_offset_m=0.08, insertion_depth_m=0.015)
+    assert pick is b  # max conf
+
+
+def test_reach_rank_noop_without_check_ik():
+    """An arm with no check_ik must yield the confidence pick unchanged."""
+    from ovs_agent.apps.voice_rebot_arm.grasp_service import _select_reachable_grasp
+
+    class _NoIK:
+        pass
+
+    T = np.eye(4, dtype=np.float64)
+    a = _grasp(0.60, [0.30, 0.0, 0.0])
+    b = _grasp(0.95, [0.80, 0.0, 0.0])
+    pick = _select_reachable_grasp([a, b], _NoIK(), T,
+                                   pregrasp_offset_m=0.08, insertion_depth_m=0.015)
+    assert pick is b  # max conf, no reachability filtering
+
+
+def test_reach_rank_among_reachable_breaks_tie_by_conf():
+    """When several candidates are reachable, the highest confidence wins."""
+    from ovs_agent.apps.voice_rebot_arm.grasp_service import _select_reachable_grasp
+    T = np.eye(4, dtype=np.float64)
+    lo = _grasp(0.55, [0.20, 0.0, 0.0])
+    hi = _grasp(0.80, [0.30, 0.0, 0.0])
+    pick = _select_reachable_grasp([lo, hi], _ReachArm(x_max=0.5), T,
+                                   pregrasp_offset_m=0.08, insertion_depth_m=0.015)
+    assert pick is hi

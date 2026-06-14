@@ -171,6 +171,91 @@ def _relax_orientation(arm: Any, pre6d, grasp6d):
     return None
 
 
+def _grasp_is_reachable(arm: Any, pre6d, grasp6d, method: str) -> bool:
+    """Predict whether the executor will be able to reach this grasp, mirroring
+    the exact feasibility logic in the move stage: ``check_ik`` must pass for
+    BOTH the pregrasp and the grasp pose, and for non-side grasps the
+    orientation ladder (:func:`_relax_orientation`) counts as reachable too
+    (the executor falls back to it). Used only to RANK multiple candidates —
+    never to reject a sole candidate (an arm with no ``check_ik`` returns
+    ``False`` for everything, so callers must treat "no reachable candidate"
+    as "keep the confidence pick"). Zero motion, no side effects.
+    """
+    chk = getattr(arm, "check_ik", None)
+    if not callable(chk):
+        return False
+    try:
+        ok_pre, _ = chk(*(float(v) for v in pre6d))
+        ok_grasp, _ = chk(*(float(v) for v in grasp6d))
+    except Exception:
+        logger.debug("reach rank: check_ik raised", exc_info=True)
+        return False
+    if ok_pre and ok_grasp:
+        return True
+    # Side grasps keep their pitch (it IS the face geometry — the executor
+    # never relaxes them), so the raw check is final. Others get the ladder.
+    if method == "side_face":
+        return False
+    return _relax_orientation(arm, pre6d, grasp6d) is not None
+
+
+def _select_reachable_grasp(
+    grasps: list,
+    arm: Any,
+    T_cam2base: np.ndarray,
+    pregrasp_offset_m: float,
+    insertion_depth_m: float,
+):
+    """Reachability-aware pick among MULTIPLE camera-frame grasp candidates.
+
+    The base :func:`select_best_grasp` ranks purely by detector confidence —
+    with two objects of the target class on the table it can pick a
+    high-confidence but kinematically out-of-envelope one (this arm is a
+    side-grasper: far / steep poses fall outside the measured IK band) and
+    then burn the retry budget on it. Here each valid candidate is transformed
+    to base and IK-checked (same logic the executor uses); the pick prefers a
+    REACHABLE candidate, breaking ties by confidence. If none are reachable —
+    or the arm exposes no ``check_ik`` — this returns the plain max-confidence
+    pick, so behaviour is byte-identical to the old path on the single-object
+    case and whenever reachability data is unavailable (zero regression).
+    """
+    from .perception.transforms import transform_grasp_pose_to_base
+
+    valid = [g for g in grasps if getattr(g, "is_valid", False)]
+    if not valid:
+        return None
+    conf_pick = max(valid, key=lambda g: g.conf)
+    if len(valid) < 2 or not callable(getattr(arm, "check_ik", None)):
+        return conf_pick
+
+    scored = []
+    for g in valid:
+        try:
+            grasp6d, pre6d = transform_grasp_pose_to_base(
+                g.position, g.tcp_rotation, T_cam2base,
+                pregrasp_offset_m, insertion_depth_m=insertion_depth_m,
+            )
+            reach = _grasp_is_reachable(
+                arm, pre6d, grasp6d, getattr(g, "method", "legacy")
+            )
+        except Exception:
+            logger.debug("reach rank: candidate transform/IK failed", exc_info=True)
+            reach = False
+        scored.append((g, reach))
+
+    reachable = [g for g, r in scored if r]
+    if not reachable:
+        return conf_pick
+    best = max(reachable, key=lambda g: g.conf)
+    if best is not conf_pick:
+        logger.info(
+            "grasp: reachability-aware pick — chose reachable %s (conf %.2f) "
+            "over higher-conf %s (conf %.2f, out of IK envelope)",
+            best.class_name, best.conf, conf_pick.class_name, conf_pick.conf,
+        )
+    return best
+
+
 def _wait_motion_cancellable(
     arm: Any,
     duration: float,
@@ -404,14 +489,26 @@ def _grasp_attempt(
                 results = segmenter.predict(color_bgr, conf=conf, iou=iou, only_names={target})
                 results = _filter_results_to_target(results, target)
                 nd = max(nd, sum(len(getattr(r, "boxes", []) or []) for r in results))
-                b = select_best_grasp(
-                    estimate_grasps(
-                        results, depth_mm, Kl,
-                        depth_quantile=depth_quantile,
-                        up_hint_cam=up_hint,
-                        ggcnn=ggcnn,
-                    )
+                cands = estimate_grasps(
+                    results, depth_mm, Kl,
+                    depth_quantile=depth_quantile,
+                    up_hint_cam=up_hint,
+                    ggcnn=ggcnn,
                 )
+                # With a single candidate the reachability rank is a no-op and
+                # the conf pick is the answer — skip the extra TCP read so the
+                # validated common path is byte-identical. Only when ≥2 of the
+                # target class are in view do we break ties by reachability.
+                valid_cands = [g for g in cands if getattr(g, "is_valid", False)]
+                if len(valid_cands) >= 2:
+                    with _motion_lock(actuator):
+                        tcp_now = np.asarray(arm.get_tcp_pose(), dtype=np.float64)
+                    T_c2b = tcp_now @ np.asarray(T_hand_eye, dtype=np.float64)
+                    b = _select_reachable_grasp(
+                        cands, arm, T_c2b, pregrasp_offset_m, insertion_depth_m
+                    )
+                else:
+                    b = select_best_grasp(cands)
                 if frame_sink is not None:
                     # Dashboard decision-frame tee — never let visualization
                     # break (or measurably slow) the grasp itself.

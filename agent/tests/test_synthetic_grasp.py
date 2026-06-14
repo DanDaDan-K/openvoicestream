@@ -320,3 +320,52 @@ def test_tall_box_at_distance_8fb88ac():
         "width 0.084<0.085 → accepted as top_face. The line-161 width guard is "
         "the load-bearing fix."
     )
+
+
+def test_reachability_aware_selection_prefers_in_envelope_box():
+    """Sim validation of the reachability-aware multi-candidate selector
+    (grasp_service._select_reachable_grasp), grounded in the MEASURED B601-DM
+    IK envelope (ik_envelope_b601dm.csv) rather than a toy threshold.
+
+    Two same-size boxes are planned through the full production path
+    (render → estimate_grasps → transform): a NEAR box inside the reach band
+    and a FAR box pushed past the envelope's x-edge. The far box is given the
+    higher confidence, so the old max-confidence pick would chase the
+    unreachable one and burn the retry budget. The new selector must pick the
+    near (reachable) box. Confirms the sim-grounded insight that this arm is a
+    side-grasper with a bounded reach envelope, end-to-end.
+    """
+    from ovs_agent.apps.voice_rebot_arm.grasp_service import _select_reachable_grasp
+    from ovs_agent.apps.voice_rebot_arm.tools import synthetic_grasp_harness as H
+
+    T = default_T_cam2base()
+    K = default_K()
+    env = H._envelope()
+
+    class _EnvArm:
+        def __init__(self):
+            self.checks = 0
+
+        def check_ik(self, x, y, z, roll=0.0, pitch=0.0, yaw=0.0):
+            self.checks += 1
+            ok, _ = env.feasible(x, y, z, pitch, yaw)
+            return ok, None
+
+    box = (0.06, 0.06, 0.08)
+    g_near = plan_grasp(box, (0.36, 0.05, 0.05, 0.0), T, K)
+    g_far = plan_grasp(box, (0.62, -0.05, 0.05, 0.0), T, K)
+    assert g_near is not None and g_far is not None
+
+    # Sanity: the measured envelope must actually separate the two poses,
+    # otherwise the test proves nothing.
+    rn, _ = reachable(g_near, T)
+    rf, _ = reachable(g_far, T)
+    assert rn and not rf, f"scene did not separate (near={rn} far={rf})"
+
+    # Far box looks more confident → old behaviour (max conf) would pick it.
+    g_far.conf, g_near.conf = 0.95, 0.60
+    pick = _select_reachable_grasp(
+        [g_far, g_near], _EnvArm(), T,
+        pregrasp_offset_m=0.08, insertion_depth_m=0.025,
+    )
+    assert pick is g_near
