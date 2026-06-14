@@ -3734,7 +3734,16 @@ async def v2v_stream(ws: WebSocket):
                             (vad is None or _asr_backend_prefers_backend_endpoint_vad())
                             and not state["asr_active"]
                             and state["endpoint_pending"] is None
-                            and not state["asr_started_once"]
+                            # `asr_started_once` is a one-shot latch that is never
+                            # reset, so in no-VAD mode it would open the ASR stream
+                            # only for the FIRST utterance — the 2nd+ utterance on a
+                            # persistent multi_utterance session would find
+                            # asr_active=False and never re-open, so accept_audio()
+                            # below is skipped and the audio is silently dropped
+                            # (0 partial/final). In multi_utterance the session is
+                            # explicitly kept alive for more turns, so re-open every
+                            # utterance. (`not asr_active` above prevents double-open.)
+                            and (multi_utterance or not state["asr_started_once"])
                         ):
                             try:
                                 async with coord.acquire("asr"):
