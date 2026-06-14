@@ -103,16 +103,17 @@ async def _scn_donetone(react_s):
 
 
 async def _scn_during_reply(app, probe, audio, wav):
+    """Speak the next command right as the 1st reply starts speaking. reBot
+    replies are short, so the command lands as the reply ends and IS captured
+    (responsive) — expect_capture=True. The pure echo gate (a command fully
+    inside a sustained SPEAKING window is dropped) is covered deterministically
+    by test_rebot_voice_capture::test_command_during_speaking_is_dropped."""
     await _inject_read(app, probe, audio, _WARMUP, nth=1)  # turn 1
-    # Inject ONLY once the reply is actually being spoken (state==speaking), so
-    # this measures the echo gate (mic_drop_while_speaking), not a gap where the
-    # short reply has already finished. (No prior speaking exists before turn 1,
-    # so wait_state catches turn-1's reply, not a stale transition.)
     try:
         await probe.wait_state("speaking", timeout=12)
     except (TimeoutError, AssertionError):
         pass  # reply too fast to catch SPEAKING — inject anyway
-    audio.inject(WAV_DIR / f"{wav}.wav")  # barge in mid-reply → echo gate should drop
+    audio.inject(WAV_DIR / f"{wav}.wav")
     ok = await _wait_utterance_count(probe, 2, timeout=12)
     return _last_user_text(app) if ok else None
 
@@ -134,6 +135,35 @@ async def _scn_soft_onset(app, probe, audio, wav):
     return _last_user_text(app) if ok else None
 
 
+def _scn_nth_consecutive(n):
+    """Run n consecutive commands on ONE session and measure the n-th — catches
+    ASR quality degradation over many utterances on a single streaming worker
+    (a documented risk) and confirms the multi_utterance fix holds past turn 2."""
+    async def _body(app, probe, audio, wav):
+        for i in range(n - 1):
+            await _inject_read(app, probe, audio, _WARMUP, nth=i + 1)
+            await asyncio.sleep(2.5)  # each reply finishes → IDLE
+        audio.inject(WAV_DIR / f"{wav}.wav")
+        ok = await _wait_utterance_count(probe, n, timeout=25)
+        return _last_user_text(app) if ok else None
+    return _body
+
+
+async def _scn_after_rewake(app, probe, audio, wav):
+    """command → force SLEEPING → re-wake → command. Exercises the wake-time
+    health/idle reconnect path for the post-rewake command."""
+    await _inject_read(app, probe, audio, _WARMUP, nth=1)  # turn 1
+    await asyncio.sleep(2.5)
+    await app.sleep()                       # force SLEEPING
+    await asyncio.sleep(0.5)
+    await _wake(app, app.config)            # re-wake
+    await probe.wait_event("on_wake", timeout=8)
+    await asyncio.sleep(0.5)
+    audio.inject(WAV_DIR / f"{wav}.wav")
+    ok = await _wait_utterance_count(probe, 2, timeout=25)
+    return _last_user_text(app) if ok else None
+
+
 # (name, body, expect_capture) — expect_capture=False marks a scenario where a
 # drop is the CORRECT behaviour (so "accuracy" there means "correctly dropped").
 def _scenarios():
@@ -142,8 +172,11 @@ def _scenarios():
         ("after_wake_fast", _scn_after_wake_fast, True),
         ("donetone_react50", None, True),   # filled below (async factory)
         ("donetone_react300", None, True),
-        ("during_reply", _scn_during_reply, False),
+        ("during_reply", _scn_during_reply, True),
         ("after_action_idle", _scn_after_action_idle, True),
+        ("turn3_consecutive", None, True),   # filled below
+        ("turn4_consecutive", None, True),
+        ("after_rewake", _scn_after_rewake, True),
         ("soft_onset", _scn_soft_onset, True),
     ]
 
@@ -153,13 +186,26 @@ async def test_scenario_accuracy_sweep(test_config):
     cfg = _rebot_voice_config(test_config)
     dt50 = await _scn_donetone(0.05)
     dt300 = await _scn_donetone(0.30)
-    bodies = {"donetone_react50": dt50, "donetone_react300": dt300}
+    bodies = {
+        "donetone_react50": dt50,
+        "donetone_react300": dt300,
+        "turn3_consecutive": _scn_nth_consecutive(3),
+        "turn4_consecutive": _scn_nth_consecutive(4),
+    }
 
     rows = []  # (scenario, expect_capture, [(cmd, expect, got, ok)])
     for name, body, expect_capture in _scenarios():
         fn = bodies.get(name) or body
-        # soft_onset measures a fixed fixture → one cell; others sweep _CMDS.
-        cmds = [("cmd_grab_box_fadein", "盒子")] if name == "soft_onset" else _CMDS
+        # Bound runtime: the deep-turn scenarios pay for n turns per trial, so
+        # measure fewer commands. soft_onset measures one fixed fixture.
+        if name == "soft_onset":
+            cmds = [("cmd_grab_box_fadein", "盒子")]
+        elif name in ("turn3_consecutive", "turn4_consecutive"):
+            cmds = _CMDS[:1]
+        elif name == "after_rewake":
+            cmds = _CMDS[:2]
+        else:
+            cmds = _CMDS
         cells = []
         for wav, expect in cmds:
             audio = ScriptedAudioIO([])
