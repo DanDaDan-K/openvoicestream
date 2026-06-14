@@ -304,6 +304,23 @@ metadata:
     # fall back to the onnxruntime CPU path.
     yolo_model_path: "${REBOT_GRASP_MODEL:-/opt/rebot-models/yoloe-26s-seg-box.engine}"
     yolo_classes: ["box", "cardboard box", "carton", "package"]
+    # ── vocab-decoupled ("embin") mode — OPT-IN, off by default ──────────────
+    # The default above is the baked single-input box engine: its vocabulary is
+    # frozen at export time and nothing below applies. To run the
+    # embeddings-as-input detector instead (class vocabulary comes from
+    # yolo_classes + computed text PE, no baked head), set BOTH:
+    #   1. yolo_model_path → the embin model, e.g. via env REBOT_GRASP_MODEL:
+    #        REBOT_GRASP_MODEL=/opt/rebot-models/yoloe-26s-seg-embin.onnx
+    #      (or .engine once built on-device with the class_embeddings input)
+    #   2. text_encoder_path → the text PE encoder onnx (folds the final PE):
+    #        text_encoder_path: "${REBOT_TEXT_ENCODER:-/opt/rebot-models/text_encoder_pe.onnx}"
+    # Then yolo_classes is the LIVE vocabulary — edit it freely, no re-export.
+    # vocab_mode: "embeddings"   # alt switch; presence of text_encoder_path is enough
+    text_encoder_path: "${REBOT_TEXT_ENCODER:-}"
+    # Padded slot width of the embin model's class_embeddings input (16 in the
+    # published yoloe-26s-seg-embin export). Slots beyond len(yolo_classes) are
+    # inert zero pad rows; a detection landing on one is dropped by the guard.
+    embin_pad_slots: ${REBOT_EMBIN_PAD_SLOTS:-16}
     # CPU EP: production voice stack leaves <300MB GPU free → TRT/CUDA OOMs.
     onnx_providers: ["CPUExecutionProvider"]
     # Detection confidence floor. A tall/vertical cardboard box detects at only

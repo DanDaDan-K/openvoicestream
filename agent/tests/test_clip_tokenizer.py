@@ -46,6 +46,14 @@ GOLDEN_PREFIX = {
     "apple": [SOT, 3055, EOT],                          # generic word
     "table": [SOT, 2175, EOT],                          # generic word
     "don't drop it": [SOT, 847, 713, 3387, 585, EOT],   # contraction
+    # --- embin-vocab edge cases (captured from probe venv clip.clip.tokenize,
+    #     2026-06-15): hyphen, trailing/leading/multi space, apostrophe, mixed
+    #     alnum+hyphen identifier (B601-DM) ---
+    "cardboard-box": [SOT, 19845, 268, 2063, EOT],
+    "box   ": [SOT, 2063, EOT],                          # trailing spaces stripped
+    "  yellow   banana  ": [SOT, 4481, 8922, EOT],       # leading/multi/trailing
+    "worker's glove": [SOT, 8098, 568, 16078, EOT],      # apostrophe contraction
+    "B601-DM box": [SOT, 321, 277, 271, 272, 268, 4667, 2063, EOT],
 }
 
 GRASP_CLASSES = ["box", "cardboard box", "carton", "package", "yellow banana"]

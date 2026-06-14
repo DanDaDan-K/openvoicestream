@@ -927,6 +927,33 @@ class GraspPlugin(Plugin):
             kwargs: dict[str, Any] = {}
             if providers:
                 kwargs["providers"] = tuple(providers)
+            # Vocab-decoupled ("embin") mode: opt-in via config. When a
+            # text_encoder_path is set (or vocab_mode == "embeddings"), the
+            # class vocabulary is NOT baked into the detector — instead the
+            # class names from yolo_classes are encoded to text PE rows and fed
+            # as class_embeddings on every predict. Nothing here changes for the
+            # default baked box engine (text_encoder_path unset → embin False).
+            text_encoder_path = self.cfg.get("text_encoder_path")
+            vocab_mode = str(self.cfg.get("vocab_mode", "") or "").lower()
+            if text_encoder_path or vocab_mode == "embeddings":
+                if not text_encoder_path:
+                    raise RuntimeError(
+                        "grasp vocab_mode=embeddings requires text_encoder_path"
+                    )
+                from .perception.text_pe import TextPromptEncoder
+
+                pad_slots = int(self.cfg.get("embin_pad_slots", 16))
+                encoder = TextPromptEncoder(text_encoder_path, pad_slots=pad_slots)
+                class_embeddings = encoder.encode(names)
+                kwargs["class_embeddings"] = class_embeddings
+                kwargs["active_n"] = encoder.active_n
+                logger.info(
+                    "GraspPlugin: embin mode — %d class embeddings built "
+                    "from %s (pad_slots=%d)",
+                    encoder.active_n,
+                    text_encoder_path,
+                    pad_slots,
+                )
             self._segmenter = YoloOnnxSegmenter(model_path, names, **kwargs)
         if self._camera is None:
             from .perception.camera import make_camera
