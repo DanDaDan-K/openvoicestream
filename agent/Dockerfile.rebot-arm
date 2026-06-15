@@ -131,8 +131,11 @@ RUN pip install --no-cache-dir /opt/slv/agent
 # scripts/build_voxedge_wheel.sh) and force-reinstall so it WINS over the mirror
 # copy. This is what f3379e9 ("commit the wheel so deploy needs no pre-build
 # step") intended — the Dockerfile just never wired the wheel in.
-COPY deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl /tmp/voxedge.whl
-RUN pip install --no-cache-dir --force-reinstall --no-deps /tmp/voxedge.whl
+# Keep the PEP 427 filename (pip parses version/ABI/platform tags from it and
+# rejects a renamed wheel) — COPY into a dir, install by full name.
+COPY deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl /tmp/wheels/
+RUN pip install --no-cache-dir --force-reinstall --no-deps \
+        /tmp/wheels/voxedge-0.0.1a0-py3-none-any.whl
 ENV PYTHONPATH=/opt/slv/agent
 
 RUN apt-get update && apt-get install -y --no-install-recommends pulseaudio-utils \
