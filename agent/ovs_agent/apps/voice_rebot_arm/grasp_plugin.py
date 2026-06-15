@@ -117,6 +117,29 @@ class GraspPlugin(Plugin):
             )
             self._idle_thread.start()
 
+    def _unknown_object_mode(self) -> str:
+        """How to handle a spoken object that resolves to NO catalog label:
+          'first'  — fall back to catalog[0] (DEFAULT; today's behaviour).
+          'reject' — refuse, do not grasp anything (vocab-decoupled mode pairs
+                     with this so naming an object outside yolo_classes is
+                     declined rather than mis-grasped)."""
+        v = str(self.cfg.get("unknown_object", "first") or "first").strip().lower()
+        return "reject" if v == "reject" else "first"
+
+    @staticmethod
+    def _resolve_catalog_label(target: str, catalog: list) -> Optional[str]:
+        """Resolve a spoken object to an EXACT catalog label (the detector
+        filters by exact class name). Exact (case-insensitive) → substring
+        either way → None. No catalog[0] fallback here — the caller decides
+        what to do with an unmatched object based on the unknown_object mode."""
+        if not target or not catalog:
+            return None
+        tl = target.strip().lower()
+        return (
+            next((c for c in catalog if c.lower() == tl), None)
+            or next((c for c in catalog if c.lower() in tl or tl in c.lower()), None)
+        )
+
     def _ggcnn_enabled(self) -> bool:
         v = self.cfg.get("ggcnn_refiner", False)
         return v if isinstance(v, bool) else str(v).strip().lower() in {"1", "true", "yes"}
@@ -334,14 +357,30 @@ class GraspPlugin(Plugin):
         # user's intent ("抓盒子"/"把那个箱子拿起来") to the closest catalog label.
         catalog = list(self.cfg.get("yolo_classes", []))
         catalog_str = ", ".join(repr(c) for c in catalog) or "'box'"
-        grasp_desc = (
-            "Pick up / grasp an object using the camera-guided arm when the "
-            "user asks to grab/pick something up ('grab','pick up','grasp'). "
-            f"object_name MUST be exactly one of these catalog labels: [{catalog_str}]. "
-            "Map the user's spoken object to the closest catalog label and pass "
-            "that label verbatim (e.g. user says 'grab the box' -> "
-            "object_name='box'). The detector only knows the catalog labels above."
-        )
+        reject_mode = self._unknown_object_mode() == "reject"
+        # The description is mode-aware: in 'reject' mode we tell the LLM to pass
+        # the user's named object as-is and that ONLY the catalog labels are
+        # graspable (no closest-mapping — an unknown object is declined, not
+        # forced onto a known label). In 'first' mode keep the closest-mapping
+        # instruction so the unknown still resolves to catalog[0].
+        if reject_mode:
+            grasp_desc = (
+                "Pick up / grasp an object using the camera-guided arm when the "
+                "user asks to grab/pick something up ('grab','pick up','grasp'). "
+                "Pass the user's named object in object_name. ONLY these catalog "
+                f"labels are graspable: [{catalog_str}]; any other object is "
+                "declined (not mis-grasped). The detector only knows the catalog "
+                "labels above."
+            )
+        else:
+            grasp_desc = (
+                "Pick up / grasp an object using the camera-guided arm when the "
+                "user asks to grab/pick something up ('grab','pick up','grasp'). "
+                f"object_name MUST be exactly one of these catalog labels: [{catalog_str}]. "
+                "Map the user's spoken object to the closest catalog label and pass "
+                "that label verbatim (e.g. user says 'grab the box' -> "
+                "object_name='box'). The detector only knows the catalog labels above."
+            )
 
         @registry.tool(
             name="grasp_object",
@@ -357,16 +396,27 @@ class GraspPlugin(Plugin):
         # to FIND an object that may be outside the current view, then point at
         # it WITHOUT grasping. Separate from grasp_object so a demo can show
         # "find" and "grasp" as distinct steps.
-        search_desc = (
-            "Search for / locate an object by sweeping the camera around when "
-            "the user asks to FIND or LOOK FOR something but not (yet) pick it "
-            "up ('find','look for','search for'). The arm scans several "
-            "viewpoints, stops when it sees the object and points at it "
-            "WITHOUT grasping. "
-            f"object_name MUST be exactly one of these catalog labels: [{catalog_str}]. "
-            "Map the user's spoken object to the closest catalog label "
-            "(e.g. 'find the box' -> object_name='box')."
-        )
+        if reject_mode:
+            search_desc = (
+                "Search for / locate an object by sweeping the camera around when "
+                "the user asks to FIND or LOOK FOR something but not (yet) pick it "
+                "up ('find','look for','search for'). The arm scans several "
+                "viewpoints, stops when it sees the object and points at it "
+                "WITHOUT grasping. Pass the user's named object in object_name. "
+                f"ONLY these catalog labels are searchable: [{catalog_str}]; any "
+                "other object is declined."
+            )
+        else:
+            search_desc = (
+                "Search for / locate an object by sweeping the camera around when "
+                "the user asks to FIND or LOOK FOR something but not (yet) pick it "
+                "up ('find','look for','search for'). The arm scans several "
+                "viewpoints, stops when it sees the object and points at it "
+                "WITHOUT grasping. "
+                f"object_name MUST be exactly one of these catalog labels: [{catalog_str}]. "
+                "Map the user's spoken object to the closest catalog label "
+                "(e.g. 'find the box' -> object_name='box')."
+            )
 
         @registry.tool(
             name="search_object",
@@ -421,19 +471,26 @@ class GraspPlugin(Plugin):
         # configured catalog (English). If the LLM passed the user's word
         # instead (e.g. '盒子'), remap to a catalog label so detections aren't
         # silently filtered out. Exact or substring match against the catalog is
-        # honoured; otherwise fall back to the first catalog class (the model
-        # only knows box-like classes here, so any is the box).
+        # honoured; an UNMATCHED object is handled per the unknown_object mode:
+        #   'first'  → fall back to the first catalog class (today's behaviour).
+        #   'reject' → refuse without starting any motion.
         catalog = list(self.cfg.get("yolo_classes", []))
         if catalog:
-            tl = target.lower()
-            # Resolve to an EXACT catalog label (the detector filters by exact
-            # class name). Prefer exact match, then substring either way, else
-            # the first catalog class. Guarantees the filter can match.
-            resolved = (
-                next((c for c in catalog if c.lower() == tl), None)
-                or next((c for c in catalog if c.lower() in tl or tl in c.lower()), None)
-                or catalog[0]
-            )
+            resolved = self._resolve_catalog_label(target, catalog)
+            if resolved is None:
+                if self._unknown_object_mode() == "reject":
+                    logger.info(
+                        "GraspPlugin: object_name %r not in catalog %s → reject "
+                        "(unknown_object=reject)", target, catalog
+                    )
+                    return {
+                        "started": False,
+                        "error": f"object {target!r} is not in the graspable catalog",
+                        "unknown_object": target,
+                        "catalog": list(catalog),
+                    }
+                # mode 'first': fall back to the first catalog class.
+                resolved = catalog[0]
             if resolved != target:
                 logger.info(
                     "GraspPlugin: object_name %r → catalog label %r", target, resolved
@@ -513,12 +570,21 @@ class GraspPlugin(Plugin):
         target = (object_name or "").strip()
         catalog = list(self.cfg.get("yolo_classes", []))
         if catalog and target:
-            tl = target.lower()
-            target = (
-                next((c for c in catalog if c.lower() == tl), None)
-                or next((c for c in catalog if c.lower() in tl or tl in c.lower()), None)
-                or catalog[0]
-            )
+            resolved = self._resolve_catalog_label(target, catalog)
+            if resolved is None:
+                if self._unknown_object_mode() == "reject":
+                    logger.info(
+                        "GraspPlugin: search object_name %r not in catalog %s → "
+                        "reject (unknown_object=reject)", target, catalog
+                    )
+                    return {
+                        "started": False,
+                        "error": f"object {target!r} is not in the searchable catalog",
+                        "unknown_object": target,
+                        "catalog": list(catalog),
+                    }
+                resolved = catalog[0]
+            target = resolved
         elif not target and catalog:
             target = catalog[0]
         if not target:

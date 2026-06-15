@@ -304,6 +304,21 @@ metadata:
     # fall back to the onnxruntime CPU path.
     yolo_model_path: "${REBOT_GRASP_MODEL:-/opt/rebot-models/yoloe-26s-seg-box.engine}"
     yolo_classes: ["box", "cardboard box", "carton", "package"]
+    # ── unknown-object policy ────────────────────────────────────────────────
+    # What to do when the user names an object that resolves to NO catalog label
+    # above (exact/substring match fails):
+    #   first  — DEFAULT. Fall back to the first catalog class (today's
+    #            behaviour: the baked box engine only knows box-like classes, so
+    #            "any is the box"). Keeps the box demo byte-identical.
+    #   reject — Refuse: do NOT grasp anything; return a "not in the graspable
+    #            catalog" error and start no motion. Pairs with the richer
+    #            vocab-decoupled ("embin") mode below — when yolo_classes is the
+    #            LIVE vocabulary, an object outside it should be DECLINED rather
+    #            than silently mis-grasped as the first class. Tradeoff: 'first'
+    #            never refuses (good for a single-class box demo where every
+    #            request means "the box"); 'reject' is correct once the catalog
+    #            is a real multi-class vocabulary the user can name outside of.
+    unknown_object: ${REBOT_UNKNOWN_OBJECT:-first}
     # ── vocab-decoupled ("embin") mode — OPT-IN, off by default ──────────────
     # The default above is the baked single-input box engine: its vocabulary is
     # frozen at export time and nothing below applies. To run the
