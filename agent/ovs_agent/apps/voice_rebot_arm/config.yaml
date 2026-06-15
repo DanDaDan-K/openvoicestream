@@ -451,19 +451,33 @@ metadata:
     # feed-forward torque compensates. SDK hard ceiling 1.5. Doubles as the
     # CEILING for the adaptive ramp on unlisted classes (see below).
     grasp_force: ${REBOT_GRASP_FORCE:-0.8}
-    # Per-class grip force (N·m). A class listed here uses its FIXED value —
-    # deterministic, no ramp, no extra latency. Any class NOT listed uses the
-    # ADAPTIVE ramp: start at 0.2 N·m, watch the encoder ~0.3s, step +0.1
-    # while the gap is still creeping shut (soft object compressing), stop at
-    # the first force that holds — capped at grasp_force above. Soft fruit
-    # settles low instead of being crushed by the box-tuned clamp. When
-    # adding fruit classes, either list them here (e.g. banana: 0.3) or leave
-    # them unlisted to let the ramp find the force.
+    # Adaptive-by-default: when true (the default), EVERY grasp uses the
+    # adaptive ramp — start gentle, watch the encoder ~0.3s, step up while the
+    # jaw is still creeping shut (object compressing), stop at the FIRST force
+    # that holds, capped at a per-class CEILING. Soft fruit settles low; a
+    # rigid box keeps creeping until it reaches its 0.8 ceiling → firm grip.
+    # Set REBOT_ADAPTIVE_FORCE=false to fall back to the old policy: a class
+    # listed in grasp_force_by_class uses that value as a FIXED force (no ramp),
+    # any unlisted class ramps to the global grasp_force ceiling.
+    adaptive_force_default: ${REBOT_ADAPTIVE_FORCE:-true}
+    # Per-class force (N·m). Interpretation depends on adaptive_force_default:
+    #   • adaptive_force_default=true  → the value is the CEILING the ramp may
+    #     reach: rigid objects (box) climb to it, soft objects settle BELOW it
+    #     (can't be crushed). Tune the ceiling DOWN for fragile classes.
+    #   • adaptive_force_default=false → the value is the old FIXED force for a
+    #     listed class (deterministic, no ramp); unlisted classes ramp to the
+    #     global grasp_force ceiling.
+    # Box-family kept at 0.8 (firm). Soft/fragile classes capped low so the
+    # ramp settles before crushing. Unlisted classes use the global ceiling.
     grasp_force_by_class:
       box: ${REBOT_GRASP_FORCE:-0.8}
       "cardboard box": ${REBOT_GRASP_FORCE:-0.8}
       carton: ${REBOT_GRASP_FORCE:-0.8}
       package: ${REBOT_GRASP_FORCE:-0.8}
+      "yellow banana": ${REBOT_GRASP_FORCE_BANANA:-0.35}
+      orange: ${REBOT_GRASP_FORCE_ORANGE:-0.35}
+      cup: ${REBOT_GRASP_FORCE_CUP:-0.30}
+      "water bottle": ${REBOT_GRASP_FORCE_BOTTLE:-0.5}
     # How far the TCP advances along the approach axis past the detected grasp
     # point before closing (m). Pipeline default was 0.015 — real-machine feel
     # "抓得浅": the jaw barely wrapped the box rim. 0.025 wraps ~1cm deeper for

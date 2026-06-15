@@ -344,10 +344,12 @@ def _capture_run_kwargs(plugin, actuator, target="box"):
 
 
 def test_configured_class_uses_fixed_force_no_adaptive() -> None:
+    # Legacy policy (adaptive_force_default=False): a listed class → fixed force.
     app = _FakeApp()
     plugin = GraspPlugin(app, {
         "yolo_classes": ["box", "apple"],
         "grasp_force": 0.8,
+        "adaptive_force_default": False,
         "grasp_force_by_class": {"box": 0.65},
     })
     actuator = _FakeActuator(torque=True)
@@ -361,10 +363,13 @@ def test_configured_class_uses_fixed_force_no_adaptive() -> None:
 
 
 def test_unconfigured_class_gets_adaptive_with_global_cap() -> None:
+    # Legacy policy (adaptive_force_default=False): an unlisted class still
+    # ramps to the global ceiling.
     app = _FakeApp()
     plugin = GraspPlugin(app, {
         "yolo_classes": ["box", "apple"],
         "grasp_force": 0.8,
+        "adaptive_force_default": False,
         "grasp_force_by_class": {"box": 0.65},
     })
     actuator = _FakeActuator(torque=True)

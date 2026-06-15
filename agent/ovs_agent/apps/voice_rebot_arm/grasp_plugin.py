@@ -572,14 +572,27 @@ class GraspPlugin(Plugin):
             from .grasp_service import run_grasp_once
 
             params = self._grasp_params()
-            # Force policy: a class listed in grasp_force_by_class uses its
-            # FIXED configured force (deterministic, zero extra latency);
-            # any unlisted class uses the adaptive ramp capped at the global
-            # grasp_force — soft/unknown objects settle at the lowest force
-            # that holds instead of getting the box-tuned clamp.
-            fixed = self._force_for_class(target)
-            if fixed is not None:
-                params["grasp_force"] = fixed
+            # Force policy. Two modes, switched by adaptive_force_default:
+            #
+            #   adaptive_force_default=TRUE (the default): EVERY grasp uses the
+            #   adaptive ramp. grasp_force becomes the per-class CEILING — a
+            #   listed class caps at its configured value (soft fruit low, box
+            #   high), an unlisted class caps at the global grasp_force. Rigid
+            #   objects climb to the ceiling (firm grip); soft objects settle
+            #   below it (can't be crushed). Zero hand-tuning per object.
+            #
+            #   adaptive_force_default=FALSE: the legacy policy — a class listed
+            #   in grasp_force_by_class uses its FIXED configured force (no ramp,
+            #   deterministic, zero added latency); any unlisted class ramps to
+            #   the global grasp_force ceiling. Byte-identical to the validated
+            #   box demo.
+            ceiling, is_listed = self._force_ceiling_for_class(target)
+            if self._adaptive_force_default():
+                params["adaptive_force"] = True
+                if ceiling is not None:
+                    params["grasp_force"] = ceiling
+            elif is_listed and ceiling is not None:
+                params["grasp_force"] = ceiling
                 params["adaptive_force"] = False
             else:
                 params["adaptive_force"] = True
@@ -1131,25 +1144,50 @@ class GraspPlugin(Plugin):
             logger.exception("GraspPlugin: failed to load hand-eye from %s", path)
             return None
 
-    def _force_for_class(self, target: str) -> Optional[float]:
-        """Fixed per-class grasp force from grasp_force_by_class, or None
-        when the class is not configured (→ adaptive ramp)."""
+    def _adaptive_force_default(self) -> bool:
+        """When true (default), every grasp uses the adaptive ramp with the
+        per-class value treated as the CEILING. False → legacy fixed-force
+        policy for listed classes. Env-overridable via REBOT_ADAPTIVE_FORCE
+        (rendered into adaptive_force_default at config load)."""
+        v = self.cfg.get("adaptive_force_default", True)
+        if isinstance(v, bool):
+            return v
+        return str(v).strip().lower() not in {"0", "false", "no", "off"}
+
+    def _force_ceiling_for_class(self, target: str) -> tuple[Optional[float], bool]:
+        """Look up the per-class force value from grasp_force_by_class.
+
+        Returns ``(value, is_listed)``:
+          • value      — the configured number (a CEILING under adaptive mode,
+                          a FIXED force under legacy mode), or None when the
+                          class is not listed / not numeric.
+          • is_listed  — True iff the class name appears in grasp_force_by_class
+                          (regardless of whether the value parsed as a number).
+        """
         fb = self.cfg.get("grasp_force_by_class")
         if not isinstance(fb, dict) or not target:
-            return None
+            return None, False
         tl = target.strip().lower()
         for k, v in fb.items():
             if str(k).strip().lower() == tl:
                 try:
                     s = str(v).strip()
-                    return float(s) if s else None
+                    return (float(s) if s else None), True
                 except (TypeError, ValueError):
                     logger.warning(
                         "GraspPlugin: ignoring non-numeric grasp_force_by_class[%r]=%r",
                         k, v,
                     )
-                    return None
-        return None
+                    return None, True
+        return None, False
+
+    def _force_for_class(self, target: str) -> Optional[float]:
+        """Fixed per-class grasp force from grasp_force_by_class, or None
+        when the class is not configured (→ adaptive ramp). Retained for
+        backward compatibility; see _force_ceiling_for_class for the
+        (value, is_listed) form used by the dispatch policy."""
+        value, _ = self._force_ceiling_for_class(target)
+        return value
 
     def _grasp_params(self) -> dict:
         # Numeric grasp params often arrive as "${VAR:-default}" → an env-
