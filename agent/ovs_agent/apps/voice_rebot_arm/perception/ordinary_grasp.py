@@ -126,6 +126,48 @@ def estimate_grasp(
 
     mask = _depth_mask(result, index, depth_mm.shape, rect_points)
 
+    # ── SHAPE ARBITER (shape-general 3D descriptor) ────────────────────
+    # One backprojected, depth-band-filtered cloud → PCA descriptor that decides
+    # the grasp strategy for ALL shapes (box / banana / orange / bottle), not the
+    # brittle 2D min-area-rect short axis. ``desc`` is None when the cloud is too
+    # sparse (<200 pts) → the legacy 2D silhouette path below is the fallback.
+    #
+    # PLANAR / RECTANGULAR objects (planarity<=0.04 AND a top face that aligns
+    # with up >=0.85) are LEFT to the existing top-face / side-face block below,
+    # byte-identical to before. The descriptor route fires ONLY for the
+    # non-planar families (elongated / round / cylinder / near-square), so the
+    # box path is unchanged.
+    desc = None
+    if up_hint_cam is not None:
+        desc = _shape_descriptor(
+            mask, depth_mm, K, np.asarray(up_hint_cam, dtype=np.float64)
+        )
+    _is_rectangular = (
+        desc is not None
+        and desc.planarity <= 0.04
+        and desc.top_align >= 0.85
+    )
+    # A TALL upright box reads as "elongated" (its major axis is the vertical
+    # extent) but it is NOT a lying banana/bottle — the existing top/side path
+    # owns it (IK-aware camera-ray approach, 8fb88ac over-wide guard). Defer to
+    # that path whenever the major axis aligns with gravity-up; the descriptor
+    # routes (banana/bottle lying on the table, orange) all have a major axis
+    # roughly PERPENDICULAR to up.
+    # Only ELONGATED objects have a meaningful major axis; for a round/near-
+    # square blob the major axis is arbitrary, so the vertical-major deferral
+    # must not apply (it would wrongly bounce an orange to the legacy path).
+    _major_is_vertical = False
+    if desc is not None and up_hint_cam is not None and desc.elongation >= 1.8:
+        up = np.asarray(up_hint_cam, dtype=np.float64)
+        up = up / max(float(np.linalg.norm(up)), 1e-9)
+        _major_is_vertical = abs(float(np.dot(desc.axes[:, 0], up))) >= 0.70
+    if desc is not None and not _is_rectangular and not _major_is_vertical:
+        g = _descriptor_grasp(
+            desc, class_name, conf, bbox_xyxy, rect_points, K
+        )
+        if g is not None:
+            return g
+
     # ── TOP-FACE plane grasp (preferred when an up-hint is available) ──
     # The 2D-silhouette family (min-area-rect below) merges the box's top and
     # side faces under oblique views, so the "short axis" can measure the
@@ -275,7 +317,7 @@ def estimate_grasp(
         if refined is not None:
             center, short_edge_points, grasp_span_px = refined
 
-    if _gg_primary is not None and _gg_primary.quality > 0.1:
+    if _gg_primary is not None and _gg_primary.quality >= 0.25:
         # Override the silhouette's center/axis with the network's best
         # in-mask grasp; the geometric construction below stays identical.
         center = np.array(_gg_primary.center_px, dtype=np.float32)
@@ -547,6 +589,383 @@ def _project(p_cam: np.ndarray, K: np.ndarray) -> tuple[float, float]:
     cx, cy = float(K[0, 2]), float(K[1, 2])
     z = max(float(p_cam[2]), 1e-6)
     return float(p_cam[0]) * fx / z + cx, float(p_cam[1]) * fy / z + cy
+
+
+@dataclass
+class ShapeDescriptor:
+    """Shape-general 3D descriptor of the masked object, derived ONCE from a
+    backprojected, depth-band-filtered point cloud (same intrinsics / depth-band
+    style as :func:`_top_face_grasp`). All grasp-axis routing keys off this so
+    the strategy is robust across boxes, elongated (banana), round (orange) and
+    cylinder (bottle) — not the brittle 2D min-area-rect short axis.
+
+    Fields (PCA eigenvalues λ1 ≥ λ2 ≥ λ3 of the cloud covariance):
+      * ``elongation = λ1/λ2`` — how rod-like (>= 2.2 → elongated).
+      * ``planarity  = λ3/(λ1+λ2+λ3)`` — how flat (<= 0.04 → planar/box-top).
+      * ``roundness  = λ2/λ1`` — how isotropic in the major plane (round when
+        ``elongation`` is small AND ``planarity`` is large).
+      * ``axes`` — the three eigenvectors (columns major→minor), camera frame.
+      * ``centroid`` — cloud centroid (camera frame, metres).
+      * ``extent_major/mid/minor`` — 5–95 % metric extents along each axis.
+      * ``top_align`` — |major-plane-normal · up_hint| (1 = face-on top plane).
+      * ``spine_bend`` — straightness of the object's spine: the peak-to-peak
+        lateral wander of per-axial-slice centroids (in the mid direction),
+        normalised by the major extent. ~0 for a straight rod/cylinder
+        (bottle), large for a curved body (banana). A single oblique depth view
+        sees only a planar shell, so a cross-section-radius CV cannot separate
+        cylinder from box/banana — the SPINE CURVATURE is the reliable
+        discriminator, so the cylinder route keys off ``spine_bend`` being small.
+      * ``n_points`` — cloud size (the legacy 2D fallback fires when < 200).
+    """
+
+    elongation: float
+    planarity: float
+    roundness: float
+    axes: np.ndarray
+    centroid: np.ndarray
+    extent_major: float
+    extent_mid: float
+    extent_minor: float
+    top_align: float
+    spine_bend: float
+    n_points: int
+    # ── table-floor hygiene (z below table) ──
+    #  ``up_cam`` — gravity-up expressed in the camera frame (normalised), or
+    #    None when no up-hint was supplied (legacy path, no floor clamp).
+    #  ``table_proj`` — the cloud's MINIMUM projection onto ``up_cam`` (the
+    #    object's footprint on the table). Because base_z = dot(pos, up_cam) +
+    #    const (up_cam = R_cam2base.T @ +Z), any grasp point whose up-projection
+    #    drops below this sits BELOW the table surface. The descriptor routes
+    #    push the grasp point INTO the object (``recenter_depth_m``) which, for a
+    #    flat object lying on the table, can shove it under the plane — so
+    #    :func:`_pose_from_axes` floors the up-projection at ``table_proj`` (the
+    #    same z hygiene the box top/side paths enforce).
+    up_cam: Optional[np.ndarray] = None
+    table_proj: float = 0.0
+
+
+def _mask_cloud(
+    mask: np.ndarray,
+    depth_mm: np.ndarray,
+    K: np.ndarray,
+    band_m: float = 0.12,
+    min_points: int = 200,
+    max_points: int = 3000,
+    erode_k: int = 7,
+    seed: int = 0,
+) -> Optional[np.ndarray]:
+    """Backproject the eroded mask to a camera-frame 3D cloud (N,3) metres.
+
+    Mirrors :func:`_top_face_grasp`'s measurement hygiene: erode the mask (kill
+    seg edge-bleed), keep depth>0, band-pass the depths around the median
+    (±``band_m``), subsample to ``max_points``. Returns ``None`` when fewer than
+    ``min_points`` survive (caller routes to the legacy 2D fallback).
+    """
+    mask_in = cv2.erode(
+        (mask > 0).astype(np.uint8), np.ones((erode_k, erode_k), dtype=np.uint8)
+    )
+    ys, xs = np.nonzero(mask_in > 0)
+    if len(xs) < min_points:
+        return None
+    z = depth_mm[ys, xs].astype(np.float64)
+    ok = z > 0
+    xs, ys, z = xs[ok], ys[ok], z[ok] / 1000.0
+    if len(xs) < min_points:
+        return None
+    z_med = float(np.median(z))
+    band = np.abs(z - z_med) <= band_m
+    xs, ys, z = xs[band], ys[band], z[band]
+    if len(xs) < min_points:
+        return None
+    if len(xs) > max_points:
+        sel = np.random.default_rng(seed).choice(
+            len(xs), size=max_points, replace=False
+        )
+        xs, ys, z = xs[sel], ys[sel], z[sel]
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    pts = np.column_stack([(xs - cx) * z / fx, (ys - cy) * z / fy, z])
+    return pts
+
+
+def _shape_descriptor(
+    mask: np.ndarray,
+    depth_mm: np.ndarray,
+    K: np.ndarray,
+    up_cam: Optional[np.ndarray],
+) -> Optional[ShapeDescriptor]:
+    """Compute the shared :class:`ShapeDescriptor`, or ``None`` if the cloud is
+    too sparse (< 200 pts) — the caller then uses the legacy 2D path."""
+    pts = _mask_cloud(mask, depth_mm, K)
+    if pts is None or len(pts) < 200:
+        return None
+    centroid = pts.mean(axis=0)
+    centered = pts - centroid
+    # covariance PCA; eigenvalues ascending → reorder major→minor.
+    cov = (centered.T @ centered) / max(len(centered) - 1, 1)
+    evals, evecs = np.linalg.eigh(cov)
+    order = np.argsort(evals)[::-1]
+    evals = evals[order]
+    evecs = evecs[:, order]
+    l1, l2, l3 = (float(max(e, 1e-12)) for e in evals)
+    elongation = l1 / l2
+    planarity = l3 / (l1 + l2 + l3)
+    roundness = l2 / l1
+
+    major, mid, minor = evecs[:, 0], evecs[:, 1], evecs[:, 2]
+    proj_major = centered @ major
+    proj_mid = centered @ mid
+    proj_minor = centered @ minor
+
+    def _extent(c: np.ndarray) -> float:
+        return float(np.percentile(c, 95) - np.percentile(c, 5))
+
+    extent_major = _extent(proj_major)
+    extent_mid = _extent(proj_mid)
+    extent_minor = _extent(proj_minor)
+
+    # plane normal of the dominant (major×mid) plane = minor axis; top alignment.
+    top_align = 0.0
+    up_unit: Optional[np.ndarray] = None
+    table_proj = 0.0
+    if up_cam is not None:
+        up = np.asarray(up_cam, dtype=np.float64)
+        up = up / max(float(np.linalg.norm(up)), 1e-9)
+        up_unit = up
+        top_align = abs(float(np.dot(minor, up)))
+        # Object footprint on the table = the cloud's MINIMUM up-projection.
+        # base_z = dot(pt, up) + const, so this is the lowest (table) surface;
+        # the grasp point's up-projection must never fall below it.
+        table_proj = float((pts @ up).min())
+
+    # SPINE STRAIGHTNESS: bin the cloud along the major axis and track the
+    # per-slice centroid offset in the MID direction. A straight rod/cylinder
+    # keeps that offset ~constant (small peak-to-peak); a banana's spine bends,
+    # giving a large wander. Normalised by the major extent so it is scale-free.
+    spine_bend = 0.0
+    span = float(proj_major.max() - proj_major.min())
+    if span > 1e-6:
+        edges = np.linspace(proj_major.min(), proj_major.max(), 13)
+        slice_mids = []
+        for i in range(len(edges) - 1):
+            sel = (proj_major >= edges[i]) & (proj_major < edges[i + 1])
+            if int(sel.sum()) < 10:
+                continue
+            slice_mids.append(float(proj_mid[sel].mean()))
+        if len(slice_mids) >= 3:
+            sm = np.asarray(slice_mids)
+            spine_bend = float((sm.max() - sm.min()) / span)
+
+    return ShapeDescriptor(
+        elongation=elongation,
+        planarity=planarity,
+        roundness=roundness,
+        axes=evecs.astype(np.float64),
+        centroid=centroid.astype(np.float64),
+        extent_major=extent_major,
+        extent_mid=extent_mid,
+        extent_minor=extent_minor,
+        top_align=top_align,
+        spine_bend=spine_bend,
+        n_points=int(len(pts)),
+        up_cam=up_unit,
+        table_proj=table_proj,
+    )
+
+
+def _pose_from_axes(
+    class_name: str,
+    conf: float,
+    bbox_xyxy: tuple[int, int, int, int],
+    position: np.ndarray,
+    open_axis_cam: np.ndarray,
+    width_m: float,
+    length_m: float,
+    n_points: int,
+    rect_points: np.ndarray,
+    K: np.ndarray,
+    method: str,
+    recenter_depth_m: float = 0.0,
+    up_cam: Optional[np.ndarray] = None,
+    table_proj: float = 0.0,
+) -> Optional[GraspPose]:
+    """Build a :class:`GraspPose` from a 3D grasp point + jaw-closing (open)
+    axis, using the legacy camera-ray approach convention (approach = toward the
+    camera; ``grasp_axes_to_rebot_tcp_rotation`` negates it into tool-forward).
+
+    ``recenter_depth_m`` pushes the grasp point AWAY from the camera (into the
+    object) by that distance along the view ray. A single depth view only sees
+    the near SHELL, so the cloud centroid sits ~half a diameter in front of the
+    true body axis; pushing it back by half the cross-section diameter recovers
+    the body-centred grasp point. Zero for routes whose point is already on the
+    body (box top-face path never calls this).
+
+    Returns ``None`` if the axis construction degenerates OR the jaw width is
+    over the 0.088 m physical limit (same over-wide rejection as every route).
+    """
+    if width_m > 0.088:
+        return None
+    position = np.asarray(position, dtype=np.float64)
+    approach = _normalize(-position)
+    if approach is None:
+        approach = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+    if recenter_depth_m > 0.0:
+        # approach points TOWARD the camera; -approach goes into the object.
+        position = position - approach * float(recenter_depth_m)
+    # ── Z-FLOOR (table hygiene) ──────────────────────────────────────────
+    # base_z = dot(pos, up_cam) + const, so the grasp point's up-projection
+    # must stay at/above the object's footprint on the table (``table_proj``).
+    # The recenter push (along -approach, into the object) can drop a flat
+    # object's grasp point UNDER the table plane; floor the up-projection so
+    # the emitted point never sits below the table surface — the same z
+    # hygiene the box top-face (z-bite floor) and side-face (gz gate) enforce.
+    # The margin matches the box top-face z-bite floor (≈25mm above the
+    # table): the downstream pick (``transform_grasp_pose_to_base`` with
+    # ``insertion_depth_m``≈0.025) pushes the committed point ANOTHER ~25mm
+    # along the approach INTO the object, so a grasp floored only a few mm
+    # above the footprint still lands below the plane after insertion. Flooring
+    # the grasp point a full insertion-depth (25mm) above the object footprint
+    # keeps the committed point at/above the table for flat objects.
+    if up_cam is not None:
+        up = np.asarray(up_cam, dtype=np.float64)
+        up = up / max(float(np.linalg.norm(up)), 1e-9)
+        floor_proj = float(table_proj) + 0.025  # 25mm above the footprint
+        cur_proj = float(np.dot(position, up))
+        if cur_proj < floor_proj:
+            position = position + up * (floor_proj - cur_proj)
+    # project the open axis to be ⊥ the approach (jaw plane).
+    open_axis = np.asarray(open_axis_cam, dtype=np.float64)
+    open_axis = open_axis - float(np.dot(open_axis, approach)) * approach
+    open_axis = _normalize(open_axis)
+    if open_axis is None:
+        return None
+    if open_axis[0] < 0:
+        open_axis = -open_axis
+    grip_axis = _normalize(np.cross(open_axis, approach))
+    open_axis = _normalize(np.cross(approach, grip_axis))
+    if grip_axis is None or open_axis is None:
+        return None
+    rotation = np.column_stack([grip_axis, open_axis, approach]).astype(np.float32)
+    tcp_rotation = grasp_axes_to_rebot_tcp_rotation(
+        rotation[:, 0], rotation[:, 1], rotation[:, 2]
+    ).astype(np.float32)
+    u, v = _project(position, K)
+    short_uv = _line_from_center(
+        np.array([u, v], dtype=np.float32),
+        np.array([open_axis[0], open_axis[1]], dtype=np.float32) * 40.0,
+    )
+    return GraspPose(
+        class_name=class_name,
+        conf=conf,
+        bbox_xyxy=bbox_xyxy,
+        center_px=(int(round(u)), int(round(v))),
+        position=position.astype(np.float32),
+        rotation=rotation,
+        tcp_rotation=tcp_rotation,
+        jaw_width_m=float(width_m),
+        object_length_m=float(length_m),
+        angle_deg=float(np.degrees(np.arctan2(open_axis[1], open_axis[0]))),
+        rect_points=rect_points,
+        short_edge_points=short_uv,
+        valid_depth_pixels=int(n_points),
+        method=method,
+    )
+
+
+def _descriptor_grasp(
+    desc: ShapeDescriptor,
+    class_name: str,
+    conf: float,
+    bbox_xyxy: tuple[int, int, int, int],
+    rect_points: np.ndarray,
+    K: np.ndarray,
+) -> Optional[GraspPose]:
+    """Route the shape descriptor to a grasp axis for the non-planar shapes:
+    elongated/curved, round, cylinder, and the near-square disambiguation.
+
+    Returns ``None`` to fall through (planar shapes — handled by the existing
+    top/side path before this is ever called — or a degenerate construction).
+    The jaw always closes across the object's narrowest graspable dimension; the
+    width is taken from the corresponding 3D extent and is hard-capped at
+    0.088 m by :func:`_pose_from_axes`.
+    """
+    major = desc.axes[:, 0]
+    mid = desc.axes[:, 1]
+    minor = desc.axes[:, 2]
+    pos = desc.centroid
+
+    elong = desc.elongation
+    planar = desc.planarity
+
+    # ── CYLINDER (bottle): rod-like with a STRAIGHT spine → grasp axis closes
+    # the jaw across the DIAMETER (the visible cross-section width = the mid
+    # extent). Keyed off ``spine_bend`` being small: a single oblique depth view
+    # collapses a cylinder to a planar shell, so a cross-section-radius CV cannot
+    # tell cylinder from box; the straight (vs banana-curved) spine is the
+    # reliable cue. Checked BEFORE the elongated route so a bottle gets the
+    # cylinder label (the grasp axis is identical — jaw across the body width).
+    if elong >= 1.8 and desc.spine_bend < 0.06:
+        open_axis, diameter = mid, desc.extent_mid
+        return _pose_from_axes(
+            class_name, conf, bbox_xyxy, pos, open_axis,
+            width_m=diameter, length_m=desc.extent_major,
+            n_points=desc.n_points, rect_points=rect_points, K=K,
+            method="cylinder", recenter_depth_m=0.5 * desc.extent_mid,
+            up_cam=desc.up_cam, table_proj=desc.table_proj,
+        )
+
+    # ── ELONGATED / CURVED (banana): jaw closes ACROSS the minor cross-section
+    # of the body — i.e. the grasp (open) axis is the MID axis (the wider of the
+    # two short axes) so the jaw spans the body thickness, gripping perpendicular
+    # to the long (major) axis.
+    if elong >= 2.2:
+        if desc.extent_mid >= desc.extent_minor:
+            open_axis, width = mid, desc.extent_mid
+        else:
+            open_axis, width = minor, desc.extent_minor
+        return _pose_from_axes(
+            class_name, conf, bbox_xyxy, pos, open_axis,
+            width_m=width, length_m=desc.extent_major,
+            n_points=desc.n_points, rect_points=rect_points, K=K,
+            method="elongated", recenter_depth_m=0.5 * width,
+            up_cam=desc.up_cam, table_proj=desc.table_proj,
+        )
+
+    # ── ROUND (orange): isotropic blob → physically symmetric, no preferred
+    # jaw angle. Grasp the centroid; jaw axis is the smallest in-plane extent
+    # (reachability/symmetry makes the exact angle immaterial). Width = the
+    # representative diameter (the mid extent — robust to the planar squash).
+    # NOTE: the spec's ``planarity>0.06`` was tuned for a fuller cloud; a single
+    # oblique depth view sees only the sphere's CAP, which reads ~0.05, so the
+    # gate is relaxed to 0.045. ``elongation<1.35`` already separates round from
+    # the rods; this only distinguishes a round blob from a flat near-square
+    # plate (lower planarity) for the method LABEL — both grasp the centroid.
+    if elong < 1.35 and planar > 0.045:
+        width = max(desc.extent_mid, desc.extent_minor)
+        return _pose_from_axes(
+            class_name, conf, bbox_xyxy, pos, mid,
+            width_m=width, length_m=desc.extent_major,
+            n_points=desc.n_points, rect_points=rect_points, K=K,
+            method="round", recenter_depth_m=0.5 * width,
+            up_cam=desc.up_cam, table_proj=desc.table_proj,
+        )
+
+    # ── NEAR-SQUARE (ambiguous, not round): don't trust the 2D short axis —
+    # close the jaw across the genuinely smaller 3D extent of the two short axes.
+    if elong < 1.35:
+        if desc.extent_mid <= desc.extent_minor:
+            open_axis, width = mid, desc.extent_mid
+        else:
+            open_axis, width = minor, desc.extent_minor
+        return _pose_from_axes(
+            class_name, conf, bbox_xyxy, pos, open_axis,
+            width_m=width, length_m=desc.extent_major,
+            n_points=desc.n_points, rect_points=rect_points, K=K,
+            method="near_square", recenter_depth_m=0.5 * width,
+            up_cam=desc.up_cam, table_proj=desc.table_proj,
+        )
+
+    return None
 
 
 def _top_face_grasp(

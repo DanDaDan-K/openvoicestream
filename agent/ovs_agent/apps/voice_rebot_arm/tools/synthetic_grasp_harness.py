@@ -418,6 +418,221 @@ def render_box_depth(
     return depth_mm, mask
 
 
+# ── analytic ray-cast renderers for non-box shapes ───────────────────────────
+# Box rendering above z-buffers planar quads. Curved shapes (capsule/banana,
+# sphere/orange, cylinder/bottle) have no quad decomposition, so they are
+# rendered the dual way: cast ONE camera ray per pixel (exact pinhole) and
+# intersect it analytically with the surface + the table plane, keeping the
+# nearest positive hit. Same DEFAULT_K / T_cam2base convention as the box, so
+# all renderers share the harness's extrinsic and the back-projection round-trip
+# stays exact. Torch-free: pure numpy closed-form intersections.
+def _camera_rays_base(
+    T_cam2base: np.ndarray, K: np.ndarray, img_hw: tuple[int, int]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-pixel ray origin (camera center, base frame) + unit ray directions
+    (base frame), plus camera +Z (base) for converting a base hit → camera z.
+
+    Returns ``(origin (3,), dirs (H,W,3) unit, z_axis_base (3,))``.
+    """
+    H, W = img_hw
+    T = np.asarray(T_cam2base, dtype=np.float64)
+    R, t = T[:3, :3], T[:3, 3]
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    us, vs = np.meshgrid(np.arange(W), np.arange(H))
+    rx = (us - cx) / fx
+    ry = (vs - cy) / fy
+    rz = np.ones_like(rx)
+    dir_cam = np.stack([rx, ry, rz], axis=-1)  # (H,W,3), z=1 (NOT unit)
+    dir_base = dir_cam @ R.T  # rotate to base frame
+    dir_base /= np.linalg.norm(dir_base, axis=-1, keepdims=True)
+    z_axis_base = R[:, 2]  # camera optical axis in base frame
+    return t, dir_base, z_axis_base
+
+
+def _finalize_depth_mask(
+    t_obj: np.ndarray,
+    t_table: np.ndarray,
+    origin: np.ndarray,
+    dirs: np.ndarray,
+    z_axis_base: np.ndarray,
+    noise: Optional[NoiseModel],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Shared tail: pick nearest hit (object vs table), convert to camera z,
+    quantize to uint16 mm, build the object-only mask. ``t_*`` are ray params
+    (∞ = miss). All in base frame; camera z = (hit - origin)·z_axis_base.
+    """
+    H, W, _ = dirs.shape
+    obj_hit = np.isfinite(t_obj)
+    table_hit = np.isfinite(t_table)
+    # object wins where it is the nearer (smaller t) valid hit.
+    obj_nearest = obj_hit & (~table_hit | (t_obj <= t_table))
+    t_use = np.where(obj_nearest, t_obj, np.where(table_hit, t_table, np.inf))
+    hit = np.isfinite(t_use)
+    depth_m = np.zeros((H, W), dtype=np.float64)
+    # camera-frame z of the hit point = t · (dir·z_axis) since |dir|=1.
+    dir_dot_z = dirs @ z_axis_base  # (H,W)
+    zc = t_use * dir_dot_z
+    depth_m[hit] = zc[hit]
+    depth_m[depth_m <= 0] = 0.0
+
+    if noise is not None:
+        depth_m = noise.apply(depth_m)
+
+    depth_mm = np.zeros((H, W), dtype=np.uint16)
+    valid = depth_m > 0
+    depth_mm[valid] = np.clip(
+        np.round(depth_m[valid] * 1000.0), 0, 65535
+    ).astype(np.uint16)
+    mask = obj_nearest.astype(np.uint8)
+    return depth_mm, mask
+
+
+def render_sphere_depth(
+    center_base: tuple[float, float, float],
+    radius_m: float,
+    table_z: float,
+    T_cam2base: np.ndarray,
+    K: np.ndarray,
+    img_hw: tuple[int, int] = IMG_HW,
+    noise: Optional[NoiseModel] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Render a sphere (orange) resting on a table, analytic ray-sphere hit."""
+    origin, dirs, z_axis = _camera_rays_base(T_cam2base, K, img_hw)
+    c = np.asarray(center_base, dtype=np.float64)
+    oc = origin - c  # (3,)
+    b = dirs @ oc  # (H,W)
+    cc = float(oc @ oc) - radius_m * radius_m
+    disc = b * b - cc
+    t_obj = np.full(dirs.shape[:2], np.inf)
+    ok = disc >= 0
+    sq = np.sqrt(np.where(ok, disc, 0.0))
+    t0 = -b - sq
+    t_obj[ok & (t0 > 0)] = t0[ok & (t0 > 0)]
+    t_table = _ray_table(origin, dirs, z_axis, table_z)
+    return _finalize_depth_mask(t_obj, t_table, origin, dirs, z_axis, noise)
+
+
+def _ray_table(
+    origin: np.ndarray, dirs: np.ndarray, z_axis: np.ndarray, table_z: float
+) -> np.ndarray:
+    """Ray param where each ray crosses the horizontal plane z=table_z (base)."""
+    dz = dirs[..., 2]
+    t = np.full(dirs.shape[:2], np.inf)
+    moving = np.abs(dz) > 1e-9
+    cand = (table_z - origin[2]) / np.where(moving, dz, 1.0)
+    t[moving & (cand > 0)] = cand[moving & (cand > 0)]
+    return t
+
+
+def render_cylinder_depth(
+    center_base: tuple[float, float, float],
+    radius_m: float,
+    length_m: float,
+    axis_base: tuple[float, float, float],
+    table_z: float,
+    T_cam2base: np.ndarray,
+    K: np.ndarray,
+    img_hw: tuple[int, int] = IMG_HW,
+    noise: Optional[NoiseModel] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Render a finite cylinder (bottle lying on its side) on a table.
+
+    ``axis_base`` is the (unnormalized) cylinder-axis direction; ``length_m`` is
+    the full length, ``radius_m`` the radius (diameter = 2·radius). Analytic
+    ray-vs-infinite-cylinder, clamped to the finite extent along the axis.
+    """
+    origin, dirs, z_axis = _camera_rays_base(T_cam2base, K, img_hw)
+    c = np.asarray(center_base, dtype=np.float64)
+    a = np.asarray(axis_base, dtype=np.float64)
+    a = a / np.linalg.norm(a)
+    H, W, _ = dirs.shape
+
+    # project ray dir and origin offset onto the plane ⊥ axis.
+    d = dirs.reshape(-1, 3)
+    dp = d - np.outer(d @ a, a)  # (N,3) dir ⊥ axis
+    oc = origin - c
+    op = oc - (oc @ a) * a  # (3,) offset ⊥ axis
+    A = np.einsum("ij,ij->i", dp, dp)
+    B = 2.0 * (dp @ op)
+    C = float(op @ op) - radius_m * radius_m
+    disc = B * B - 4 * A * C
+    t = np.full(len(d), np.inf)
+    ok = (disc >= 0) & (A > 1e-12)
+    sq = np.sqrt(np.where(ok, disc, 0.0))
+    t0 = (-B - sq) / np.where(A > 1e-12, 2 * A, 1.0)
+    sel = ok & (t0 > 0)
+    # clamp to finite length: axial coordinate of the hit within ±length/2.
+    hit = origin + t0[:, None] * d
+    axial = (hit - c) @ a
+    sel &= np.abs(axial) <= (length_m / 2.0)
+    t[sel] = t0[sel]
+    t_obj = t.reshape(H, W)
+    t_table = _ray_table(origin, dirs, z_axis, table_z)
+    return _finalize_depth_mask(t_obj, t_table, origin, dirs, z_axis, noise)
+
+
+def render_capsule_depth(
+    center_base: tuple[float, float, float],
+    radius_m: float,
+    length_m: float,
+    axis_base: tuple[float, float, float],
+    table_z: float,
+    T_cam2base: np.ndarray,
+    K: np.ndarray,
+    img_hw: tuple[int, int] = IMG_HW,
+    curve_m: float = 0.0,
+    noise: Optional[NoiseModel] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Render an elongated capsule (banana-ish) on a table.
+
+    A capsule = a cylinder of length ``length_m`` with hemispherical caps of
+    ``radius_m``; the surface is the locus of points at distance ``radius_m``
+    from the central SEGMENT. With ``curve_m>0`` the segment becomes a shallow
+    parabolic arc (a banana bend) sampled into a polyline; the ray-vs-capsule
+    distance is the min distance to any segment of the polyline. Analytic per
+    segment (point-to-segment closest approach), torch-free.
+    """
+    origin, dirs, z_axis = _camera_rays_base(T_cam2base, K, img_hw)
+    c = np.asarray(center_base, dtype=np.float64)
+    a = np.asarray(axis_base, dtype=np.float64)
+    a = a / np.linalg.norm(a)
+    # build the (possibly curved) spine polyline as points along the axis with a
+    # parabolic bend in the local up direction (perpendicular to axis & base-Z).
+    bend_dir = np.cross(a, np.array([0.0, 0.0, 1.0]))
+    if np.linalg.norm(bend_dir) < 1e-6:
+        bend_dir = np.array([1.0, 0.0, 0.0])
+    bend_dir = bend_dir / np.linalg.norm(bend_dir)
+    bend_up = np.cross(bend_dir, a)  # curve upward, away from table
+    bend_up = bend_up / max(np.linalg.norm(bend_up), 1e-9)
+    n_seg = 24
+    s = np.linspace(-length_m / 2.0, length_m / 2.0, n_seg + 1)
+    # parabola: offset = curve_m · (1 - (2s/L)²)
+    off = curve_m * (1.0 - (2.0 * s / max(length_m, 1e-9)) ** 2)
+    spine = c[None, :] + np.outer(s, a) + np.outer(off, bend_up)  # (n_seg+1,3)
+
+    H, W, _ = dirs.shape
+    d = dirs.reshape(-1, 3)
+    N = len(d)
+    t_best = np.full(N, np.inf)
+    # For each spine segment, closed-form min over t of dist(ray(t), segment).
+    # Cheap robust approach: sample the segment densely and do ray-vs-sphere on
+    # each sample (sphere radius = capsule radius). n_seg×ray-sphere, vectorized.
+    for p in spine:
+        oc = origin - p
+        b = d @ oc
+        cc = float(oc @ oc) - radius_m * radius_m
+        disc = b * b - cc
+        ok = disc >= 0
+        sq = np.sqrt(np.where(ok, disc, 0.0))
+        t0 = -b - sq
+        sel = ok & (t0 > 0) & (t0 < t_best)
+        t_best[sel] = t0[sel]
+    t_obj = t_best.reshape(H, W)
+    t_table = _ray_table(origin, dirs, z_axis, table_z)
+    return _finalize_depth_mask(t_obj, t_table, origin, dirs, z_axis, noise)
+
+
 def make_detection(
     box_mask: np.ndarray,
     K: np.ndarray,
@@ -459,6 +674,33 @@ def plan_grasp(
     grasps = estimate_grasps(
         [result],
         depth_mm,
+        np.asarray(K, dtype=np.float64),
+        depth_quantile=depth_quantile,
+        up_hint_cam=up_hint,
+    )
+    return select_best_grasp(grasps)
+
+
+def plan_grasp_from_depth_mask(
+    depth_mm: np.ndarray,
+    mask: np.ndarray,
+    T_cam2base: np.ndarray,
+    K: np.ndarray,
+    class_name: str = "object",
+    depth_quantile: float = 0.5,
+    with_up_hint: bool = True,
+) -> Optional[GraspPose]:
+    """Run the production estimator on an already-rendered (depth_mm, mask).
+
+    Shape-general sibling of :func:`plan_grasp` (which is box-specific): the
+    curved renderers (sphere/cylinder/capsule) return (depth_mm, mask) directly,
+    so this glue makes the detection + runs ``estimate_grasps``.
+    """
+    result = make_detection(np.asarray(mask, dtype=np.uint8), K, class_name=class_name)
+    up_hint = up_hint_from_extrinsic(T_cam2base) if with_up_hint else None
+    grasps = estimate_grasps(
+        [result],
+        np.asarray(depth_mm),
         np.asarray(K, dtype=np.float64),
         depth_quantile=depth_quantile,
         up_hint_cam=up_hint,
@@ -721,8 +963,12 @@ __all__ = [
     "default_T_cam2base",
     "up_hint_from_extrinsic",
     "render_box_depth",
+    "render_sphere_depth",
+    "render_cylinder_depth",
+    "render_capsule_depth",
     "make_detection",
     "plan_grasp",
+    "plan_grasp_from_depth_mask",
     "reachable",
     "NoiseModel",
     "load_dumped_frame",
