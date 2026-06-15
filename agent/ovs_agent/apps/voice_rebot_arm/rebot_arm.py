@@ -389,6 +389,64 @@ class RebotArm:
         self._connected = False
         print("[RebotArm] disconnected")
 
+    def set_torque(self, enable: bool) -> None:
+        """Runtime joint-torque toggle that ALSO manages the ArmEndPos controller.
+
+        A bare ``self._arm.enable()`` re-powers the motors but leaves the
+        ArmEndPos controller (started in :meth:`connect`) torn down/stale after
+        a prior ``disable()``, so the arm holds no target and won't track
+        commands — the "torque shows on but the motors don't move" symptom after
+        an off→on cycle for manual posing. Mirror connect()/disconnect():
+
+          enable=True  → enable motors → restart a FRESH ArmEndPos controller
+                         (it latches the CURRENT pose, so no jump).
+          enable=False → end() the controller first (so it neither fights the
+                         manual move nor leaves a stale target that snaps on
+                         re-enable) → disable motors.
+
+        The gripper force-control loop is independent and left running.
+        """
+        if not self._connected:
+            raise RuntimeError("arm not connected")
+        if enable:
+            self._arm.enable()
+            # Drop any stale controller from before the disable, then start fresh.
+            if self._endpos_ctrl is not None:
+                try:
+                    self._endpos_ctrl.end()
+                except Exception:
+                    pass
+                self._endpos_ctrl = None
+            try:
+                time.sleep(0.5)
+                self._endpos_ctrl = self._ArmEndPos(self._arm)
+                self._endpos_ctrl.start()
+            except Exception:
+                # Leave the arm de-energised rather than torqued with no
+                # controller (same safety contract as connect()).
+                self._endpos_ctrl = None
+                disable_fn = getattr(self._arm, "disable", None)
+                if callable(disable_fn):
+                    try:
+                        disable_fn()
+                    except Exception:
+                        pass
+                raise
+            print("[RebotArm] torque re-enabled (motors energised + controller restarted)")
+        else:
+            # Stop the controller BEFORE de-energising so it does not drive
+            # against the manual move or hold a stale target.
+            if self._endpos_ctrl is not None:
+                try:
+                    self._endpos_ctrl.end()
+                except Exception:
+                    pass
+                self._endpos_ctrl = None
+            disable_fn = getattr(self._arm, "disable", None)
+            if callable(disable_fn):
+                disable_fn()
+            print("[RebotArm] torque disabled (motors de-energised for manual move)")
+
     def _cleanup_tmp_cfgs(self) -> None:
         """Unlink any channel-override temp cfg files this instance created."""
         for p in self._tmp_cfg_paths:
