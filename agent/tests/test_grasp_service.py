@@ -641,9 +641,11 @@ def test_multiframe_detection_recovers_cold_camera_frames():
     assert seg.predict_calls == 2       # good detection frame + servo look
 
 
-def test_single_frame_budget_fails_then_retry_succeeds():
-    # detect_frames=1 → the cold frame eats the only budget → no detection
-    # (non-retriable). With retries the next attempt gets a fresh capture.
+def test_detect_frame_floor_recovers_single_cold_frame():
+    # Temporal stabilization (Item C) runs N = max(3, detect_frames) frames per
+    # capture, so even with detect_frames=1 a single cold first frame is
+    # recovered WITHIN the same attempt (the floor of 3 frames guarantees at
+    # least a couple of real frames after a cold-start drop) — no retry needed.
     color, depth, K = _scene()
     arm = FakeArm()
     cam = ColdCamera(color, depth, K, cold=1)
@@ -654,8 +656,8 @@ def test_single_frame_budget_fails_then_retry_succeeds():
         T_hand_eye=np.eye(4), warm_up_frames=0, move_duration=0.02,
         detect_frames=1, retries=0,
     )
-    assert res["success"] is False
-    assert res["stage"] == "detect"
+    assert res["success"] is True
+    assert res["attempt"] == 1
 
 
 def test_closed_on_air_retries_and_succeeds():
@@ -896,17 +898,28 @@ class ReobserveArm(FakeArm):
 
 
 class TwoStageSegmenter(FakeSegmenter):
-    """First predict() returns an inflated-width detection (side view), later
-    calls return a sane one (close-up top view)."""
+    """Returns an inflated-width detection (side view) from the FIRST camera
+    viewpoint, then a sane one (close-up top view) after the camera has moved
+    for a re-observation.
 
-    def __init__(self, wide_result, good_result) -> None:
+    Multi-frame temporal stabilization (Item C) runs N detector calls per
+    capture from the *same* viewpoint, so a side-view inflation must persist
+    across the whole first capture (a real camera that hasn't moved keeps
+    seeing the same inflated silhouette). We therefore switch on the number of
+    captures (``wide_captures`` predicts of the wide result before flipping to
+    the sane one), not on a single call, so the wide reading isn't averaged
+    away by a magically-sane second frame from an unmoved camera."""
+
+    def __init__(self, wide_result, good_result, wide_captures=3) -> None:
         super().__init__(good_result)
         self._wide = wide_result
         self.predict_calls = 0
+        self._wide_captures = int(wide_captures)
 
     def predict(self, image_bgr, conf=0.25, iou=0.45, only_names=None):
         self.predict_calls += 1
-        return [self._wide if self.predict_calls == 1 else self._result]
+        wide = self.predict_calls <= self._wide_captures
+        return [self._wide if wide else self._result]
 
 
 def _wide_result():
@@ -969,9 +982,12 @@ def test_reobserve_disabled_keeps_single_view():
         retries=0, reobserve=False,
     )
     # single (inflated) view → width gate rejects without a second look.
+    # (multi-frame capture runs N detector calls in the ONE capture; the point
+    # is that NO re-observation move happened — predict_calls stays within the
+    # single capture's N-frame budget, never a second capture round.)
     assert res["success"] is False
     assert res.get("reobserved") is None
-    assert seg.predict_calls == 1
+    assert 1 <= seg.predict_calls <= 3
 
 
 # ── top-face plane grasp (Phase 1) + servo correction (Phase 2) ─────────────

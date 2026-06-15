@@ -73,6 +73,155 @@ def _safe_open_distance(value: float) -> float:
     return dist
 
 
+# ── multi-frame temporal stabilization (Item C) ─────────────────────────────
+# Aggregate several detector frames into ONE stable grasp pose instead of
+# committing to the first valid frame. A single jittery frame can put the grasp
+# point a couple of cm off or rotate the open-axis enough to grip the wrong
+# edge; clustering N frames and taking the per-component median cancels that
+# per-frame noise before any motion. The math below is camera-frame and
+# torch-free so it runs (and is unit-tested) on a Mac with no model.
+
+# Cluster / outlier thresholds (camera frame).
+_CL_CENTER_PX = 35.0       # same-object center distance (px)
+_CL_IOU = 0.45             # same-object bbox IoU
+_OUT_POS_M = 0.025         # frame rejected if position deviates > 25mm
+_OUT_ANGLE_DEG = 25.0      # ...or angle  > 25°
+_OUT_WIDTH_M = 0.020       # ...or width  > 20mm
+_ANGLE_MAD_MAX_DEG = 18.0  # final angular MAD gate (non-round shapes)
+_CLUSTER_CONF_KEEP = 0.70  # keep a 1-member cluster only at conf >= this
+
+
+def _bbox_iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = (float(v) for v in a)
+    bx1, by1, bx2, by2 = (float(v) for v in b)
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _circular_median_deg(angles_deg, mod: float = 180.0) -> float:
+    """Median of angles taken modulo ``mod`` (open-axis is direction-agnostic,
+    so 180° periodic). Computed via unit vectors on the doubled angle so the
+    wrap at the mod boundary is handled, then mapped back into ``[0, mod)``."""
+    if not angles_deg:
+        return 0.0
+    scale = 2.0 * math.pi / mod
+    xs = [math.cos(a * scale) for a in angles_deg]
+    ys = [math.sin(a * scale) for a in angles_deg]
+    mx = float(np.median(xs))
+    my = float(np.median(ys))
+    ang = math.atan2(my, mx) / scale
+    return ang % mod
+
+
+def _angle_diff_deg(a: float, b: float, mod: float = 180.0) -> float:
+    """Smallest absolute difference between two angles modulo ``mod``."""
+    d = abs((a - b) % mod)
+    return min(d, mod - d)
+
+
+def _is_round_pose(pose: Any) -> bool:
+    """A grasp whose method/shape is 'round' has no meaningful open-axis angle
+    (curved object → the angle gate would spuriously fire). Best-effort: the
+    estimator may tag the pose via ``method`` or a ``shape`` attribute."""
+    method = str(getattr(pose, "method", "") or "").lower()
+    shape = str(getattr(pose, "shape", "") or "").lower()
+    return "round" in method or "round" in shape
+
+
+def _cluster_grasps(valid):
+    """Greedy single-linkage clustering of valid grasps by target class +
+    center distance + bbox IoU. Returns a list of clusters (lists of poses)."""
+    clusters: list[list[Any]] = []
+    for g in valid:
+        gc = np.asarray(g.center_px, dtype=np.float64)
+        placed = False
+        for cl in clusters:
+            for member in cl:
+                if member.class_name != g.class_name:
+                    continue
+                mc = np.asarray(member.center_px, dtype=np.float64)
+                if float(np.linalg.norm(gc - mc)) > _CL_CENTER_PX:
+                    continue
+                if _bbox_iou(member.bbox_xyxy, g.bbox_xyxy) < _CL_IOU:
+                    continue
+                cl.append(g)
+                placed = True
+                break
+            if placed:
+                break
+        if not placed:
+            clusters.append([g])
+    return clusters
+
+
+def _aggregate_cluster(cluster):
+    """Aggregate a cluster of valid GraspPose into one stabilized pose:
+    position = per-component median (camera frame), jaw width = median,
+    conf = max, angle = circular median (mod 180°). Frames whose pose deviates
+    too far from the cluster median are dropped before the final aggregation.
+    Returns (pose, info) or (None, info) when the angular-MAD gate fails.
+
+    ``pose`` is the cluster member nearest the aggregated centroid, mutated to
+    carry the median position / width / angle / max-conf — this preserves all
+    the other fields (tcp_rotation, method, ggcnn_agree, rect_points, ...) the
+    downstream pipeline reads while still committing to the stable estimate."""
+    info: dict[str, Any] = {"n_in": len(cluster), "rejected": 0}
+    positions = np.asarray([np.asarray(g.position, dtype=np.float64) for g in cluster])
+    med_pos = np.median(positions, axis=0)
+    widths = [float(g.jaw_width_m) for g in cluster]
+    med_w = float(np.median(widths))
+    angles = [float(g.angle_deg) for g in cluster]
+    med_ang = _circular_median_deg(angles)
+
+    # Outlier rejection vs the cluster median.
+    kept = []
+    for g in cluster:
+        dp = float(np.linalg.norm(np.asarray(g.position, dtype=np.float64) - med_pos))
+        da = _angle_diff_deg(float(g.angle_deg), med_ang)
+        dw = abs(float(g.jaw_width_m) - med_w)
+        if dp > _OUT_POS_M or da > _OUT_ANGLE_DEG or dw > _OUT_WIDTH_M:
+            info["rejected"] += 1
+            continue
+        kept.append(g)
+    if not kept:
+        kept = list(cluster)
+
+    # Recompute on the kept set.
+    positions = np.asarray([np.asarray(g.position, dtype=np.float64) for g in kept])
+    med_pos = np.median(positions, axis=0)
+    med_w = float(np.median([float(g.jaw_width_m) for g in kept]))
+    kept_angles = [float(g.angle_deg) for g in kept]
+    med_ang = _circular_median_deg(kept_angles)
+    max_conf = max(float(g.conf) for g in kept)
+
+    # Angular MAD gate (skip for round shapes — no meaningful open-axis angle).
+    round_cluster = any(_is_round_pose(g) for g in kept)
+    mad = float(np.median([_angle_diff_deg(a, med_ang) for a in kept_angles]))
+    info["angular_mad_deg"] = mad
+    info["n_kept"] = len(kept)
+    if not round_cluster and len(kept) >= 2 and mad > _ANGLE_MAD_MAX_DEG:
+        info["error"] = f"angular MAD {mad:.1f}° exceeds {_ANGLE_MAD_MAX_DEG}°"
+        return None, info
+
+    # Pick the member nearest the aggregated centroid as the carrier pose and
+    # overwrite its stabilized components.
+    carrier = min(
+        kept,
+        key=lambda g: float(np.linalg.norm(np.asarray(g.position, dtype=np.float64) - med_pos)),
+    )
+    carrier.position = med_pos.astype(np.float32)
+    carrier.jaw_width_m = med_w
+    carrier.angle_deg = med_ang
+    carrier.conf = max_conf
+    return carrier, info
+
+
 def _open_gripper_safe(arm: Any, open_distance_m: float) -> None:
     arm.open_gripper(open_distance_m)
 
@@ -476,11 +625,19 @@ def _grasp_attempt(
             Kl = None
             nd = 0
             up_hint = _up_hint_cam()
-            # Adaptive multi-frame: first frame with a valid candidate wins
-            # (zero added latency on the common path); further frames only run
-            # when a frame is dropped (cold camera → get_frame None) or the
-            # detector/depth misses on that frame.
-            for i in range(max(1, detect_frames)):
+            # Temporal stabilization (Item C): gather up to N = max(3,
+            # detect_frames) frames, each contributing its best valid grasp,
+            # then CLUSTER + per-component MEDIAN the candidates so per-frame
+            # jitter (a few mm of center drift, a few degrees of open-axis
+            # rotation) cancels before any motion. Early-out preserved for the
+            # validated common path: the FIRST frame whose best grasp already
+            # has conf >= _CLUSTER_CONF_KEEP returns immediately (a single
+            # high-confidence frame is byte-identical to the old behaviour —
+            # extra frames would add nothing but latency).
+            n_frames = max(3, max(1, detect_frames))
+            per_frame_best: list[Any] = []
+            for i in range(n_frames):
+                _check_cancel(cancel_event, arm, safe_open_m)
                 color_bgr, depth_mm = camera.get_frame()
                 if color_bgr is None or depth_mm is None:
                     logger.debug("grasp detect: frame %d empty (cold camera?)", i)
@@ -517,8 +674,47 @@ def _grasp_attempt(
                     except Exception:
                         logger.debug("frame_sink failed", exc_info=True)
                 if b is not None:
-                    return b, Kl, nd
-            return None, Kl, nd
+                    per_frame_best.append(b)
+                    # Early-out: one already-confident frame ends the loop with
+                    # the validated single-frame answer (no aggregation, no
+                    # extra detector calls).
+                    if float(getattr(b, "conf", 0.0)) >= _CLUSTER_CONF_KEEP:
+                        return b, Kl, nd
+            if not per_frame_best:
+                return None, Kl, nd
+            # One valid frame total → collapse to it (byte-identical to the old
+            # first-valid-frame path).
+            if len(per_frame_best) == 1:
+                return per_frame_best[0], Kl, nd
+            # Cluster the per-frame bests; keep a cluster with >=2 valid grasps,
+            # OR a single-member cluster only at high conf.
+            clusters = _cluster_grasps(per_frame_best)
+            eligible = [
+                cl for cl in clusters
+                if len(cl) >= 2 or max(float(g.conf) for g in cl) >= _CLUSTER_CONF_KEEP
+            ]
+            if not eligible:
+                # No agreement across frames — fall back to the single best
+                # frame (the existing gates downstream still apply).
+                return select_best_grasp(per_frame_best), Kl, nd
+            # Prefer the most-supported cluster, breaking ties by max conf.
+            cluster = max(
+                eligible,
+                key=lambda cl: (len(cl), max(float(g.conf) for g in cl)),
+            )
+            agg, info = _aggregate_cluster(cluster)
+            if agg is None:
+                logger.info("grasp: temporal aggregation rejected (%s)",
+                            info.get("error"))
+                return None, Kl, nd
+            logger.info(
+                "grasp: temporal aggregate over %d/%d frames "
+                "(mad=%.1f° kept=%d rejected=%d)",
+                info.get("n_in", 0), len(per_frame_best),
+                info.get("angular_mad_deg", 0.0),
+                info.get("n_kept", 0), info.get("rejected", 0),
+            )
+            return agg, Kl, nd
 
         _mark("capture")
         _check_cancel(cancel_event, arm, safe_open_m)

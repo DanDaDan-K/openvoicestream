@@ -312,7 +312,29 @@ metadata:
     # this extra label is inert in box mode and active once REBOT_TEXT_ENCODER +
     # the embin REBOT_GRASP_MODEL are set. Order MUST match the embedding order
     # (text_pe builds class_embeddings from this list in order).
-    yolo_classes: ["box", "cardboard box", "carton", "package", "yellow banana"]
+    # Detection-recall prompt variants (Item D): more phrasings of the SAME
+    # object raise recall in embin (vocab-decoupled) mode — a missed "box" may
+    # still fire as "carton"/"package". Box-like classes MUST stay first so the
+    # cls_id order keeps the known-box / over-wide ordering the box engine and
+    # the unknown-object 'first' policy rely on. ≤16 labels total (embin pads
+    # to 16 slots). Env-overridable at container-recreate time via
+    # REBOT_GRASP_CLASSES='["box","carton",...]' (see _list_override).
+    yolo_classes:
+      - "box"
+      - "cardboard box"
+      - "carton"
+      - "package"
+      - "small cardboard box"
+      - "brown box"
+      - "yellow banana"
+      - "orange"
+      - "water bottle"
+      - "cup"
+    # Optional detector input resolution. Default UNSET → the segmenter's 640
+    # default (current behaviour, byte-identical). A larger size (e.g. 800/960)
+    # improves small-object recall but REQUIRES a matching re-exported engine
+    # built at that size — set this ONLY alongside such an engine.
+    # yolo_input_size: 640
     # ── unknown-object policy ────────────────────────────────────────────────
     # What to do when the user names an object that resolves to NO catalog label
     # above (exact/substring match fails):
@@ -474,8 +496,9 @@ metadata:
     # grasps (disagreement → re-observation) + PRIMARY estimator for curved
     # objects (plane fit fails on fruit — that failure routes here). Ships
     # DARK until real-fruit validation; flipping this on changes nothing for
-    # boxes except the 35ms second-opinion pass.
-    ggcnn_refiner: false
+    # boxes except the 35ms second-opinion pass. Now ON by default; toggle
+    # without an image rebuild via REBOT_GGCNN=false (Item B).
+    ggcnn_refiner: ${REBOT_GGCNN:-true}
     # Servo-lite correction: one re-detection from the pregrasp pose shifts
     # the grasp x/y by the measured drift (≤3cm) — cancels calibration
     # residue + far-view parallax in the final approach.

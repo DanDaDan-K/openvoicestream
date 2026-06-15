@@ -1027,11 +1027,33 @@ class GraspPlugin(Plugin):
             model_path = self.cfg.get("yolo_model_path")
             if not model_path:
                 raise RuntimeError("grasp config missing yolo_model_path")
-            names = list(self.cfg.get("yolo_classes", []))
+            # Detection-recall vocab (Item D): env override REBOT_GRASP_CLASSES
+            # (JSON list) lets the live vocabulary be retuned at
+            # container-recreate time without an image rebuild; malformed /
+            # unset falls back to the baked yolo_classes (see _list_override).
+            names_src = self._list_override("REBOT_GRASP_CLASSES", "yolo_classes")
+            if not isinstance(names_src, list):
+                names_src = self.cfg.get("yolo_classes", [])
+            names = [str(n) for n in (names_src or [])]
             providers = self.cfg.get("onnx_providers")
             kwargs: dict[str, Any] = {}
             if providers:
                 kwargs["providers"] = tuple(providers)
+            # Optional detector input size (Item D): default unset → segmenter's
+            # 640 default (unchanged). A larger size needs a matching re-exported
+            # engine; pass an int (square) or [w, h].
+            iz = self.cfg.get("yolo_input_size")
+            if iz is not None:
+                try:
+                    if isinstance(iz, (list, tuple)):
+                        size = (int(iz[0]), int(iz[1]))
+                    else:
+                        size = (int(iz), int(iz))
+                    kwargs["input_size"] = size
+                except (TypeError, ValueError, IndexError):
+                    logger.warning(
+                        "GraspPlugin: ignoring malformed yolo_input_size %r", iz
+                    )
             # Vocab-decoupled ("embin") mode: opt-in via config. When a
             # text_encoder_path is set (or vocab_mode == "embeddings"), the
             # class vocabulary is NOT baked into the detector — instead the

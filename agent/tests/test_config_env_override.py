@@ -158,3 +158,33 @@ def test_scan_poses_unset_uses_config_in_grasp_params(monkeypatch) -> None:
     plugin = _make_plugin()
     out = plugin._grasp_params()  # noqa: SLF001
     assert out["scan_poses"] == [tuple(p) for p in _DEFAULT_POSES]
+
+
+# ── yolo_classes via REBOT_GRASP_CLASSES (detection recall, Item D) ──────────
+# Same _list_override helper, exercised at the level the segmenter build reads.
+
+_DEFAULT_CLASSES = ["box", "cardboard box", "carton", "package"]
+
+
+def _make_classes_plugin() -> GraspPlugin:
+    return GraspPlugin(_FakeApp(), config={"yolo_classes": _DEFAULT_CLASSES})
+
+
+def test_grasp_classes_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("REBOT_GRASP_CLASSES", '["banana", "orange"]')
+    plugin = _make_classes_plugin()
+    assert plugin._list_override("REBOT_GRASP_CLASSES", "yolo_classes") == [  # noqa: SLF001
+        "banana", "orange",
+    ]
+
+
+def test_grasp_classes_unset_returns_config(monkeypatch) -> None:
+    monkeypatch.delenv("REBOT_GRASP_CLASSES", raising=False)
+    plugin = _make_classes_plugin()
+    assert plugin._list_override("REBOT_GRASP_CLASSES", "yolo_classes") == _DEFAULT_CLASSES  # noqa: SLF001
+
+
+def test_grasp_classes_malformed_falls_back(monkeypatch) -> None:
+    monkeypatch.setenv("REBOT_GRASP_CLASSES", "not-json{")
+    plugin = _make_classes_plugin()
+    assert plugin._list_override("REBOT_GRASP_CLASSES", "yolo_classes") == _DEFAULT_CLASSES  # noqa: SLF001
