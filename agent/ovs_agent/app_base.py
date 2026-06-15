@@ -2057,8 +2057,34 @@ class BaseApp:
             )
         except Exception:  # pragma: no cover - defensive
             tool_ctx = None
+        # Per-call deadline. A hung tool handler (e.g. camera get_frame blocking
+        # on a USB glitch) would otherwise stall the whole turn forever, and a
+        # never-returning dispatch means we never send a tool_result — the
+        # server-loop sits waiting, the /v2v session never completes, and the
+        # slot leaks (soft-deadlock). Bound the await with the server-provided
+        # timeout when present, else a sane default. This does NOT change the
+        # fire-and-forget grasp path's own semantics: it returns {"started":...}
+        # quickly and the real work runs in its own background task; we only
+        # bound how long we wait for the dispatch *ack* itself.
+        dispatch_timeout = getattr(evt, "timeout_s", None)
+        if not isinstance(dispatch_timeout, (int, float)) or dispatch_timeout <= 0:
+            dispatch_timeout = 30.0
         try:
-            result = await registry.dispatch(evt.name, evt.arguments, tool_ctx)
+            result = await asyncio.wait_for(
+                registry.dispatch(evt.name, evt.arguments, tool_ctx),
+                timeout=float(dispatch_timeout),
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "server tool_call %r dispatch timed out after %.1fs; "
+                "returning error result so the turn proceeds",
+                evt.name, float(dispatch_timeout),
+            )
+            await self.slv.send_tool_result(
+                evt.id, evt.name, ok=False,
+                error=f"tool '{evt.name}' timed out after {float(dispatch_timeout):.1f}s",
+            )
+            return
         except Exception as e:  # noqa: BLE001 - never let a handler kill dispatch
             logger.exception("server tool_call %r dispatch crashed", evt.name)
             await self.slv.send_tool_result(
@@ -2215,6 +2241,25 @@ class BaseApp:
                 await self._llm_turn_task
             except (asyncio.CancelledError, Exception):
                 pass
+        # Tell the server to tear down the wedged session BEFORE we drop the
+        # WS. The thinking-watchdog fires precisely when SLV's /v2v session is
+        # half-open (no tts_started); reconnecting without an in-band teardown
+        # hint leaves the old server session holding its slot (soft-deadlock:
+        # the next wake's fresh WS is 4429-rejected because the limiter slot is
+        # still busy). abort() is the same in-band frame barge-in uses to nudge
+        # the server to release the current session. Best-effort + guarded for
+        # the no-SLV / not-connected case (unit tests, pre-connect watchdog).
+        slv = getattr(self, "slv", None)
+        if slv is not None:
+            try:
+                await asyncio.wait_for(slv.abort(), timeout=0.5)
+                logger.info("SLV abort sent before thinking-watchdog reconnect")
+            except asyncio.TimeoutError:
+                logger.warning("SLV abort timed out during thinking-watchdog recovery")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("SLV abort failed during thinking-watchdog recovery")
         # Force a fresh WS — the server-side TTS pipeline is likely
         # wedged on the current session. Best-effort.
         try:

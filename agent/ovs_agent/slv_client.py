@@ -389,7 +389,12 @@ class SLVClient:
                 self._session_gen += 1
                 return
             # Reader fired → connection died inside grace window.
-            # Tear down what we just built and back off.
+            # Tear down what we just built and back off. Capture the close
+            # code first: the reader set _last_close_code before signalling
+            # _reader_done, and the teardown below clears nothing, but draining
+            # the queue / a later attempt can overwrite it — snapshot now so we
+            # can name a 4429 (session-limit / slot-busy) rejection explicitly.
+            rejected_code = self._last_close_code
             dead_reader = self._reader_task
             dead_ws = self._ws
             self._ws = None
@@ -412,14 +417,18 @@ class SLVClient:
                     _ = self._queue.get_nowait()
             except Exception:
                 pass
+            is_4429 = rejected_code == 4429
             if backoff is None:
                 raise SLVReconnectError(
                     f"SLV reconnect: server closed within {self._RECONNECT_GRACE_S}s "
-                    f"on all {len(attempts)} attempts (limiter race?)"
+                    f"on all {len(attempts)} attempts "
+                    f"({'4429 session-limit/slot-busy' if is_4429 else 'limiter race?'})"
                 )
             logger.warning(
-                "SLV reconnect attempt %d rejected within %.0fms; retrying in %.2fs",
-                attempt_idx + 1, self._RECONNECT_GRACE_S * 1000, backoff,
+                "SLV reconnect attempt %d rejected%s within %.0fms; retrying in %.2fs",
+                attempt_idx + 1,
+                " (4429 session-limit/slot-busy)" if is_4429 else "",
+                self._RECONNECT_GRACE_S * 1000, backoff,
             )
             await asyncio.sleep(backoff)
 
