@@ -122,6 +122,17 @@ RUN python -c "import openwakeword.utils; openwakeword.utils.download_models()"
 # the package (kept dependency-bearing so a fresh build is still complete).
 COPY agent /opt/slv/agent
 RUN pip install --no-cache-dir /opt/slv/agent
+# voxedge: the agent pyproject declares ``voxedge>=0.0.1a0`` which pip resolves
+# from the PyPI mirror — but the mirror's 0.0.1a0 is STALE (lacks
+# ``engine.turn_driver``, which HEAD's ``ovs_agent/tools/runner.py`` imports →
+# the container crash-loops at startup). ``[tool.uv.sources]`` points at a local
+# editable voxedge checkout, but that is uv-only and pip ignores it. Install the
+# COMMITTED, in-sync wheel (built from voxedge HEAD by
+# scripts/build_voxedge_wheel.sh) and force-reinstall so it WINS over the mirror
+# copy. This is what f3379e9 ("commit the wheel so deploy needs no pre-build
+# step") intended — the Dockerfile just never wired the wheel in.
+COPY deploy/wheels/voxedge-0.0.1a0-py3-none-any.whl /tmp/voxedge.whl
+RUN pip install --no-cache-dir --force-reinstall --no-deps /tmp/voxedge.whl
 ENV PYTHONPATH=/opt/slv/agent
 
 RUN apt-get update && apt-get install -y --no-install-recommends pulseaudio-utils \
