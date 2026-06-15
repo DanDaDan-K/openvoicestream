@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import tempfile
 from typing import Optional, Sequence
 
 import numpy as np
@@ -58,8 +59,9 @@ class TextPromptEncoder:
         providers: ORT providers. Defaults to CPU only — the text encoder is
             tiny and runs once (then cached), so CPU keeps GPU memory for the
             detector + voice stack.
-        cache_dir: where the ``.npy`` cache lives. Defaults to a ``.cache``
-            sibling of the encoder.
+        cache_dir: where the ``.npy`` cache lives. Must be WRITABLE — defaults
+            to ``REBOT_TEXT_PE_CACHE`` or a temp dir (the encoder typically sits
+            on a read-only host mount, so a sibling ``.cache`` cannot be written).
     """
 
     def __init__(
@@ -76,10 +78,18 @@ class TextPromptEncoder:
             )
         self.pad_slots = int(pad_slots)
         self.providers = tuple(providers)
+        # Cache dir must be WRITABLE. The encoder usually lives on a READ-ONLY
+        # host mount (e.g. /opt/rebot-models/staging), so a ``.cache`` sibling
+        # there fails every write (recompute each boot + a traceback in the
+        # logs). Default to a writable temp dir; override with the explicit
+        # ``cache_dir`` arg or the ``REBOT_TEXT_PE_CACHE`` env var.
         self.cache_dir = (
             str(cache_dir)
             if cache_dir is not None
-            else os.path.join(os.path.dirname(os.path.abspath(self.encoder_path)), ".cache")
+            else (
+                os.environ.get("REBOT_TEXT_PE_CACHE")
+                or os.path.join(tempfile.gettempdir(), "rebot_text_pe_cache")
+            )
         )
         self._encoder_md5: Optional[str] = None
         self._session = None
@@ -167,11 +177,14 @@ class TextPromptEncoder:
             os.makedirs(self.cache_dir, exist_ok=True)
             np.save(cache_path, out)
             _LOG.debug("TextPromptEncoder: cached %s", cache_path)
-        except Exception:  # pragma: no cover — best-effort cache
+        except Exception as exc:  # pragma: no cover — best-effort cache
+            # Read-only cache dir is an expected, non-fatal condition (the
+            # embeddings were already computed in-memory) — one concise line,
+            # no traceback noise.
             _LOG.warning(
-                "TextPromptEncoder: failed to write cache %s",
+                "TextPromptEncoder: cache write skipped (%s): %s",
                 cache_path,
-                exc_info=True,
+                exc,
             )
         return out
 

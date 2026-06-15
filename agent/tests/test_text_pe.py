@@ -75,3 +75,23 @@ def test_too_many_classes_raises(tmp_path):
     enc = TextPromptEncoder(str(ENCODER), pad_slots=2, cache_dir=str(tmp_path))
     with pytest.raises(ValueError, match="exceed pad_slots"):
         enc.encode(["a", "b", "c"])
+
+
+def test_default_cache_dir_is_writable_tempdir(monkeypatch, tmp_path):
+    """The default cache dir must be WRITABLE (the encoder lives on a read-only
+    host mount in production, so a sibling .cache there cannot be written)."""
+    import os, tempfile
+    from ovs_agent.apps.voice_rebot_arm.perception.text_pe import TextPromptEncoder
+    # fake encoder on a (read-only-style) path; only existence is checked at init
+    enc = tmp_path / "ro_mount" / "text_encoder_pe.onnx"
+    enc.parent.mkdir(parents=True)
+    enc.write_bytes(b"\x00")  # init only checks os.path.exists
+    monkeypatch.delenv("REBOT_TEXT_PE_CACHE", raising=False)
+    e = TextPromptEncoder(str(enc))
+    assert e.cache_dir.startswith(tempfile.gettempdir())
+    # NOT a sibling of the (read-only) encoder dir
+    assert os.path.dirname(os.path.abspath(str(enc))) not in e.cache_dir
+    # env override wins
+    monkeypatch.setenv("REBOT_TEXT_PE_CACHE", str(tmp_path / "custom_cache"))
+    e2 = TextPromptEncoder(str(enc))
+    assert e2.cache_dir == str(tmp_path / "custom_cache")
