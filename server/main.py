@@ -722,6 +722,20 @@ def _default_vad_backend() -> str:
     ).strip() or "silero"
 
 
+def _vad_preroll_ms() -> int:
+    """Pre-speech audio (ms) replayed into the ASR stream on a frontend-VAD
+    speech-start, so silero's onset-detection latency does not clip the first
+    word. silero only fires SPEECH_START after the word onset has crossed its
+    threshold; the leading frames were consumed by ``vad.process()`` while the
+    ASR turn was not yet open and never reached the decoder. 0 disables.
+    (Real-machine 2026-06-15: systematic first-word drop on the reBot demo.)"""
+    raw = os.environ.get("OVS_VAD_PREROLL_MS") or "300"
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 300
+
+
 def _default_vad_silence_ms() -> int:
     raw = os.environ.get("OVS_VAD_SILENCE_MS") or "400"
     try:
@@ -3291,6 +3305,7 @@ async def v2v_stream(ws: WebSocket):
                         int(tts_speaker_id), tts_service.get_backend().model_id
                     )
             sample_rate     = int(cfg.get("sample_rate", 16000))
+            preroll_cap     = int(sample_rate * _vad_preroll_ms() / 1000)
             vad_backend     = cfg.get("vad", _default_vad_backend() if asr_language else "none")
             vad_silence_ms  = int(cfg.get("vad_silence_ms", _default_vad_silence_ms()))
             multi_utterance = bool(cfg.get("multi_utterance", False))
@@ -3477,6 +3492,11 @@ async def v2v_stream(ws: WebSocket):
                                          # must not reopen on trailing silence
             "asr_audio_samples_accepted": 0,  # accepted audio duration for
                                          # per-stream frontend EOU safety gate
+            "preroll":          [],      # ring of recent pre-speech sample
+                                         # frames; replayed on frontend-VAD
+                                         # speech-start to back-fill the word
+                                         # onset silero clips (first-word drop)
+            "preroll_samples":  0,       # total samples held in "preroll"
             "endpoint_finalize_pending": False,  # set when dispatcher already
                                          # accepted the speech-end chunk and the
                                          # asr_out_task should finalize next tick
@@ -3718,6 +3738,24 @@ async def v2v_stream(ws: WebSocket):
                                     state["asr_turn_started_at"] = loop.time()
                                     state["asr_started_once"] = True
                                     speech_started_now = True
+                                    # Back-fill the speech onset: replay the
+                                    # pre-speech preroll ring into the fresh
+                                    # stream BEFORE this chunk so the decoder
+                                    # sees the full word silero clipped while
+                                    # latching SPEECH_START (first-word drop,
+                                    # real-machine 2026-06-15). Chronological
+                                    # order is preserved: preroll frames first,
+                                    # then the trigger chunk fed at the normal
+                                    # accept_audio() below.
+                                    if state["preroll"]:
+                                        pre = np.concatenate(state["preroll"])
+                                        async with coord.acquire("asr"):
+                                            await asr_manager.accept_audio(pre)
+                                        state["asr_audio_samples_accepted"] += int(len(pre))
+                                        if spk_on:
+                                            state["spk_seg"].append(pre)
+                                    state["preroll"] = []
+                                    state["preroll_samples"] = 0
                             elif event == vad_mod.VADSession.SPEECH_END:
                                 # Defer setting endpoint_pending until AFTER we
                                 # accept this final chunk below — otherwise the
@@ -3812,6 +3850,22 @@ async def v2v_stream(ws: WebSocket):
                                 "type": v2v_proto.SERVER_VAD_EVENT,
                                 "event": v2v_proto.VAD_EVENT_SPEECH_END,
                             })
+                        # While no ASR turn is open, keep a short rolling ring of
+                        # the most recent frames so the next frontend-VAD
+                        # speech-start can replay the onset (see open branch). We
+                        # only buffer pre-speech audio: once asr_active, frames go
+                        # straight to accept_audio(), so the trigger chunk is fed
+                        # exactly once and never double-counted.
+                        if preroll_cap > 0 and not state["asr_active"]:
+                            state["preroll"].append(samples)
+                            state["preroll_samples"] += int(len(samples))
+                            while (
+                                state["preroll_samples"] > preroll_cap
+                                and len(state["preroll"]) > 1
+                            ):
+                                state["preroll_samples"] -= int(
+                                    len(state["preroll"].pop(0))
+                                )
                         continue
                     # text → JSON control
                     text = msg.get("text", "")
