@@ -303,7 +303,12 @@ metadata:
     # TRT/JetPack changes). Set REBOT_GRASP_MODEL to the .onnx sibling to
     # fall back to the onnxruntime CPU path.
     yolo_model_path: "${REBOT_GRASP_MODEL:-/opt/rebot-models/yoloe-26s-seg-box.engine}"
-    yolo_classes: ["box", "cardboard box", "carton", "package"]
+    # NOTE: "yellow banana" only fires in embin (vocab-decoupled) mode — the
+    # baked box engine has 4 classes (cls_id 0-3) and never emits the 5th, so
+    # this extra label is inert in box mode and active once REBOT_TEXT_ENCODER +
+    # the embin REBOT_GRASP_MODEL are set. Order MUST match the embedding order
+    # (text_pe builds class_embeddings from this list in order).
+    yolo_classes: ["box", "cardboard box", "carton", "package", "yellow banana"]
     # ── unknown-object policy ────────────────────────────────────────────────
     # What to do when the user names an object that resolves to NO catalog label
     # above (exact/substring match fails):
