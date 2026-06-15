@@ -46,15 +46,18 @@ client_vad_drive_eos: false
 # 0.76-peak signal to 9× over full-scale → hard clipping/distortion → garbage
 # ASR ("识别率很低"). But 1.0 proved TOO QUIET for SLV's server-side VAD/ASR
 # (speech rms 0.02-0.06 → every utterance returned an empty asr_final), so
-# 3.0 is the verified middle ground: 0.76 peak × 3 clips rare loud peaks only,
-# normal speech lands at a healthy level. Gate thresholds are raw-ch0 RMS
+# 3.0 was the verified middle ground: 0.76 peak × 3 clips rare loud peaks only,
+# normal speech lands at a healthy level. Now env-tunable (default 4.0,
+# 2026-06-15) so the gain can be adjusted on the live mic without an image
+# rebuild — raise it if speech is too quiet for SLV's VAD/ASR, lower it if loud
+# peaks clip/distort (12.0 was garbage). Gate thresholds are raw-ch0 RMS
 # (applied BEFORE makeup_gain): open above the ambient floor (~0.005-0.014)
 # so noise does not open the mic, but below speech (~0.05+).
 energy_gate_enabled: true
 energy_gate_open_rms: 0.020
 energy_gate_close_rms: 0.010
 energy_gate_hangover_ms: 300
-mic_makeup_gain: 3.0
+mic_makeup_gain: ${MIC_MAKEUP_GAIN:-4.0}
 # NB (2026-06-14): gate_drive_eos:false was tried to fix the SHORT-ENGLISH empty
 # asr_final, but real-machine test ruled it out — the gate EOS is NOT the cause.
 # The bug is SLV-side: the streaming ASR finalize returns empty for short English
@@ -184,8 +187,11 @@ system_prompt: |
     Never substitute a semantically-similar tool for a different action
     the user named — if the user names an action no tool supports ('nod',
     'spin', 'dance'), call NO tool and reply that you don't have that
-    action. Example:
-      User: "nod"              → (no tool) "I can't do a nod."
+    action. When you DO reply in words, keep it to ONE short, playful
+    sentence — a little wit, never a lecture or a capability list. Examples:
+      User: "nod"              → (no tool) "No nods from me — I'm an arm, not a bobblehead."
+      User: "what can you do?" → (no tool) "Mostly I wave and grab boxes — point me at one!"
+      User: "dance"            → (no tool) "I'd trip over my own cables — let's stick to waving."
   - If the user names an OBJECT to grab/pick/hold ('grab the box',
     'pick up that box'), that is grasp_object — the camera-guided pick.
     close_gripper is ONLY for closing the empty gripper when NO object is
@@ -207,9 +213,7 @@ system_prompt: |
   - If the text is neither a clear command nor a close mishearing of one
     (chit-chat, unrelated questions), DO NOT call any tool — just reply
     normally. If it sounds like a garbled command you cannot map to
-    exactly ONE trigger, reply "Sorry, I didn't catch that. Please say it
-    again."
-
+    exactly ONE trigger, reply "That one slipped right past me — say it again?"
   /no_think
 
 mode_overrides:
