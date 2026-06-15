@@ -3159,6 +3159,24 @@ async def v2v_stream(ws: WebSocket):
 
     await ws.accept()
 
+    # Idle / half-open watchdog for the two un-timed ws.receive() sites below
+    # (config-phase + steady-state dispatcher). A dead or half-open client that
+    # never sends another frame would otherwise wedge ws.receive() forever,
+    # which holds the SessionLimiter admission slot open permanently (the slot
+    # release lives in the orchestration finally, only reachable after the
+    # receive loop exits) → back-to-back 4429 rejections until a manual restart.
+    #
+    # Default 90s is deliberately LONGER than the agent thinking-watchdog (20s)
+    # and the LLM stream-idle timeout (30s) so a slow-but-alive turn is never
+    # killed; this only fires on a truly silent socket. A timeout funnels into
+    # the SAME teardown a normal client CLOSE / WebSocketDisconnect takes.
+    def _v2v_env_float(_k: str, _d: float) -> float:
+        try:
+            return float(os.environ.get(_k, _d))
+        except (TypeError, ValueError):
+            return _d
+    _v2v_idle_timeout_s = _v2v_env_float("OVS_V2V_IDLE_TIMEOUT_S", 90.0)
+
     # Reject-not-queue admission gate. When the slot is full AND admission-time
     # eviction is enabled (OVS_V2V_EVICT_ON_FULL + limit==1 single-client, e.g.
     # voice-arm), reclaim a slot leaked by a zombie holder before giving up:
@@ -3251,7 +3269,19 @@ async def v2v_stream(ws: WebSocket):
     try:
         # ── Stage 1: receive initial config ─────────────────────────────
         try:
-            first_msg = await ws.receive()
+            first_msg = await asyncio.wait_for(
+                ws.receive(), timeout=_v2v_idle_timeout_s
+            )
+        except asyncio.TimeoutError:
+            # Half-open / silent client during the config handshake: treat
+            # exactly like a client disconnect so the admission slot is
+            # released instead of wedging this receive forever.
+            logger.warning(
+                "v2v: idle timeout (%.0fs) awaiting config frame — "
+                "releasing slot as half-open client",
+                _v2v_idle_timeout_s,
+            )
+            _v2v_release_early(); return
         except WebSocketDisconnect:
             _v2v_release_early(); return
         cfg_text = first_msg.get("text", "")
@@ -3634,7 +3664,27 @@ async def v2v_stream(ws: WebSocket):
             """Receive incoming binary (audio) + text (control) frames."""
             try:
                 while not state["client_closed"]:
-                    msg = await ws.receive()
+                    try:
+                        msg = await asyncio.wait_for(
+                            ws.receive(), timeout=_v2v_idle_timeout_s
+                        )
+                    except asyncio.TimeoutError:
+                        # Half-open / silent client mid-session: no frame for
+                        # the idle window. Treat identically to a client
+                        # disconnect (see the websocket.disconnect branch
+                        # below) so the work tasks are cancelled and the
+                        # SessionLimiter slot releases fast instead of wedging
+                        # this receive forever.
+                        logger.warning(
+                            "v2v: idle timeout (%.0fs) awaiting client frame — "
+                            "releasing slot as half-open client",
+                            _v2v_idle_timeout_s,
+                        )
+                        state["client_closed"] = True
+                        for _wt in work_tasks:
+                            if not _wt.done():
+                                _wt.cancel()
+                        break
                     if state["client_closed"]:
                         break
                     if msg.get("type") == "websocket.disconnect":
