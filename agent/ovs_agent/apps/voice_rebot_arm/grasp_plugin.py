@@ -26,7 +26,9 @@ first grasp so the agent boots on hosts without them.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -70,6 +72,43 @@ class GraspPlugin(Plugin):
         # so the tone is always the LAST output — a reliable signal that the
         # user may speak the next command. Holds the tone kind until played.
         self._pending_ready_tone: Optional[str] = None
+
+    # ── config helpers ─────────────────────────────────────────────
+    def _list_override(self, env_var: str, cfg_key: str) -> Any:
+        """Return a list config value, preferring a JSON env override.
+
+        Table-calibrated list values (place_bounds, scan_poses) are baked into
+        the image's config.yaml. YAML lists can't use the ``${VAR:-default}``
+        scalar substitution the other keys rely on, so re-calibrating after a
+        table change would otherwise need an image rebuild. This lets a JSON
+        env var override the baked default at container-recreate time:
+
+            REBOT_PLACE_BOUNDS='[0.20,0.60,-0.26,0.40]'
+            REBOT_SCAN_POSES='[[0.27,0,0.30,0,0.30,0],[0.25,0.10,0.30,0,0.30,0.35]]'
+
+        If the env var is unset/empty, or its value isn't valid JSON / isn't a
+        list, fall back to ``self.cfg.get(cfg_key)`` (a warning is logged for
+        malformed values). The downstream length / float validation at each
+        call site is unchanged — this only chooses the source.
+        """
+        raw = os.environ.get(env_var)
+        if not raw or not raw.strip():
+            return self.cfg.get(cfg_key)
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            logger.warning(
+                "GraspPlugin: %s is not valid JSON (%r); using config %s",
+                env_var, raw, cfg_key,
+            )
+            return self.cfg.get(cfg_key)
+        if not isinstance(parsed, list):
+            logger.warning(
+                "GraspPlugin: %s must be a JSON list (got %s); using config %s",
+                env_var, type(parsed).__name__, cfg_key,
+            )
+            return self.cfg.get(cfg_key)
+        return parsed
 
     # ── lifecycle ──────────────────────────────────────────────────
     def setup(self) -> bool:
@@ -632,7 +671,7 @@ class GraspPlugin(Plugin):
 
     def _search_params(self) -> dict:
         params: dict[str, Any] = {}
-        sp = self.cfg.get("scan_poses")
+        sp = self._list_override("REBOT_SCAN_POSES", "scan_poses")
         if sp:
             # each pose is a list/tuple [x,y,z,roll,pitch,yaw]
             params["scan_poses"] = [tuple(float(v) for v in p) for p in sp]
@@ -695,7 +734,7 @@ class GraspPlugin(Plugin):
                 kwargs["place_pose"] = tuple(float(v) for v in pp)
             except (TypeError, ValueError):
                 logger.warning("GraspPlugin: ignoring malformed place_pose")
-        pb = self.cfg.get("place_bounds")
+        pb = self._list_override("REBOT_PLACE_BOUNDS", "place_bounds")
         if pb:
             try:
                 bounds = [float(v) for v in pb]
@@ -1117,7 +1156,7 @@ class GraspPlugin(Plugin):
         # Auto-search: pass the configured scan_poses so grasp_object sweeps to
         # find the object when it is not in the immediate view (same poses
         # search_object uses).
-        sp = self.cfg.get("scan_poses")
+        sp = self._list_override("REBOT_SCAN_POSES", "scan_poses")
         if sp:
             try:
                 out["scan_poses"] = [tuple(float(v) for v in p) for p in sp]

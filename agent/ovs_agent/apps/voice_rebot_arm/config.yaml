@@ -367,6 +367,10 @@ metadata:
     # measured 99%-feasible IK band): a tall box's TOP face is visible from
     # the FIRST look, so the high-tilt re-observation pass rarely triggers
     # (-3s in those cases). z 0.30 also widens the visible tabletop.
+    # Env-overridable via REBOT_SCAN_POSES (JSON list of 6-lists, e.g.
+    # '[[0.27,0,0.30,0,0.30,0],[0.25,0.10,0.30,0,0.30,0.35]]'): a table
+    # re-calibration is applied by recreating the container with the env var
+    # set — no image rebuild needed (this default is baked into the image).
     scan_poses:
       - [0.27, 0.00, 0.30, 0.0, 0.30, 0.0]
       - [0.25, 0.10, 0.30, 0.0, 0.30, 0.35]
@@ -405,6 +409,10 @@ metadata:
     # plane floor points along y≈-0.26 for x 0.3-0.7 in near_cloud_raw.npz);
     # y_max 0.40 is the conservative FOV-verified extent; x_min 0.20 is the
     # reach limit (base sits on the table); x_max 0.60 caps at reach.
+    # Env-overridable via REBOT_PLACE_BOUNDS (JSON [x_min,x_max,y_min,y_max],
+    # e.g. '[0.20,0.60,-0.26,0.40]'): a table re-calibration is applied by
+    # recreating the container with the env var set — no image rebuild needed
+    # (this default is baked into the image).
     place_bounds: [0.20, 0.60, -0.26, 0.40]
     place_margin_m: 0.05
     # Safety: never open the jaw to the SDK full 0.09m during pre-grasp,
