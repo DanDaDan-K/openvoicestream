@@ -30,11 +30,16 @@ leaves:
     artifacts:
       repo: harvestsu/qwen3-edgellm-jetson-artifacts
       files:
-        - engines/orin-nx/highperf-v2/asr_thinker_full_fp8embed
-        - engines/orin-nx/highperf/asr_audio_encoder
+        # v0.8.0 engine set published under highperf-v080/ (NEVER reuse the
+        # v0.7.0 highperf/ + highperf-v2/ paths — production seeed-voice's flat
+        # profile pulls v0.7.0 from those via the manifest set and would break).
+        # asr_audio_encoder here is the MINCHUNK1 build (opt-profile min-dim 1);
+        # the min-10 build rejects the batch=1 prewarm. See leaf memory.
+        - engines/orin-nx/highperf-v080/asr_thinker_full_fp8embed
+        - engines/orin-nx/highperf-v080/asr_audio_encoder
     runtime_env:
-      EDGE_LLM_ASR_ENGINE_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v2/asr_thinker_full_fp8embed
-      EDGE_LLM_ASR_AUDIO_ENC_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf/asr_audio_encoder
+      EDGE_LLM_ASR_ENGINE_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v080/asr_thinker_full_fp8embed
+      EDGE_LLM_ASR_AUDIO_ENC_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v080/asr_audio_encoder
     resources:
       # DELTA over idle baseline (measured orin-nx 2026-06-12): absolute peak
       # ~6086 MB minus ~4420 MB idle baseline = ~1666 MB incremental footprint.
@@ -50,11 +55,16 @@ leaves:
     artifacts:
       repo: harvestsu/qwen3-edgellm-jetson-artifacts
       files:
-        - engines/orin-nx/highperf-v2/asr_thinker_full_fp8embed
-        - engines/orin-nx/highperf/asr_audio_encoder
+        # v0.8.0 engine set published under highperf-v080/ (NEVER reuse the
+        # v0.7.0 highperf/ + highperf-v2/ paths — production seeed-voice's flat
+        # profile pulls v0.7.0 from those via the manifest set and would break).
+        # asr_audio_encoder here is the MINCHUNK1 build (opt-profile min-dim 1);
+        # the min-10 build rejects the batch=1 prewarm. See leaf memory.
+        - engines/orin-nx/highperf-v080/asr_thinker_full_fp8embed
+        - engines/orin-nx/highperf-v080/asr_audio_encoder
     runtime_env:
-      EDGE_LLM_ASR_ENGINE_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v2/asr_thinker_full_fp8embed
-      EDGE_LLM_ASR_AUDIO_ENC_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf/asr_audio_encoder
+      EDGE_LLM_ASR_ENGINE_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v080/asr_thinker_full_fp8embed
+      EDGE_LLM_ASR_AUDIO_ENC_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v080/asr_audio_encoder
     resources:
       # DELTA over idle baseline (measured orin-nx 2026-06-12): absolute peak
       # ~6335 MB minus ~4420 MB idle baseline = ~1925 MB incremental footprint.

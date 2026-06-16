@@ -212,7 +212,7 @@ def test_env_var_expansion(registry):
         overrides={"QWEN3_ARTIFACT_ROOT": "/opt/models/qwen3-edgellm"},
     )
     assert env["EDGE_LLM_ASR_ENGINE_DIR"] == (
-        "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v2/"
+        "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v080/"
         "asr_thinker_full_fp8embed"
     )
 

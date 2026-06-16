@@ -20,20 +20,24 @@ leaves:
     model: qwen3-tts-customvoice
     artifacts:
       repo: harvestsu/qwen3-edgellm-jetson-artifacts
+      # v0.8.0 engine set under highperf-v080/ (NEVER reuse the v0.7.0 highperf/
+      # paths — prod seeed-voice depends on the v0.7.0 ones via the manifest set).
+      # code2wav is the v0.8.0 NON-stateful build (the only v0.8.0 code2wav that
+      # exists; no v0.8.0 stateful engine was ever built). STATEFUL=0 below.
+      # Proven end-to-end on orin-nx 2026-06-16 (see leaf memory winning recipe).
       files:
-        - engines/orin-nx/highperf/code_predictor/cp_dir
-        - engines/orin-nx/highperf/code2wav_stateful
+        - engines/orin-nx/highperf-v080/code_predictor/cp_dir
+        - engines/orin-nx/highperf-v080/code2wav
         - tts/tokenizer
     runtime_env:
       EDGE_LLM_TTS_TALKER_BACKEND: qwen3_tts_explicit_kv
       EDGE_LLM_TTS_CODE_PREDICTOR_BACKEND: qwen3_tts_native
       EDGE_LLM_TTS_TEXT_PROJECTION: host_fp32
       EDGE_LLM_TTS_PROMPT_KV_CACHE: "0"
-      EDGE_LLM_TTS_STATEFUL_CODE2WAV: "1"
-      EDGE_LLM_TTS_CP_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf/code_predictor/cp_dir
-      EDGE_LLM_TTS_CP_BF16_IO_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf/code_predictor/cp_dir
-      EDGE_LLM_TTS_CODE2WAV_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf/code2wav_stateful
-      EDGE_LLM_TTS_STATEFUL_CODE2WAV_ENGINE_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf/code2wav_stateful
+      EDGE_LLM_TTS_STATEFUL_CODE2WAV: "0"
+      EDGE_LLM_TTS_CP_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v080/code_predictor/cp_dir
+      EDGE_LLM_TTS_CP_BF16_IO_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v080/code_predictor/cp_dir
+      EDGE_LLM_TTS_CODE2WAV_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v080/code2wav
       EDGE_LLM_TTS_TOKENIZER_DIR: ${QWEN3_ARTIFACT_ROOT}/tts/tokenizer
 
   # --- N=1 (FP16 b1): current production behaviour ---
