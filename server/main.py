@@ -896,7 +896,12 @@ async def startup():
             "composition: %d union-pull file(s) required: %s",
             len(_composition_pull_files), _composition_pull_files,
         )
-    model_downloader.ensure_models(language_mode, model_dir)
+    if _composition_pull_files:
+        model_downloader.ensure_models(
+            language_mode, model_dir, qwen3_required_files=_composition_pull_files
+        )
+    else:
+        model_downloader.ensure_models(language_mode, model_dir)
 
     # Resolve any TRT engines declared by the active profile. Must run
     # AFTER model_downloader (ONNX inputs may be needed for fallback

@@ -9,6 +9,9 @@ Covers:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from server.core import leaf_composition as lc
@@ -230,3 +233,121 @@ def test_resolve_env_standalone_module_level(registry):
         assert "${QWEN3_ARTIFACT_ROOT}" in env["EDGE_LLM_ASR_ENGINE_DIR"]
     finally:
         os.environ.pop("QWEN3_ARTIFACT_ROOT", None)
+
+
+# ---------------------------------------------------------------------------
+# SLICE 3: composition profile end-to-end + downloader required_files override
+# ---------------------------------------------------------------------------
+
+_PROFILE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "configs" / "profiles" / "jetson-qwen3-composition-nx.json"
+)
+
+
+def _load_composition_profile() -> dict:
+    return json.loads(_PROFILE_PATH.read_text())
+
+
+def test_composition_profile_parses_and_resolves_union(registry):
+    """The new composition profile parses and apply_composition() returns the
+    de-duped union-pull list = exactly resolve_pull(asr, tts) over the leaves.
+
+    Asserts against the real registry so a leaf-id typo in the profile is caught.
+    """
+    from server.core import composition_boot as cb
+
+    profile = _load_composition_profile()
+    assert "composition" in profile
+    comp = profile["composition"]
+    assert comp["device"] == "orin-nx"
+
+    # The selected leaf ids must exist in the registry (no silent fallback).
+    asr_id = comp["asr"]
+    tts_id = comp["tts"]
+    assert asr_id in registry.leaves, asr_id
+    assert tts_id in registry.leaves, tts_id
+
+    expected = lc.resolve_pull([asr_id, tts_id], registry)
+    assert expected  # non-empty
+    assert len(expected) == len(set(expected))  # de-duped
+
+    pulls = cb.apply_composition(profile)
+    assert pulls == expected
+
+
+def test_flat_profile_no_composition_is_noop():
+    """A profile WITHOUT a composition block yields an empty pull list."""
+    from server.core import composition_boot as cb
+
+    assert cb.apply_composition({"name": "flat-profile", "env": {}}) == []
+    assert cb.apply_composition(None) == []
+
+
+# --- model_downloader required_files override --------------------------------
+
+def _write_qwen3_manifest(tmp_path: Path, required_files: list[str]) -> Path:
+    manifest = {
+        "artifact_sets": {
+            "test-set": {
+                "root": str(tmp_path / "artifacts"),
+                "required_files": required_files,
+            }
+        }
+    }
+    mp = tmp_path / "qwen3_manifest.json"
+    mp.write_text(json.dumps(manifest))
+    return mp
+
+
+def test_via_hf_uses_manifest_files_when_override_none(tmp_path, monkeypatch):
+    """Flat path (override None): the artifact_set's own required_files drive
+    the download — the override is ignored when empty."""
+    from server.core import model_downloader as md
+
+    manifest_files = ["engines/a", "engines/b"]
+    mp = _write_qwen3_manifest(tmp_path, manifest_files)
+
+    captured: dict = {}
+
+    def _fake_ensure_artifacts(missing_paths):
+        captured["paths"] = list(missing_paths)
+
+    # Patch the symbol imported INSIDE the function (it does a fresh
+    # `from server.core.qwen3_artifact_downloader import ensure_artifacts`).
+    import server.core.qwen3_artifact_downloader as qad
+    monkeypatch.setattr(qad, "ensure_artifacts", _fake_ensure_artifacts)
+    monkeypatch.setenv("OVS_AUTO_DOWNLOAD_ARTIFACTS", "1")
+
+    root = tmp_path / "artifacts"
+    md._ensure_qwen3_artifacts_via_hf(str(mp), "test-set", None)
+
+    expected = {str(root / rf) for rf in manifest_files}
+    assert set(captured["paths"]) == expected
+
+
+def test_via_hf_override_replaces_manifest_required_files(tmp_path, monkeypatch):
+    """Composition path (non-empty override): the override REPLACES the
+    artifact_set's required_files for the download set."""
+    from server.core import model_downloader as md
+
+    # Manifest declares DIFFERENT files than the override; the override wins.
+    mp = _write_qwen3_manifest(tmp_path, ["engines/manifest-only"])
+    override = ["engines/from-composition-1", "engines/from-composition-2"]
+
+    captured: dict = {}
+
+    def _fake_ensure_artifacts(missing_paths):
+        captured["paths"] = list(missing_paths)
+
+    import server.core.qwen3_artifact_downloader as qad
+    monkeypatch.setattr(qad, "ensure_artifacts", _fake_ensure_artifacts)
+    monkeypatch.setenv("OVS_AUTO_DOWNLOAD_ARTIFACTS", "1")
+
+    root = tmp_path / "artifacts"
+    md._ensure_qwen3_artifacts_via_hf(str(mp), "test-set", override)
+
+    expected = {str(root / rf) for rf in override}
+    assert set(captured["paths"]) == expected
+    # The manifest-only file must NOT have been requested.
+    assert str(root / "engines/manifest-only") not in set(captured["paths"])
