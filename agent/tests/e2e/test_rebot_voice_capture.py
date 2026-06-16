@@ -367,7 +367,11 @@ async def test_en_drop_it_down_clean_onset(test_config):
     """First-word fix (clean onset): 'drop it down' must keep the leading verb
     'drop' — not collapse to 'it down'. Live SLV ASR via the engine path."""
     cfg = _rebot_voice_config(test_config)
-    cfg = replace(cfg, asr_language="en", system_prompt="You are a robot arm voice assistant. Reply briefly.")
+    cfg = replace(
+        cfg,
+        slv_config={**cfg.slv_config, "asr_language": "en", "tts_language": "en"},
+        system_prompt="You are a robot arm voice assistant. Reply briefly.",
+    )
     audio = ScriptedAudioIO([(1500, WAV_DIR / "cmd_en_drop_down.wav")])
     async with run_agent(cfg, audio) as (app, probe):
         await _wake(app, cfg)
@@ -385,7 +389,11 @@ async def test_en_drop_it_down_low_onset_preroll(test_config):
     below the gate threshold. The preroll ring must replay the onset so 'drop'
     survives; the clipped-final rescue covers a single-token streaming final."""
     cfg = _rebot_voice_config(test_config)
-    cfg = replace(cfg, asr_language="en", system_prompt="You are a robot arm voice assistant. Reply briefly.")
+    cfg = replace(
+        cfg,
+        slv_config={**cfg.slv_config, "asr_language": "en", "tts_language": "en"},
+        system_prompt="You are a robot arm voice assistant. Reply briefly.",
+    )
     audio = ScriptedAudioIO([(1500, WAV_DIR / "cmd_en_drop_down_fadein.wav")])
     async with run_agent(cfg, audio) as (app, probe):
         await _wake(app, cfg)
@@ -404,7 +412,11 @@ async def test_en_please_drop_it_down_control(test_config):
     lands. This is the case that ALREADY worked — guards against a regression in
     the normal multi-token fast path (no offline rescue expected)."""
     cfg = _rebot_voice_config(test_config)
-    cfg = replace(cfg, asr_language="en", system_prompt="You are a robot arm voice assistant. Reply briefly.")
+    cfg = replace(
+        cfg,
+        slv_config={**cfg.slv_config, "asr_language": "en", "tts_language": "en"},
+        system_prompt="You are a robot arm voice assistant. Reply briefly.",
+    )
     audio = ScriptedAudioIO([(1500, WAV_DIR / "cmd_en_please_drop_down.wav")])
     async with run_agent(cfg, audio) as (app, probe):
         await _wake(app, cfg)
