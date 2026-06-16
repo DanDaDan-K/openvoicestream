@@ -48,8 +48,22 @@ leaves:
       - tts.qwen3_tts.shared
     artifacts:
       repo: harvestsu/qwen3-edgellm-jetson-artifacts
+      # The explicit_kv talker backend (voxedge trt_edge_llm_tts.py preload)
+      # requires BOTH the explicit engine (EDGE_LLM_TTS_TALKER_ENGINE) AND the
+      # talker dir (EDGE_LLM_TTS_TALKER_DIR) populated with config.json +
+      # llm.engine + the embedding/projection safetensors + tokenizer. Listing
+      # only the engine made the union-pull fetch the engine but not the dir,
+      # so boot fell back to a manual download. List the full dir contents.
       files:
         - engines/orin-nx/highperf/talker_fp16_kv1024/talker_decode.engine
+        - tts/talker_kv1024/config.json
+        - tts/talker_kv1024/llm.engine
+        - tts/talker_kv1024/embedding.safetensors
+        - tts/talker_kv1024/text_embedding.safetensors
+        - tts/talker_kv1024/text_projection.safetensors
+        - tts/talker_kv1024/tokenizer.json
+        - tts/talker_kv1024/tokenizer_config.json
+        - tts/talker_kv1024/processed_chat_template.json
     runtime_env:
       EDGE_LLM_TTS_TALKER_DIR: ${QWEN3_ARTIFACT_ROOT}/tts/talker_kv1024
       EDGE_LLM_TTS_TALKER_ENGINE: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf/talker_fp16_kv1024/talker_decode.engine
