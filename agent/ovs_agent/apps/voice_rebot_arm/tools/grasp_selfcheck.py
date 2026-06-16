@@ -38,12 +38,34 @@ import numpy as np
 
 
 def _grasp_cfg() -> dict:
-    """The metadata.grasp block resolved with container-default paths."""
+    """The metadata.grasp block resolved with container-default paths.
+
+    Mirrors the env contract the GraspPlugin reads so this tool exercises the
+    SAME detector as production. In particular the vocab-decoupled ("embin")
+    detector: set REBOT_GRASP_MODEL → the embin engine and REBOT_TEXT_ENCODER →
+    the text-PE encoder, and the box vocab via REBOT_GRASP_CLASSES (JSON list).
+    Without REBOT_TEXT_ENCODER this stays on the legacy baked-vocab engine
+    (whose close-up jaw-width estimate is unreliable — so embin is what a real
+    pick validation needs).
+    """
+    classes_env = os.environ.get("REBOT_GRASP_CLASSES")
+    classes = ["box", "cardboard box", "carton", "package"]
+    if classes_env:
+        try:
+            parsed = json.loads(classes_env)
+            if isinstance(parsed, list) and parsed:
+                classes = [str(c) for c in parsed]
+        except (ValueError, TypeError):
+            pass
     return {
         "yolo_model_path": os.environ.get(
             "REBOT_GRASP_MODEL", "/opt/rebot-models/yoloe-26s-seg-box.onnx"
         ),
-        "yolo_classes": ["box", "cardboard box", "carton", "package"],
+        "yolo_classes": classes,
+        # embin (vocab-decoupled) detector — empty text_encoder ⇒ legacy baked
+        # engine, byte-identical to before.
+        "text_encoder_path": os.environ.get("REBOT_TEXT_ENCODER", ""),
+        "embin_pad_slots": int(os.environ.get("REBOT_EMBIN_PAD_SLOTS", "16")),
         "onnx_providers": ["CPUExecutionProvider"],
         "camera": {
             "type": "orbbec_gemini2",
@@ -57,6 +79,38 @@ def _grasp_cfg() -> dict:
         "open_distance_m": float(os.environ.get("REBOT_GRASP_OPEN_DIST", "0.06")),
         "grasp_force": float(os.environ.get("REBOT_GRASP_FORCE", "0.30")),
     }
+
+
+def _make_segmenter(gcfg: dict, log=None):
+    """Build the detector EXACTLY as the GraspPlugin does, so both self-check
+    tools exercise the production path. With REBOT_TEXT_ENCODER set this is the
+    vocab-decoupled ("embin") engine: encode the live yolo_classes to text-PE
+    rows and feed them as class_embeddings (the engine carries no baked head).
+    Without it, the legacy baked-vocab engine (byte-identical to before).
+    """
+    from ovs_agent.apps.voice_rebot_arm.perception.yolo_onnx import YoloOnnxSegmenter
+
+    if log is not None:
+        log.info("loading segmenter %s", gcfg["yolo_model_path"])
+    seg_kwargs: dict = {"providers": tuple(gcfg["onnx_providers"])}
+    if gcfg.get("text_encoder_path"):
+        from ovs_agent.apps.voice_rebot_arm.perception.text_pe import (
+            TextPromptEncoder,
+        )
+
+        encoder = TextPromptEncoder(
+            gcfg["text_encoder_path"], pad_slots=int(gcfg["embin_pad_slots"])
+        )
+        seg_kwargs["class_embeddings"] = encoder.encode(list(gcfg["yolo_classes"]))
+        seg_kwargs["active_n"] = encoder.active_n
+        if log is not None:
+            log.info(
+                "embin mode — %d class embeddings from %s",
+                encoder.active_n, gcfg["text_encoder_path"],
+            )
+    return YoloOnnxSegmenter(
+        gcfg["yolo_model_path"], list(gcfg["yolo_classes"]), **seg_kwargs
+    )
 
 
 def _actuator_cfg() -> dict:
@@ -140,12 +194,7 @@ def main() -> int:
         select_best_grasp,
     )
 
-    log.info("loading segmenter %s", gcfg["yolo_model_path"])
-    seg = YoloOnnxSegmenter(
-        gcfg["yolo_model_path"],
-        list(gcfg["yolo_classes"]),
-        providers=tuple(gcfg["onnx_providers"]),
-    )
+    seg = _make_segmenter(gcfg, log)
     log.info("opening camera %s", gcfg["camera"]["type"])
     cam = make_camera({"camera": dict(gcfg["camera"])})
     cam.open()

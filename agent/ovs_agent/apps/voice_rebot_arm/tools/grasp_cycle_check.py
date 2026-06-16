@@ -26,6 +26,7 @@ from ovs_agent.apps.voice_rebot_arm.tools.grasp_selfcheck import (  # noqa: E402
     _actuator_cfg,
     _grasp_cfg,
     _load_hand_eye,
+    _make_segmenter,
     _prime_camera,
 )
 
@@ -61,7 +62,6 @@ def main() -> int:
     log = logging.getLogger("grasp_cycle")
     gcfg = _grasp_cfg()
 
-    from ovs_agent.apps.voice_rebot_arm.perception.yolo_onnx import YoloOnnxSegmenter
     from ovs_agent.apps.voice_rebot_arm.perception.camera import make_camera
     from ovs_agent.apps.voice_rebot_arm.grasp_service import (
         run_grasp_once,
@@ -69,10 +69,7 @@ def main() -> int:
     )
     from ovs_agent.apps.voice_rebot_arm.rebot_actuator import _make_rebot_arm
 
-    seg = YoloOnnxSegmenter(
-        gcfg["yolo_model_path"], list(gcfg["yolo_classes"]),
-        providers=tuple(gcfg["onnx_providers"]),
-    )
+    seg = _make_segmenter(gcfg, log)
     cam = make_camera({"camera": dict(gcfg["camera"])})
     cam.open()
     _prime_camera(cam, log)
