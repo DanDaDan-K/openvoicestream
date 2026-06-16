@@ -3086,6 +3086,7 @@ async def _v2v_stream_via_engine(
         multi_utterance=multi_utterance,
         timeouts=timeouts,
         silence_ms=vad_silence_ms,
+        vad_preroll_ms=_vad_preroll_ms(),
         asr_language=asr_language or "auto",
         tts_language=tts_language_norm,
         coordinator=engine_coord,

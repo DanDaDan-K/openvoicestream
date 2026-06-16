@@ -42,7 +42,19 @@ _REBOT_CMDS = [
 # Fade-in variants: linearly ramp the first 300ms so the onset sits BELOW the
 # energy-gate threshold — the only way to exercise the P0 pre-roll recovery
 # (clean `say` output starts loud and never trips the gate-truncation bug).
-_FADEIN = [("cmd_grab_box", 300), ("cmd_put_back_full", 300)]
+_FADEIN = [("cmd_grab_box", 300), ("cmd_put_back_full", 300),
+           ("cmd_en_drop_down", 200)]
+
+# English commands (macOS `say -v Samantha`; committed for non-macOS CI). These
+# exercise the FIRST-WORD-DROP regression on space-delimited speech: the Silero
+# onset clip + the streaming worker's single-token hold both drop the leading
+# verb ("drop it down" → "it down" / just "drop"), which the dispatcher preroll
+# ring + the clipped-final offline rescue (voxedge 2026-06-15) must recover.
+# (wav stem, full text, required substring after normalize()).
+_REBOT_EN_CMDS = [
+    ("cmd_en_drop_down", "drop it down", "drop"),
+    ("cmd_en_please_drop_down", "please drop it down", "drop"),
+]
 
 # Natural-voice corpus synthesised on orin-nano (Qwen3 TRT TTS, 24kHz — the
 # e2e loader auto-resamples to 16k). Committed WAVs; no `say` dependency. More
@@ -72,6 +84,17 @@ def _ensure_rebot_wavs() -> None:
             raise RuntimeError(f"{out.name} missing and `say` unavailable; commit fixtures.")
         subprocess.run(
             ["say", "-v", "Tingting", text, "-o", str(out),
+             "--data-format=LEI16@16000", "--file-format=WAVE"],
+            check=True, capture_output=True,
+        )
+    for name, text, _need in _REBOT_EN_CMDS:
+        out = WAV_DIR / f"{name}.wav"
+        if out.exists() and out.stat().st_size > 0:
+            continue
+        if not have_say:
+            raise RuntimeError(f"{out.name} missing and `say` unavailable; commit fixtures.")
+        subprocess.run(
+            ["say", "-v", "Samantha", text, "-o", str(out),
              "--data-format=LEI16@16000", "--file-format=WAVE"],
             check=True, capture_output=True,
         )
@@ -128,6 +151,13 @@ def _last_user_text(app) -> str:
         if msg.get("role") == "user":
             return str(msg.get("content") or "")
     return ""
+
+
+def _normalize(text: str) -> str:
+    """Lower-case + strip punctuation so substring checks ignore ASR casing /
+    trailing periods ('Drop it down.' → 'drop it down')."""
+    import re
+    return re.sub(r"[^\w\s]", "", str(text or "")).lower().strip()
 
 
 @pytest.mark.asyncio
@@ -321,3 +351,66 @@ async def test_qwen_corpus_asr_accuracy(test_config, wav, must_contain):
         text = _last_user_text(app)
         print(f"\n[qwen asr {wav}] = {text!r}  (need {must_contain!r})")
         assert must_contain in text, f"{wav}: got {text!r}, missing {must_contain!r}"
+
+
+# ── English first-word-drop regression (needs orin-nx live; code only) ─────────
+# These exercise the 2026-06-15 voxedge fixes against the LIVE SLV ASR:
+#   * dispatcher preroll ring  → the Silero-clipped onset reaches the stream
+#   * clipped-final offline rescue → a single-token streaming final ("drop") on
+#     a multi-word utterance is re-transcribed offline into the full command.
+# The leading verb "drop" is the canary: if it's missing, the onset was lost.
+# Mark needs-device — they only RUN on orin-nx:8621 (no-op on CI without it).
+
+
+@pytest.mark.asyncio
+async def test_en_drop_it_down_clean_onset(test_config):
+    """First-word fix (clean onset): 'drop it down' must keep the leading verb
+    'drop' — not collapse to 'it down'. Live SLV ASR via the engine path."""
+    cfg = _rebot_voice_config(test_config)
+    cfg = replace(cfg, asr_language="en", system_prompt="You are a robot arm voice assistant. Reply briefly.")
+    audio = ScriptedAudioIO([(1500, WAV_DIR / "cmd_en_drop_down.wav")])
+    async with run_agent(cfg, audio) as (app, probe):
+        await _wake(app, cfg)
+        await probe.wait_event("on_wake", timeout=5)
+        await probe.wait_event("on_user_utterance", timeout=25)
+        text = _normalize(_last_user_text(app))
+        print(f"\n[en clean] ASR final = {text!r}")
+        assert text, "empty/clipped final — no response (offline rescue should fire)"
+        assert "drop" in text, f"FIRST WORD LOST — 'drop' missing: {text!r}"
+
+
+@pytest.mark.asyncio
+async def test_en_drop_it_down_low_onset_preroll(test_config):
+    """First-word fix (faded onset): 'drop it down' with the first 200ms ramped
+    below the gate threshold. The preroll ring must replay the onset so 'drop'
+    survives; the clipped-final rescue covers a single-token streaming final."""
+    cfg = _rebot_voice_config(test_config)
+    cfg = replace(cfg, asr_language="en", system_prompt="You are a robot arm voice assistant. Reply briefly.")
+    audio = ScriptedAudioIO([(1500, WAV_DIR / "cmd_en_drop_down_fadein.wav")])
+    async with run_agent(cfg, audio) as (app, probe):
+        await _wake(app, cfg)
+        await probe.wait_event("on_wake", timeout=5)
+        await probe.wait_event("on_user_utterance", timeout=25)
+        text = _normalize(_last_user_text(app))
+        print(f"\n[en low onset + preroll] ASR final = {text!r}")
+        assert text, "empty/clipped final — no response (offline rescue should fire)"
+        assert "drop" in text, f"ONSET LOST — preroll did not recover 'drop': {text!r}"
+
+
+@pytest.mark.asyncio
+async def test_en_please_drop_it_down_control(test_config):
+    """Control: 'please drop it down' has a non-verb leading word ('please'), so
+    even with the onset clipped the worker commits multiple tokens and 'drop'
+    lands. This is the case that ALREADY worked — guards against a regression in
+    the normal multi-token fast path (no offline rescue expected)."""
+    cfg = _rebot_voice_config(test_config)
+    cfg = replace(cfg, asr_language="en", system_prompt="You are a robot arm voice assistant. Reply briefly.")
+    audio = ScriptedAudioIO([(1500, WAV_DIR / "cmd_en_please_drop_down.wav")])
+    async with run_agent(cfg, audio) as (app, probe):
+        await _wake(app, cfg)
+        await probe.wait_event("on_wake", timeout=5)
+        await probe.wait_event("on_user_utterance", timeout=25)
+        text = _normalize(_last_user_text(app))
+        print(f"\n[en control] ASR final = {text!r}")
+        assert text, "empty final on the control case — unexpected"
+        assert "drop" in text, f"control regressed — 'drop' missing: {text!r}"
