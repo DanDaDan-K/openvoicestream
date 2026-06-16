@@ -375,6 +375,10 @@ QWEN3_ASR_RK_3576_W4A16 = "asr.qwen3_asr_rk.rk3576.w4a16g128"
 QWEN3_ASR_RK_3588_W8A8 = "asr.qwen3_asr_rk.rk3588.w8a8"
 PARAFORMER_RKNN_3576 = "asr.paraformer_rknn.rk3576.hybrid"
 PARAFORMER_RKNN_3588 = "asr.paraformer_rknn.rk3588.hybrid"
+PARAFORMER_RKNN_3576_FULL = "asr.paraformer_rknn.rk3576.full"
+PARAFORMER_SHERPA_RPI5 = "asr.paraformer_sherpa.rpi5.n4"
+PARAFORMER_SHERPA_RPI4 = "asr.paraformer_sherpa.rpi4.n4"
+PARAFORMER_SHERPA_MAC = "asr.paraformer_sherpa.mac.n4"
 
 # TTS
 MATCHA_TRT = "tts.matcha_trt.orin.n2"
@@ -394,7 +398,8 @@ _ALL_NEW_LEAVES = [
     SENSEVOICE_TRT, SENSEVOICE_RKNN_3576, SENSEVOICE_RKNN_3588,
     SENSEVOICE_SHERPA_RPI5, SENSEVOICE_SHARED,
     QWEN3_ASR_RK_3576_W8A8, QWEN3_ASR_RK_3576_W4A16, QWEN3_ASR_RK_3588_W8A8,
-    PARAFORMER_RKNN_3576, PARAFORMER_RKNN_3588,
+    PARAFORMER_RKNN_3576, PARAFORMER_RKNN_3588, PARAFORMER_RKNN_3576_FULL,
+    PARAFORMER_SHERPA_RPI4, PARAFORMER_SHERPA_RPI5, PARAFORMER_SHERPA_MAC,
     MATCHA_TRT, MATCHA_SHERPA_RPI5, MATCHA_RKNN_3576, MATCHA_RKNN_3588,
     MATCHA_SHARED,
     KOKORO_TRT_PERF, KOKORO_TRT_QUALITY, KOKORO_TRT_LONG, KOKORO_RKNN_3588,
@@ -434,6 +439,8 @@ def test_new_models_present(registry):
     (QWEN3_ASR_RK_3576_W4A16, "decoder_qwen3.w4a16_g128.rk3576.rkllm"),
     (QWEN3_ASR_RK_3588_W8A8, "qwen3_asr_encoder_merged.fp16.15s.rk3588.rknn"),
     (PARAFORMER_RKNN_3576, "encoder_prefix_to_block30.400.fp16.rknn"),
+    (PARAFORMER_RKNN_3576_FULL, "rknn/rk3576/encoder.400.fp16.rknn"),
+    (PARAFORMER_SHERPA_RPI5, "paraformer-streaming/encoder.onnx"),
     (MATCHA_TRT, "vocos_fp16.engine"),
     (MATCHA_RKNN_3588, "matcha-s64.rknn"),
     (KOKORO_TRT_PERF, "kokoro_prefix_encoder_dyn4_128_fp16.engine"),
@@ -467,6 +474,34 @@ def test_paraformer_rknn_all_buckets_listed(registry):
     assert any("decoder.400x40.fp16.rknn" in f for f in files)
 
 
+def test_paraformer_rknn_full_buckets_and_no_hybrid_suffix(registry):
+    # FULL encoder mode: full-encoder buckets {40,80,160,400} + RKNN decoder,
+    # and NONE of the hybrid-only artifacts (prefix buckets / encoder suffix ONNX
+    # / decoder-rknn.onnx).
+    files = lc.resolve_pull([PARAFORMER_RKNN_3576_FULL], registry)
+    for bucket in ("40", "80", "160", "400"):
+        needle = f"rknn/rk3576/encoder.{bucket}.fp16.rknn"
+        assert any(needle in f for f in files), bucket
+    assert any("rknn/rk3576/decoder.400x40.fp16.rknn" in f for f in files)
+    assert any("opt/asr/paraformer/tokens.txt" in f for f in files)
+    # full mode must NOT carry the hybrid prefix/suffix artifacts
+    assert not any("encoder_prefix_to_block30" in f for f in files)
+    assert not any("encoder_suffix_from_block30.onnx" in f for f in files)
+    assert not any("decoder-rknn.onnx" in f for f in files)
+
+
+def test_paraformer_sherpa_pulls_shared_cdn_model(registry):
+    # CPU sherpa reuses the SAME paraformer-streaming CDN model (encoder.onnx +
+    # tokens.txt) via the asr.paraformer.shared sub-leaf; NO TRT .plan engines.
+    for leaf_id in (PARAFORMER_SHERPA_RPI4, PARAFORMER_SHERPA_RPI5,
+                    PARAFORMER_SHERPA_MAC):
+        files = lc.resolve_pull([leaf_id], registry)
+        assert files, leaf_id
+        assert "paraformer-streaming/encoder.onnx" in files, leaf_id
+        assert "paraformer-streaming/tokens.txt" in files, leaf_id
+        assert not any(".plan" in f for f in files), leaf_id
+
+
 # --- precision resolution for the new models ------------------------------
 
 def test_sensevoice_precision_by_class(registry):
@@ -498,6 +533,25 @@ def test_compose_sensevoice_matcha_sherpa_on_rpi5(registry):
     plan = lc.validate_composition(
         "rpi5", [SENSEVOICE_SHERPA_RPI5, MATCHA_SHERPA_RPI5], registry)
     assert set(plan.leaf_ids) == {SENSEVOICE_SHERPA_RPI5, MATCHA_SHERPA_RPI5}
+    assert plan.peak_unified_mb <= plan.headroom_mb
+
+
+def test_compose_paraformer_sherpa_matcha_sherpa_on_rpi5(registry):
+    # The DEFAULT streaming-ASR + TTS pairing on RPi5: both cpu.* (same family),
+    # both small CPU footprints → composes within the rpi5 budget.
+    plan = lc.validate_composition(
+        "rpi5", [PARAFORMER_SHERPA_RPI5, MATCHA_SHERPA_RPI5], registry)
+    assert set(plan.leaf_ids) == {PARAFORMER_SHERPA_RPI5, MATCHA_SHERPA_RPI5}
+    assert plan.peak_unified_mb <= plan.headroom_mb
+
+
+def test_compose_paraformer_rknn_full_matcha_rknn_on_rk3576(registry):
+    # FULL-encoder RKNN ASR + Matcha RKNN TTS: both rk.* (LANGUAGE_MODE=rk) and
+    # both exclusive:npu → needs admission=serial (mirrors the hybrid case).
+    plan = lc.validate_composition(
+        "rk3576", [PARAFORMER_RKNN_3576_FULL, MATCHA_RKNN_3576], registry,
+        admission="serial")
+    assert set(plan.leaf_ids) == {PARAFORMER_RKNN_3576_FULL, MATCHA_RKNN_3576}
     assert plan.peak_unified_mb <= plan.headroom_mb
 
 

@@ -180,6 +180,65 @@ leaves:
       exclusive: npu
       peak_unified_mb: 1800  # TBD-measure (placeholder)
 
+  # --- RK3576 Paraformer FULL encoder mode (experimental A/B vs hybrid) ---
+  # ENCODER_MODE=full: the whole encoder runs on the NPU as bucketed full-encoder
+  # RKNNs (encoder.{frames}.fp16.rknn — glob "encoder.*.rknn" in the backend,
+  # rkvoice_stream/backends/asr/paraformer_rknn.py:_load_full_encoder), NOT the
+  # hybrid prefix-to-block30 buckets + CPU/ONNX encoder suffix. So there is NO
+  # encoder_suffix_from_block30.onnx and NO decoder-rknn.onnx here — only the
+  # full-encoder buckets + the RKNN decoder + tokens (decoder/tokens are the same
+  # artifacts the hybrid leaf uses).
+  #
+  # File list source of truth: docs/perf/paraformer-rk3576-streaming-ab-20260608.md
+  # lines 72-73 — the rk3576-paraformer-full-rknn-matcha profile "successfully
+  # loaded full encoder buckets encoder.{40,80,160,400}.fp16.rknn and RKNN
+  # decoder". Bucket set is {40,80,160,400} (NOT the hybrid 40/80/160/240/400).
+  # Decoder filename = decoder.400x40.fp16.rknn (DEC_MAX_ENC_FRAMES x DEC_MAX_TOKENS,
+  # same as hybrid). Env from configs/profiles/rk3576-paraformer-full-rknn-matcha.json.
+  #
+  # repo "": these full-encoder RKNNs are NOT in deploy/artifacts/rk_manifest.json
+  # (the manifest only carries the *hybrid* paraformer sets). They are an
+  # experimental artifact set, generated/validated ad-hoc on cat-remote.
+  # TODO: this full-encoder RKNN is documented as NOT safe to use on RK3576
+  #   without reconversion/graph repair (same AB doc lines 74-78: warmup produced
+  #   invalid output; a 40-frame probe showed non-finite values inside real audio
+  #   frames). When a packaged, repaired full-encoder set ships, add it to
+  #   rk_manifest.json (with sha256/size) and switch repo "" → the RK artifacts
+  #   repo, mirroring the hybrid leaf.
+  asr.paraformer_rknn.rk3576.full:
+    capability: asr
+    backend: rk.paraformer_rknn
+    device: rk3576
+    concurrency: 1
+    model: paraformer-streaming
+    artifacts:
+      repo: ""  # experimental full-encoder set; not in rk_manifest.json (see TODO)
+      files:
+        - opt/asr/paraformer/tokens.txt
+        - opt/asr/paraformer/rknn/rk3576/encoder.40.fp16.rknn
+        - opt/asr/paraformer/rknn/rk3576/encoder.80.fp16.rknn
+        - opt/asr/paraformer/rknn/rk3576/encoder.160.fp16.rknn
+        - opt/asr/paraformer/rknn/rk3576/encoder.400.fp16.rknn
+        - opt/asr/paraformer/rknn/rk3576/decoder.400x40.fp16.rknn
+    runtime_env:
+      LANGUAGE_MODE: rk
+      RK_PLATFORM: rk3576
+      ASR_BACKEND: paraformer_rknn
+      PARAFORMER_MODEL_DIR: /opt/asr/paraformer
+      PARAFORMER_RKNN_DIR: /opt/asr/paraformer/rknn/rk3576
+      PARAFORMER_RKNN_ENCODER_MODE: full
+      PARAFORMER_RKNN_DECODER: rknn
+      PARAFORMER_RKNN_ENC_PRECISION: fp16
+      PARAFORMER_RKNN_DEC_PRECISION: fp16
+      PARAFORMER_FBANK_CMVN: none
+      PARAFORMER_STREAM_DECODE: batch_final
+      PARAFORMER_STREAM_PROCESS_SEC: "2.0"
+      PARAFORMER_RKNN_ENC_CORE: NPU_CORE_1
+      PARAFORMER_RKNN_DEC_CORE: NPU_CORE_2
+    resources:
+      exclusive: npu
+      peak_unified_mb: 1800  # TBD-measure (placeholder; similar to hybrid)
+
   # --- RK3588 Paraformer hybrid ---
   asr.paraformer_rknn.rk3588.hybrid:
     capability: asr

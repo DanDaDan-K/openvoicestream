@@ -71,3 +71,71 @@ leaves:
       # MUST be replaced with a measured delta-over-baseline before trusting the
       # validator memory math for compositions that include this leaf.
       peak_unified_mb: 2000
+
+  # --- sherpa-onnx CPU (RPi4 / RPi5 / Mac); n4 shared CPU recognizer ---
+  # The DEFAULT streaming ASR on RPi/Mac. Uses the SAME paraformer-streaming
+  # model (encoder.onnx + tokens.txt from the Seeed CDN tarball — see
+  # asr.paraformer.shared) but via sherpa-onnx on CPU: NO TRT .plan engines are
+  # built or listed, the encoder ONNX is run directly by sherpa-onnx.
+  #
+  # Env from the flat profiles (rpi4-asr-zh-en.json / rpi4-default.json /
+  # rpi5-default.json / mac-cpu-sherpa.json): ASR_BACKEND=sherpa +
+  # STREAMING_ASR_PROVIDER=cpu + STREAMING_ASR_NUM_THREADS. LANGUAGE_MODE=zh_en
+  # (this is the CPU zh+en path — NOT the rk family). Backend family: cpu.* →
+  # composes only with other cpu.* leaves (e.g. matcha_sherpa); the validator's
+  # family-coupling check rejects pairing with a jetson.* / rk.* leaf.
+  #
+  # N=4 mirrors asr.sensevoice_sherpa.* (a shared CPU recognizer across sessions;
+  # N=1..4 resolve to identical files).
+  asr.paraformer_sherpa.rpi4.n4:
+    capability: asr
+    backend: cpu.sherpa_asr
+    device: rpi4
+    concurrency: 4
+    model: paraformer-streaming
+    requires:
+      - asr.paraformer.shared
+    runtime_env:
+      LANGUAGE_MODE: zh_en
+      ASR_BACKEND: sherpa
+      STREAMING_ASR_PROVIDER: cpu
+      STREAMING_ASR_NUM_THREADS: "2"  # rpi4-asr-zh-en.json (4 cores, leave headroom)
+      PARAFORMER_MODEL_DIR: ${MODEL_DIR}/paraformer-streaming
+    resources:
+      # TBD-measure: CPU sherpa paraformer-streaming, small footprint
+      # (~400-800 MB on RPi/Mac). Placeholder — replace with a measured delta.
+      peak_unified_mb: 600
+
+  asr.paraformer_sherpa.rpi5.n4:
+    capability: asr
+    backend: cpu.sherpa_asr
+    device: rpi5
+    concurrency: 4
+    model: paraformer-streaming
+    requires:
+      - asr.paraformer.shared
+    runtime_env:
+      LANGUAGE_MODE: zh_en
+      ASR_BACKEND: sherpa
+      STREAMING_ASR_PROVIDER: cpu
+      STREAMING_ASR_NUM_THREADS: "2"
+      PARAFORMER_MODEL_DIR: ${MODEL_DIR}/paraformer-streaming
+    resources:
+      peak_unified_mb: 600  # TBD-measure (placeholder; CPU sherpa)
+
+  asr.paraformer_sherpa.mac.n4:
+    capability: asr
+    backend: cpu.sherpa_asr
+    device: mac-cpu
+    concurrency: 4
+    model: paraformer-streaming
+    requires:
+      - asr.paraformer.shared
+    runtime_env:
+      LANGUAGE_MODE: zh_en
+      ASR_BACKEND: sherpa
+      STREAMING_ASR_PROVIDER: cpu
+      STREAMING_ASR_NUM_THREADS: "2"
+      PARAFORMER_MODEL_DIR: ${MODEL_DIR}/paraformer-streaming
+    resources:
+      peak_unified_mb: 600  # TBD-measure (placeholder)
