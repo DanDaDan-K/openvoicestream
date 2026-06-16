@@ -271,6 +271,55 @@ def test_jaw_faces_box_short_axis_moderate_yaw(_rig):
     )
 
 
+def test_insertion_offset_decoupled_from_orientation_reaim(_rig):
+    """The insertion/pregrasp TRANSLATION must run along the camera→object ray,
+    NOT the (re-aimed) tool-X — otherwise re-aiming the approach azimuth to face
+    an angled box drags the jaw centre ~1cm sideways and it stops enclosing the
+    object (real machine 2026-06-16). With ``offset_axis_cam`` the landing point
+    is invariant to the orientation re-aim.
+    """
+    from ovs_agent.apps.voice_rebot_arm.perception.transforms import (
+        transform_grasp_pose_to_base,
+    )
+
+    T, K = _rig
+    up = up_hint_from_extrinsic(T)
+    insertion = 0.025
+    for yaw in (0, 30, 45, 60):
+        g = _grasp((0.11, 0.06, 0.07), yaw, (0.45, 0.0), 0, T, K, up)
+        assert g is not None and g.is_valid
+        # default (offset along tool-X): position rotates with the re-aim.
+        g_toolx, _ = transform_grasp_pose_to_base(
+            g.position, g.tcp_rotation, np.asarray(T, float), 0.08,
+            insertion_depth_m=insertion,
+        )
+        # camera→object ray: position pinned to the un-re-aimed direction.
+        g_ray, _ = transform_grasp_pose_to_base(
+            g.position, g.tcp_rotation, np.asarray(T, float), 0.08,
+            insertion_depth_m=insertion, offset_axis_cam=g.position,
+        )
+        # The ray-anchored landing point must sit on the camera→object ray from
+        # the bare detection point (no lateral swing). Compare against the bare
+        # (zero-insertion) base point projected along the ray.
+        surf = (np.asarray(T, float) @ np.append(np.asarray(g.position, float), 1.0))[:3]
+        ray_base = np.asarray(T, float)[:3, :3] @ (
+            np.asarray(g.position, float) / np.linalg.norm(g.position)
+        )
+        # g_ray must equal surf + ray_base * insertion (exactly).
+        expected = surf + ray_base * insertion
+        assert np.allclose(np.asarray(g_ray[:3]), expected, atol=1e-6), (
+            f"yaw={yaw}: ray-anchored grasp {g_ray[:3]} != {expected}"
+        )
+        # And for an angled box it must differ from the tool-X landing (proving
+        # the decoupling actually moved the point back).
+        if yaw >= 30:
+            lateral = float(np.hypot(g_ray[0] - g_toolx[0], g_ray[1] - g_toolx[1]))
+            assert lateral > 0.003, (
+                f"yaw={yaw}: expected the re-aim to have shifted tool-X landing "
+                f"(decoupling should restore it), got {lateral*100:.2f}cm"
+            )
+
+
 def test_in_envelope_boxes_reachable(_rig):
     """A representative in-envelope box stays reachable under noise (the fix must
     not produce a geometrically valid but unreachable pose)."""

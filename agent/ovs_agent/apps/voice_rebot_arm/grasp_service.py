@@ -401,6 +401,7 @@ def _select_reachable_grasp(
             grasp6d, pre6d = transform_grasp_pose_to_base(
                 g.position, g.tcp_rotation, T_cam2base,
                 pregrasp_offset_m, insertion_depth_m=insertion_depth_m,
+                offset_axis_cam=g.position,
             )
             reach = _grasp_is_reachable(
                 arm, pre6d, grasp6d, getattr(g, "method", "legacy")
@@ -794,6 +795,7 @@ def _grasp_attempt(
                 T_cam2base,
                 pregrasp_offset_m,
                 insertion_depth_m=insertion_depth_m,
+                offset_axis_cam=best.position,
             )
             # Minimum vertical bite for TOP grasps (real machine 2026-06-12):
             # insertion runs along the camera ray, so a FLAT viewing angle
@@ -1007,6 +1009,7 @@ def _grasp_attempt(
                     g3, _p3 = transform_grasp_pose_to_base(
                         b3.position, b3.tcp_rotation, T3, pregrasp_offset_m,
                         insertion_depth_m=insertion_depth_m,
+                        offset_axis_cam=b3.position,
                     )
                     dx = float(g3[0]) - float(grasp6d[0])
                     dy = float(g3[1]) - float(grasp6d[1])
