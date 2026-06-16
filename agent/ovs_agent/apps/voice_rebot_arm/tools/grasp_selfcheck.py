@@ -171,6 +171,9 @@ def main() -> int:
                     help="Connect+read TCP, compute base pose; arm does NOT move.")
     ap.add_argument("--search", action="store_true",
                     help="Sweep scan_poses to FIND the target + point at it (no grasp).")
+    ap.add_argument("--save-frames", default=None,
+                    help="dir to dump best color jpg + depth npy + mask + K + "
+                         "up_hint for offline geometry diagnosis (no device)")
     ap.add_argument("--frames", type=int, default=8,
                     help="Frames to scan for the best detection (detect/pose).")
     ap.add_argument("--open-dist", type=float, default=None,
@@ -236,6 +239,8 @@ def main() -> int:
             try:
                 best = None
                 best_depth = None
+                best_color = None
+                best_mask = None
                 ndet = 0
                 for _f in range(args.frames):
                     cam.warm_up(1)
@@ -250,7 +255,33 @@ def main() -> int:
                                         up_hint_cam=up_hint)
                     )
                     if cand is not None and (best is None or cand.conf > best.conf):
-                        best, best_depth = cand, depth_mm
+                        best, best_depth, best_color = cand, depth_mm, color_bgr
+                        # keep the instance mask of the best detection too, for
+                        # offline analysis of the width estimate.
+                        from ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp import (
+                            _depth_mask, _rect_points,
+                        )
+                        try:
+                            r0 = results[0]
+                            bb = tuple(int(v) for v in np.asarray(r0.boxes[0].xyxy[0])[:4])
+                            rp = _rect_points(r0, 0, depth_mm.shape, bb)
+                            best_mask = _depth_mask(r0, 0, depth_mm.shape, rp)
+                        except Exception:
+                            best_mask = None
+                # Optional: dump the real color+depth(+mask) of the best frame so
+                # the geometry can be replayed/diagnosed offline (no device).
+                if args.save_frames and best_depth is not None:
+                    import os as _os
+                    import cv2 as _cv2
+                    _os.makedirs(args.save_frames, exist_ok=True)
+                    _cv2.imwrite(f"{args.save_frames}/best_color.jpg", best_color)
+                    np.save(f"{args.save_frames}/best_depth_mm.npy", best_depth)
+                    if best_mask is not None:
+                        np.save(f"{args.save_frames}/best_mask.npy", best_mask)
+                    np.save(f"{args.save_frames}/K.npy", np.asarray(K))
+                    if up_hint is not None:
+                        np.save(f"{args.save_frames}/up_hint_cam.npy", np.asarray(up_hint))
+                    log.info("saved frames to %s", args.save_frames)
                 log.info("multi-frame: best conf=%s over %d frames",
                          None if best is None else round(float(best.conf), 3), args.frames)
                 cam_out = {
