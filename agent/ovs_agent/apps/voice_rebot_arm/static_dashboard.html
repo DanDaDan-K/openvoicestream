@@ -43,6 +43,12 @@
               white-space: nowrap; color: #10131a; }
   svg { width: 100%; background: #10131a; border-radius: 6px; }
   .muted { color: #707c8c; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px;
+           font-size: 11px; background: #2a313b; color: #8b96a5; }
+  .badge.ok { background: #1d4a2a; color: #a8f0bc; }
+  .badge.down { background: #4a1d1d; color: #f2918c; }
+  .badge.warn { background: #7a4a12; color: #ffd9a0; }
+  td.mname { font-variant-numeric: tabular-nums; color: #d8dee6; }
 </style>
 </head>
 <body>
@@ -61,6 +67,10 @@
       <div><img id="imgDepth" alt="depth"><div class="cap" data-i18n="cap_depth"></div></div>
     </div>
     <table id="detTable" style="margin-top:8px;"></table>
+  </div>
+  <div class="card">
+    <h2 data-i18n="models_card"></h2>
+    <table id="modelsTable"><tr><td class="muted" data-i18n="models_wait"></td></tr></table>
   </div>
   <div class="card">
     <h2 data-i18n="arm_card"></h2>
@@ -89,6 +99,16 @@ const I18N = {
     cam_card: "Camera — decision frame / idle viewfinder",
     cap_color: "Annotated color",
     cap_depth: "Depth (pseudo-color; black = no return)",
+    models_card: "Models — pipeline status",
+    models_wait: "Waiting for data…",
+    model_llm: "LLM",
+    model_asr: "ASR",
+    model_tts: "TTS",
+    model_slv: "SLV link",
+    st_ok: "ok",
+    st_down: "down",
+    st_reconnecting: "reconnecting",
+    st_unknown: "unknown",
     arm_card: "Arm state",
     arm_wait: "Waiting for data…",
     timeline_card: "Action timeline",
@@ -115,6 +135,16 @@ const I18N = {
     cam_card: "相机 — 决策帧 / 空闲取景",
     cap_color: "标注彩图",
     cap_depth: "深度伪彩（黑=无返回）",
+    models_card: "模型 — 流水线状态",
+    models_wait: "等待数据…",
+    model_llm: "LLM",
+    model_asr: "ASR",
+    model_tts: "TTS",
+    model_slv: "SLV 连接",
+    st_ok: "正常",
+    st_down: "断开",
+    st_reconnecting: "重连中",
+    st_unknown: "未知",
     arm_card: "机械臂状态",
     arm_wait: "等待数据…",
     timeline_card: "动作时间线",
@@ -170,6 +200,35 @@ function renderArm(arm) {
   keys.sort((a,b) => pri(a)-pri(b) || a.localeCompare(b));
   t_.innerHTML = keys.map(k =>
     `<tr><th>${k}</th><td class="num">${fmt(arm[k])}</td></tr>`).join("");
+}
+
+function badge(ok, reconnecting) {
+  // ok===true → green, reconnecting → amber, ok===false → red, null → unknown.
+  if (reconnecting) return `<span class="badge warn">${t("st_reconnecting")}</span>`;
+  if (ok === true) return `<span class="badge ok">${t("st_ok")}</span>`;
+  if (ok === false) return `<span class="badge down">${t("st_down")}</span>`;
+  return `<span class="badge">${t("st_unknown")}</span>`;
+}
+
+function renderModels(models) {
+  const t_ = $("modelsTable");
+  if (!models) {  // older backend without the models block — degrade gracefully
+    t_.innerHTML = `<tr><td class="muted">${t("models_wait")}</td></tr>`;
+    return;
+  }
+  const row = (label, nameHtml, ok, reconnecting) =>
+    `<tr><th>${label}</th><td class="mname">${nameHtml || "—"}</td>`
+    + `<td style="text-align:right">${badge(ok, reconnecting)}</td></tr>`;
+  let html = "";
+  if (models.llm) {
+    const ep = models.llm.endpoint
+      ? ` <span class="muted" style="font-size:11px">${models.llm.endpoint}</span>` : "";
+    html += row(t("model_llm"), (models.llm.name || "—") + ep, models.llm.ok);
+  }
+  if (models.asr) html += row(t("model_asr"), models.asr.name, models.asr.ok);
+  if (models.tts) html += row(t("model_tts"), models.tts.name, models.tts.ok);
+  if (models.slv) html += row(t("model_slv"), "", models.slv.ok, models.slv.reconnecting);
+  t_.innerHTML = html || `<tr><td class="muted">${t("models_wait")}</td></tr>`;
 }
 
 function renderDets(meta) {
@@ -243,6 +302,7 @@ async function tick() {
     $("busyPill").textContent = busy ? `${t("busy_prefix")}${busy}` : t("idle");
     $("busyPill").className = "pill " + (busy ? "busy" : "idle");
     renderArm(st.arm);
+    renderModels(st.models);
     renderEvents(st.events);
     renderTopdown(st.place_bounds, st.events);
     if (st.frame_seq !== lastSeq && st.frame_meta) {
