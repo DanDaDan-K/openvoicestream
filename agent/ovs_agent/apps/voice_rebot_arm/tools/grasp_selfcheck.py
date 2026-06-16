@@ -200,24 +200,30 @@ def main() -> int:
                 transform_grasp_pose_to_base,
             )
 
-            log.info("connecting arm to read live TCP pose (torque will be off for pose-only)")
+            log.info("connecting arm to read live TCP pose (no motion is commanded)")
             actuator = _make_rebot_arm(_actuator_cfg())
             actuator.connect()
             try:
-                # pose-only: we do not want the arm to move; disable torque so a
-                # stray command can't drive it. get_tcp_pose is a pure read.
-                try:
-                    actuator.set_torque(False)
-                except Exception:
-                    pass
+                # pose-only issues NO motion: get_tcp_pose / check_ik only call
+                # the SDK's _request_and_poll (state read) + FK/IK solve. They do
+                # NOT drive the arm. They DO require the joint controllers to be
+                # live, though — _request_and_poll looks each up in the SDK
+                # _ctrl_map, and set_torque(False) tears the ArmEndPos controller
+                # (and its damiao entry) down → `KeyError: 'damiao'`. So keep
+                # torque ON for the reads (connect() already energised + started
+                # the controller); disconnect() de-energises at the end.
                 tcp_pose = np.asarray(actuator.robot.get_tcp_pose(), dtype=np.float64)
                 if hand_eye is None:
                     print("RESULT", json.dumps({"pose_only": True, "error": "no hand-eye"}))
                     return 1
                 T_cam2base = tcp_pose @ hand_eye
+                # mirror production geometry: full insertion depth + the
+                # camera→object ray offset axis (decouples the insertion
+                # translation from the box-facing approach re-aim, 2026-06-16).
                 grasp6d, pre6d = transform_grasp_pose_to_base(
                     best.position, best.tcp_rotation, T_cam2base, 0.08,
-                    insertion_depth_m=0.015,
+                    insertion_depth_m=0.025,
+                    offset_axis_cam=best.position,
                 )
                 # Reachability: solve IK only (no motion) for both poses.
                 pre_ok, pre_err = actuator.robot.check_ik(*pre6d)
