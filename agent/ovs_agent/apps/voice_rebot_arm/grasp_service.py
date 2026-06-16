@@ -288,23 +288,37 @@ def _check_cancel(
 
 def _relax_orientation(arm: Any, pre6d, grasp6d):
     """IK fallback ladder for far/awkward grasps: the camera-derived approach
-    orientation (large roll/pitch) is often what makes a REACHABLE position
-    IK-infeasible ("明明拉伸出去就可以夹取，但它认为超出范围"). Keep the YAW —
-    that is the jaw's alignment with the object's short axis — and try
-    progressively flatter roll/pitch (50%, then 0). A variant is accepted
-    only when ``check_ik`` passes for BOTH the pregrasp and the grasp pose.
-    Returns ``(pre6d', grasp6d')`` or ``None`` (no feasible variant / arm has
-    no check_ik). Zero cost on the success path — only called after the
-    original orientation already failed IK.
+    orientation is often what makes a REACHABLE position IK-infeasible ("明明拉
+    伸出去就可以夹取，但它认为超出范围").
+
+    CRITICAL (2026-06-16, sim-verified): on this SIDE-grasper the jaw↔short-axis
+    ALIGNMENT lives in the ROLL, not the yaw — the forward camera-ray approach
+    means rotating the gripper to face an angled box is a roll about the
+    approach axis (yaw stays ~0; pitch is the approach STEEPNESS). The old
+    ladder flattened roll+pitch together, which DESTROYED the box alignment
+    whenever it fired ("夹爪不转头对着斜盒子"). So now: PRESERVE the roll
+    (alignment) and relax the PITCH toward the reachable band FIRST; only
+    sacrifice the roll as a last resort (a misaligned grasp beats none).
+    Yaw is always kept. A variant is accepted only when ``check_ik`` passes for
+    BOTH the pregrasp and the grasp pose. Returns ``(pre6d', grasp6d')`` or
+    ``None``. Zero cost on the success path — only called after the original
+    orientation already failed IK.
     """
     chk = getattr(arm, "check_ik", None)
     if not callable(chk):
         return None
     xp, yp, zp, pr, pp, pyaw = (float(v) for v in pre6d)
     xg, yg, zg, gr, gp, gyaw = (float(v) for v in grasp6d)
-    for scale in (0.5, 0.0):
-        cand_pre = [xp, yp, zp, pr * scale, pp * scale, pyaw]
-        cand_grasp = [xg, yg, zg, gr * scale, gp * scale, gyaw]
+    # (roll_scale, pitch_scale, label) — alignment-preserving variants first.
+    for r_scale, p_scale, label in (
+        (1.0, 0.5, "pitch 50%, roll/align KEPT"),
+        (1.0, 0.0, "pitch flat, roll/align KEPT"),
+        (0.5, 0.5, "roll+pitch 50%"),
+        (0.5, 0.0, "roll 50%, pitch flat"),
+        (0.0, 0.0, "roll+pitch flat"),
+    ):
+        cand_pre = [xp, yp, zp, pr * r_scale, pp * p_scale, pyaw]
+        cand_grasp = [xg, yg, zg, gr * r_scale, gp * p_scale, gyaw]
         try:
             ok_pre, _ = chk(*cand_pre)
             ok_grasp, _ = chk(*cand_grasp)
@@ -313,8 +327,9 @@ def _relax_orientation(arm: Any, pre6d, grasp6d):
             return None
         if ok_pre and ok_grasp:
             logger.info(
-                "grasp: relaxed roll/pitch by %.0f%% to make IK feasible "
-                "(yaw kept at %.2f)", (1 - scale) * 100, gyaw,
+                "grasp: relaxed orientation (%s) to make IK feasible "
+                "(yaw kept %.2f, roll %.2f→%.2f)",
+                label, gyaw, gr, gr * r_scale,
             )
             return cand_pre, cand_grasp
     return None

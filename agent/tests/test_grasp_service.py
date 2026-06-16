@@ -838,6 +838,29 @@ def test_orientation_ladder_relaxes_pitch_keeps_yaw():
     assert abs(new_grasp[3]) + abs(new_grasp[4]) <= 0.2  # flattened to feasible
 
 
+def test_orientation_ladder_preserves_roll_alignment_when_only_pitch_blocks():
+    """On the side-grasper the box-angle alignment is in the ROLL; when IK is
+    blocked only by approach STEEPNESS (pitch), _relax must KEEP the roll
+    (gripper still faces the angled box) and relax pitch — not flatten the roll.
+    Regression for '夹爪不转头对着斜盒子'."""
+    from ovs_agent.apps.voice_rebot_arm.grasp_service import _relax_orientation
+
+    class PitchLimitedArm:
+        """check_ik feasible for ANY roll, but only when pitch <= 0.3."""
+        def check_ik(self, x, y, z, r, p, yw):
+            return (abs(p) <= 0.3), 0.0
+
+    # Large roll = aligned to a steeply-angled box; pitch too steep to reach.
+    pre6d = [0.65, 0.0, 0.18, -0.95, 0.5, 0.0]
+    grasp6d = [0.72, 0.0, 0.15, -0.95, 0.5, 0.0]
+    out = _relax_orientation(PitchLimitedArm(), pre6d, grasp6d)
+    assert out is not None
+    _new_pre, new_grasp = out
+    assert new_grasp[3] == -0.95          # ROLL (alignment) PRESERVED, not flattened
+    assert abs(new_grasp[4]) <= 0.3       # pitch relaxed to feasible
+    assert new_grasp[5] == 0.0            # yaw kept
+
+
 def test_orientation_ladder_none_when_position_truly_unreachable():
     from ovs_agent.apps.voice_rebot_arm.grasp_service import _relax_orientation
 
