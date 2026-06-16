@@ -229,6 +229,48 @@ def test_box_noise_robustness_sweep(_rig):
     )
 
 
+def test_jaw_faces_box_short_axis_moderate_yaw(_rig):
+    """The COMMANDED jaw must actually point along the box's true short axis for
+    moderately angled boxes — the property the user reported broken ("斜着摆的
+    盒子，夹爪不转头正对它去夹").
+
+    Regression guard for the 2026-06-16 camera-tilt bias: the top-face PCA gave
+    the correct short axis, but the grasp was built with the raw forward
+    camera-ray approach, which forces the jaw into the plane ⊥ approach and
+    rotates it off the true short axis by up to ~36° (worst at intermediate
+    yaw). The stability sweep above never caught it (a stably-WRONG angle still
+    has low MAD). Here we measure the base-frame jaw-vs-short-axis error
+    directly. The fix re-aims the approach azimuth (within the reachable yaw
+    band) so the jaw aligns; for moderate yaws that the arm CAN face it must be
+    within tolerance.
+    """
+    T, K = _rig
+    up = up_hint_from_extrinsic(T)
+    R_c2b = np.asarray(T, dtype=np.float64)[:3, :3]
+    dims = (0.11, 0.06, 0.07)  # a clearly elongated box (well-determined long axis)
+    TOL_DEG = 12.0
+    failures: list[str] = []
+    for yaw in (0, 15, 30, 45):
+        th = np.radians(yaw)
+        short_base = np.array([-np.sin(th), np.cos(th), 0.0])
+        for seed in range(N_NOISE):
+            g = _grasp(dims, yaw, (0.45, 0.0), seed, T, K, up)
+            if g is None or not g.is_valid:
+                failures.append(f"yaw={yaw} seed={seed}: INVALID")
+                continue
+            # tcp_rotation col 1 = jaw open axis (camera frame) → base frame.
+            jaw_base = R_c2b @ np.asarray(g.tcp_rotation, dtype=np.float64)[:, 1]
+            jb = jaw_base[:2] / (np.linalg.norm(jaw_base[:2]) + 1e-12)
+            err = float(np.degrees(np.arccos(min(1.0, abs(float(jb @ short_base[:2]))))))
+            if err > TOL_DEG:
+                failures.append(
+                    f"yaw={yaw} seed={seed}: jaw off short axis by {err:.1f}° > {TOL_DEG}°"
+                )
+    assert not failures, (
+        f"{len(failures)} jaw-alignment failure(s):\n  " + "\n  ".join(failures[:20])
+    )
+
+
 def test_in_envelope_boxes_reachable(_rig):
     """A representative in-envelope box stays reachable under noise (the fix must
     not produce a geometrically valid but unreachable pose)."""

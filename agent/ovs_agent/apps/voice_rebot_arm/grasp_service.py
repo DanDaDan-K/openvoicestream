@@ -291,18 +291,21 @@ def _relax_orientation(arm: Any, pre6d, grasp6d):
     orientation is often what makes a REACHABLE position IK-infeasible ("明明拉
     伸出去就可以夹取，但它认为超出范围").
 
-    CRITICAL (2026-06-16, sim-verified): on this SIDE-grasper the jaw↔short-axis
-    ALIGNMENT lives in the ROLL, not the yaw — the forward camera-ray approach
-    means rotating the gripper to face an angled box is a roll about the
-    approach axis (yaw stays ~0; pitch is the approach STEEPNESS). The old
+    CRITICAL (2026-06-16, sim-verified): the jaw↔short-axis ALIGNMENT now lives
+    in the approach AZIMUTH (base YAW) for moderately angled boxes — the grasp
+    builder (`ordinary_grasp._approach_aligned_to_short_axis`) re-aims the
+    forward camera-ray azimuth along the box long axis so the gripper turns its
+    head to face the box. Near box-yaw 90 (short side pointing at the arm) that
+    re-aim is skipped/capped and the residual alignment falls back to ROLL about
+    the approach axis. So the ladder must KEEP YAW ALWAYS (that is where the
+    alignment is) and PRESERVE the ROLL first (the fallback alignment), relaxing
+    only the PITCH (approach steepness) toward the reachable band; the roll is
+    sacrificed only as a last resort (a misaligned grasp beats none). The old
     ladder flattened roll+pitch together, which DESTROYED the box alignment
-    whenever it fired ("夹爪不转头对着斜盒子"). So now: PRESERVE the roll
-    (alignment) and relax the PITCH toward the reachable band FIRST; only
-    sacrifice the roll as a last resort (a misaligned grasp beats none).
-    Yaw is always kept. A variant is accepted only when ``check_ik`` passes for
-    BOTH the pregrasp and the grasp pose. Returns ``(pre6d', grasp6d')`` or
-    ``None``. Zero cost on the success path — only called after the original
-    orientation already failed IK.
+    whenever it fired ("夹爪不转头对着斜盒子"). A variant is accepted only when
+    ``check_ik`` passes for BOTH the pregrasp and the grasp pose. Returns
+    ``(pre6d', grasp6d')`` or ``None``. Zero cost on the success path — only
+    called after the original orientation already failed IK.
     """
     chk = getattr(arm, "check_ik", None)
     if not callable(chk):

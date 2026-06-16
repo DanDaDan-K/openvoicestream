@@ -259,6 +259,12 @@ def estimate_grasp(
                 approach_s = _normalize(-c_pos)
                 if approach_s is None:
                     approach_s = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+                # Same azimuth re-aim as the top path: keep the jaw open-axis on
+                # the true horizontal face extent instead of its tilt-biased
+                # projection.
+                approach_s = _approach_aligned_to_short_axis(
+                    approach_s, horiz, np.asarray(up_hint_cam, dtype=np.float64)
+                )
                 grip_s = _normalize(np.cross(horiz, approach_s))
                 open_s = _normalize(np.cross(approach_s, grip_s))
                 if grip_s is not None and open_s is not None:
@@ -300,6 +306,21 @@ def estimate_grasp(
             approach_t = _normalize(-position_t)
             if approach_t is None:
                 approach_t = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+            # Re-aim the approach AZIMUTH along the box long axis (same pitch)
+            # so the jaw aligns with the true horizontal short axis — otherwise
+            # the forward camera-ray tilt rotates the jaw off by up to ~36° and
+            # the gripper "won't turn its head to face an angled box".
+            # GATE: only re-aim when the top face has a CLEARLY determined long
+            # axis (length distinctly > width). For a near-square projected
+            # footprint (e.g. a box at yaw≈90 viewed far/steep, where
+            # foreshortening compresses the long side) the PCA major/minor split
+            # is ambiguous and flips under noise — re-aiming along that unstable
+            # long axis would amplify the flip. There the old ⊥-approach
+            # projection (roll-encoded) is the more stable choice.
+            if length_t >= width_t * 1.15:
+                approach_t = _approach_aligned_to_short_axis(
+                    approach_t, open_axis_t, np.asarray(up_hint_cam, dtype=np.float64)
+                )
             grip_t = _normalize(np.cross(open_axis_t, approach_t))
             open_t = _normalize(np.cross(approach_t, grip_t))
             if grip_t is not None and open_t is not None:
@@ -498,6 +519,84 @@ def _normalize(vec: np.ndarray) -> Optional[np.ndarray]:
 
 def _line_from_center(center: np.ndarray, vec: np.ndarray) -> np.ndarray:
     return np.stack([center - 0.5 * vec, center + 0.5 * vec], axis=0).astype(np.float32)
+
+
+def _approach_aligned_to_short_axis(
+    approach: np.ndarray,
+    short_axis: np.ndarray,
+    up_cam: np.ndarray,
+    max_swing_rad: float = 0.43,
+    skip_swing_rad: float = 0.95,
+) -> np.ndarray:
+    """Rotate ``approach`` in AZIMUTH (capped) so it is perpendicular to the
+    (horizontal) short axis, KEEPING its downward steepness (pitch). Camera
+    frame; ``up_cam`` is gravity-up in the camera frame.
+
+    Why (sim-verified 2026-06-16): the gripper jaw open-axis is forced into the
+    plane ⊥ approach (both here via the grip/open cross-products AND again in
+    ``grasp_axes_to_rebot_tcp_rotation``). Keeping the raw camera-ray approach
+    (azimuth pointing at the camera, ~50° forward tilt) therefore projects the
+    true horizontal short axis off by up to ~36° — worst at intermediate box
+    yaw, ~0 at yaw 0/90 — so on the real machine "the gripper won't turn its
+    head to face an angled box". Re-aiming the approach azimuth along the box
+    LONG axis (⊥ short axis) at the SAME pitch puts the short axis exactly in
+    the plane ⊥ approach, so the jaw aligns with an unchanged approach
+    steepness. The gripper now yaws to face the box.
+
+    REACHABILITY CAP (sim-verified 2026-06-16): re-aiming the azimuth shows up
+    as base YAW of the grasp pose, and the B601-DM's measured IK envelope only
+    admits base yaw within ≈±0.6 rad. A full re-aim needs up to ±1.54 rad at
+    box-yaw 90 → unreachable. So the swing is capped at ``max_swing_rad`` (the
+    residual stays as a roll-projected partial alignment, exactly the old
+    behaviour). For the common moderate-angle case (box yaw ≤ ~30°) the cap is
+    not hit and the jaw aligns fully; beyond it the gripper aligns as far as the
+    arm can physically reach. (Unlike a wrist-roll, swinging the azimuth is the
+    ONLY way to beat the ⊥-approach projection limit.)
+    """
+    up = _normalize(up_cam)
+    a = _normalize(approach)
+    if up is None or a is None:
+        return approach
+    up = up.astype(np.float64)
+    a = a.astype(np.float64)
+    # horizontalise the short axis (drop any up-component from PCA noise)
+    short = _normalize(
+        np.asarray(short_axis, dtype=np.float64)
+        - float(np.dot(np.asarray(short_axis, dtype=np.float64), up)) * up
+    )
+    if short is None:
+        return a.astype(np.float32)
+    short = short.astype(np.float64)
+    vert = float(np.dot(a, -up))                      # downward steepness component
+    hmag = float(np.sqrt(max(0.0, 1.0 - vert * vert)))
+    long_axis = _normalize(np.cross(up, short))       # horizontal, ⊥ short axis
+    if long_axis is None:
+        return a.astype(np.float32)
+    long_axis = long_axis.astype(np.float64)
+    if float(np.dot(long_axis, a)) < 0.0:
+        long_axis = -long_axis                        # keep pointing toward the camera side
+    target = _normalize(vert * (-up) + hmag * long_axis)
+    if target is None:
+        return a.astype(np.float32)
+    target = target.astype(np.float64)
+    # Cap the azimuth swing (SLERP toward the target by at most max_swing_rad).
+    cos_sw = float(np.clip(np.dot(a, target), -1.0, 1.0))
+    swing = float(np.arccos(cos_sw))
+    # SKIP when full alignment needs a swing far past the reachable cap: the box
+    # short axis is then near-parallel to the view azimuth (box yaw ≈ 90°, short
+    # side pointing at the arm). A capped re-aim there barely improves the jaw
+    # (still tens of degrees off) yet sits near the azimuth singularity where the
+    # long-axis direction is noise-sensitive — destabilising angle_deg. Leave the
+    # raw camera-ray approach (stable roll-projected alignment, == old behaviour).
+    if swing >= skip_swing_rad:
+        return a.astype(np.float32)
+    if swing <= max_swing_rad or swing < 1e-6:
+        return target.astype(np.float32)
+    t = max_swing_rad / swing
+    sin_sw = np.sin(swing)
+    capped = (np.sin((1.0 - t) * swing) * a + np.sin(t * swing) * target) / sin_sw
+    capped = _normalize(capped)
+    return capped.astype(np.float32) if capped is not None else target.astype(np.float32)
 
 
 def _refine_grasp_line_from_mask(
