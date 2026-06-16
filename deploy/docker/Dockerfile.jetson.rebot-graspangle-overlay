@@ -13,11 +13,16 @@ ARG BASE
 # ovs_agent lives at /opt/slv/agent/ovs_agent in the agent image.
 COPY agent/ovs_agent/apps/voice_rebot_arm/perception/ordinary_grasp.py \
      /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/perception/ordinary_grasp.py
+COPY agent/ovs_agent/apps/voice_rebot_arm/perception/transforms.py \
+     /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/perception/transforms.py
 COPY agent/ovs_agent/apps/voice_rebot_arm/grasp_service.py \
      /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/grasp_service.py
 
-RUN python3 -c "import ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp as og; \
+RUN python3 -c "import inspect; \
+import ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp as og; \
 assert hasattr(og, '_approach_aligned_to_short_axis'); \
+import ovs_agent.apps.voice_rebot_arm.perception.transforms as tf; \
+assert 'offset_axis_cam' in inspect.signature(tf.transform_grasp_pose_to_base).parameters; \
 import ovs_agent.apps.voice_rebot_arm.grasp_service as gs; \
 assert hasattr(gs, '_relax_orientation'); \
 print('rebot graspangle overlay ok')"
