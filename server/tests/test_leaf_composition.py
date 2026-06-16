@@ -181,8 +181,10 @@ def test_validate_rejects_double_tts(registry):
 
 
 def test_validate_rejects_unknown_device(registry):
+    # NOTE: rk3588 was added to the device registry when the adapted RK/RPi/Mac
+    # leaves landed, so use a genuinely-absent device name here.
     with pytest.raises(lc.CompositionError) as exc:
-        lc.validate_composition("rk3588", [ASR_N2], registry)
+        lc.validate_composition("nonexistent-device", [ASR_N2], registry)
     assert "unknown device" in str(exc.value)
 
 
@@ -351,3 +353,206 @@ def test_via_hf_override_replaces_manifest_required_files(tmp_path, monkeypatch)
     assert set(captured["paths"]) == expected
     # The manifest-only file must NOT have been requested.
     assert str(root / "engines/manifest-only") not in set(captured["paths"])
+
+
+# ---------------------------------------------------------------------------
+# NEW adapted backend leaves (paraformer / sensevoice / rk-qwen3 / matcha /
+# kokoro / moss) + new validator checks (family coupling, NPU exclusivity).
+# All 25 tests above stay green: the new leaves declare new ids/devices and the
+# new validator checks are opt-in (no-op for the qwen3 jetson leaves).
+# ---------------------------------------------------------------------------
+
+# ASR
+PARAFORMER_TRT = "asr.paraformer_trt.orin.n2"
+PARAFORMER_SHARED = "asr.paraformer.shared"
+SENSEVOICE_TRT = "asr.sensevoice_trt.orin.n1"
+SENSEVOICE_RKNN_3576 = "asr.sensevoice_rknn.rk3576.n1"
+SENSEVOICE_RKNN_3588 = "asr.sensevoice_rknn.rk3588.n1"
+SENSEVOICE_SHERPA_RPI5 = "asr.sensevoice_sherpa.rpi5.n4"
+SENSEVOICE_SHARED = "asr.sensevoice.shared"
+QWEN3_ASR_RK_3576_W8A8 = "asr.qwen3_asr_rk.rk3576.w8a8"
+QWEN3_ASR_RK_3576_W4A16 = "asr.qwen3_asr_rk.rk3576.w4a16g128"
+QWEN3_ASR_RK_3588_W8A8 = "asr.qwen3_asr_rk.rk3588.w8a8"
+PARAFORMER_RKNN_3576 = "asr.paraformer_rknn.rk3576.hybrid"
+PARAFORMER_RKNN_3588 = "asr.paraformer_rknn.rk3588.hybrid"
+
+# TTS
+MATCHA_TRT = "tts.matcha_trt.orin.n2"
+MATCHA_SHERPA_RPI5 = "tts.matcha_sherpa.rpi5.n4"
+MATCHA_RKNN_3576 = "tts.matcha_rknn.rk3576.n1"
+MATCHA_RKNN_3588 = "tts.matcha_rknn.rk3588.n1"
+MATCHA_SHARED = "tts.matcha.shared"
+KOKORO_TRT_PERF = "tts.kokoro_trt.orin.perf.n2"
+KOKORO_TRT_QUALITY = "tts.kokoro_trt.orin.quality.n2"
+KOKORO_TRT_LONG = "tts.kokoro_trt.orin.long.n2"
+KOKORO_RKNN_3588 = "tts.kokoro_rknn.rk3588.3stage"
+MOSS_TRT = "tts.moss_tts_nano.orin.trt.n2"
+MOSS_ORT = "tts.moss_tts_nano.orin.ort.n1"
+
+_ALL_NEW_LEAVES = [
+    PARAFORMER_TRT, PARAFORMER_SHARED,
+    SENSEVOICE_TRT, SENSEVOICE_RKNN_3576, SENSEVOICE_RKNN_3588,
+    SENSEVOICE_SHERPA_RPI5, SENSEVOICE_SHARED,
+    QWEN3_ASR_RK_3576_W8A8, QWEN3_ASR_RK_3576_W4A16, QWEN3_ASR_RK_3588_W8A8,
+    PARAFORMER_RKNN_3576, PARAFORMER_RKNN_3588,
+    MATCHA_TRT, MATCHA_SHERPA_RPI5, MATCHA_RKNN_3576, MATCHA_RKNN_3588,
+    MATCHA_SHARED,
+    KOKORO_TRT_PERF, KOKORO_TRT_QUALITY, KOKORO_TRT_LONG, KOKORO_RKNN_3588,
+    MOSS_TRT, MOSS_ORT,
+]
+
+
+# --- registry loading / new devices --------------------------------------
+
+def test_new_leaves_all_load(registry):
+    for lid in _ALL_NEW_LEAVES:
+        assert lid in registry.leaves, lid
+
+
+def test_new_devices_present(registry):
+    for dev in ("rk3576", "rk3588", "rpi4", "rpi5", "mac-cpu", "agx-orin"):
+        assert dev in registry.devices, dev
+    assert registry.devices["rk3576"].device_class == "rk"
+    assert registry.devices["rpi5"].device_class == "rpi"
+    assert registry.devices["mac-cpu"].device_class == "mac"
+
+
+def test_new_models_present(registry):
+    for m in ("paraformer-streaming", "sensevoice", "matcha-icefall-zh-en",
+              "kokoro-multi-lang-v1_0", "moss-tts-nano-v1", "qwen3-asr-rk"):
+        assert m in registry.models, m
+
+
+# --- resolve_pull: each new leaf resolves to a non-empty, expected file set ---
+
+@pytest.mark.parametrize("leaf_id,expected_substr", [
+    (PARAFORMER_TRT, "paraformer_encoder_dp4_400.plan"),
+    (SENSEVOICE_TRT, "sense-voice-encoder.scaled.fixed.onnx"),
+    (SENSEVOICE_RKNN_3588, "sense-voice-encoder.rk3588.fp16-scaled.rknn"),
+    (SENSEVOICE_SHERPA_RPI5, "sensevoice/model.int8.onnx"),
+    (QWEN3_ASR_RK_3576_W8A8, "decoder_qwen3.w8a8.rk3576.rkllm"),
+    (QWEN3_ASR_RK_3576_W4A16, "decoder_qwen3.w4a16_g128.rk3576.rkllm"),
+    (QWEN3_ASR_RK_3588_W8A8, "qwen3_asr_encoder_merged.fp16.15s.rk3588.rknn"),
+    (PARAFORMER_RKNN_3576, "encoder_prefix_to_block30.400.fp16.rknn"),
+    (MATCHA_TRT, "vocos_fp16.engine"),
+    (MATCHA_RKNN_3588, "matcha-s64.rknn"),
+    (KOKORO_TRT_PERF, "kokoro_prefix_encoder_dyn4_128_fp16.engine"),
+    (KOKORO_RKNN_3588, "style.npy"),
+    (MOSS_TRT, "moss_tts_prefill.plan"),
+])
+def test_new_leaf_resolves_pull(registry, leaf_id, expected_substr):
+    files = lc.resolve_pull([leaf_id], registry)
+    assert files, leaf_id
+    assert any(expected_substr in f for f in files), (leaf_id, expected_substr)
+
+
+def test_paraformer_pulls_shared_subleaf(registry):
+    files = lc.resolve_pull([PARAFORMER_TRT], registry)
+    assert "paraformer-streaming/encoder.onnx" in files
+    assert "paraformer-streaming/tokens.txt" in files
+
+
+def test_kokoro_rknn_voice_pack_present(registry):
+    # gotcha guard: missing style.npy -> silent output, so both must be pulled.
+    files = lc.resolve_pull([KOKORO_RKNN_3588], registry)
+    assert "opt/kokoro-rknn/default.npy" in files
+    assert "opt/kokoro-rknn/style.npy" in files
+
+
+def test_paraformer_rknn_all_buckets_listed(registry):
+    files = lc.resolve_pull([PARAFORMER_RKNN_3588], registry)
+    for bucket in ("40", "80", "160", "240", "400"):
+        needle = f"encoder_prefix_to_block30.{bucket}.fp16.rknn"
+        assert any(needle in f for f in files), bucket
+    assert any("decoder.400x40.fp16.rknn" in f for f in files)
+
+
+# --- precision resolution for the new models ------------------------------
+
+def test_sensevoice_precision_by_class(registry):
+    assert registry.resolve_precision(
+        registry.get_leaf(SENSEVOICE_RKNN_3588), "rk3588") == "fp16-scaled"
+    assert registry.resolve_precision(
+        registry.get_leaf(SENSEVOICE_SHERPA_RPI5), "rpi5") == "int8"
+    assert registry.resolve_precision(
+        registry.get_leaf(SENSEVOICE_TRT), "orin-nx") == "fp16"
+
+
+def test_qwen3_rk_w4a16_explicit_precision_wins(registry):
+    # The leaf pins w4a16_g128 explicitly (overrides the rk w8a8 default).
+    assert registry.resolve_precision(
+        registry.get_leaf(QWEN3_ASR_RK_3576_W4A16), "rk3576") == "w4a16_g128"
+    assert registry.resolve_precision(
+        registry.get_leaf(QWEN3_ASR_RK_3576_W8A8), "rk3576") == "w8a8"
+
+
+# --- representative compositions validate ---------------------------------
+
+def test_compose_paraformer_matcha_on_orin(registry):
+    plan = lc.validate_composition("orin-nx", [PARAFORMER_TRT, MATCHA_TRT], registry)
+    assert set(plan.leaf_ids) == {PARAFORMER_TRT, MATCHA_TRT}
+    assert plan.peak_unified_mb <= plan.headroom_mb
+
+
+def test_compose_sensevoice_matcha_sherpa_on_rpi5(registry):
+    plan = lc.validate_composition(
+        "rpi5", [SENSEVOICE_SHERPA_RPI5, MATCHA_SHERPA_RPI5], registry)
+    assert set(plan.leaf_ids) == {SENSEVOICE_SHERPA_RPI5, MATCHA_SHERPA_RPI5}
+    assert plan.peak_unified_mb <= plan.headroom_mb
+
+
+def test_compose_kokoro_perf_alone_on_orin(registry):
+    plan = lc.validate_composition("orin-nx", [KOKORO_TRT_PERF], registry)
+    assert plan.peak_unified_mb <= plan.headroom_mb
+
+
+# --- new validator check: backend-family coupling -------------------------
+
+def test_reject_jetson_x_rk_family_mix(registry):
+    with pytest.raises(lc.CompositionError) as exc:
+        lc.validate_composition("orin-nx", [PARAFORMER_TRT, MATCHA_RKNN_3588], registry)
+    assert "backend families" in str(exc.value)
+
+
+def test_reject_rk_x_jetson_via_language_mode(registry):
+    # qwen3 RK ASR (LANGUAGE_MODE=rk) paired with a jetson Matcha TTS leaf.
+    with pytest.raises(lc.CompositionError) as exc:
+        lc.validate_composition("rk3588", [QWEN3_ASR_RK_3588_W8A8, MATCHA_TRT], registry)
+    assert "backend families" in str(exc.value)
+
+
+def test_same_family_rk_ok(registry):
+    # Two rk.* leaves (same family) compose fine when admission=serial handles NPU.
+    plan = lc.validate_composition(
+        "rk3588", [QWEN3_ASR_RK_3588_W8A8, MATCHA_RKNN_3588], registry,
+        admission="serial")
+    assert set(plan.leaf_ids) == {QWEN3_ASR_RK_3588_W8A8, MATCHA_RKNN_3588}
+
+
+def test_existing_qwen3_jetson_pair_unaffected_by_family_check(registry):
+    # Both are jetson.trt_edge_llm -> same family -> no rejection (no-op guard).
+    plan = lc.validate_composition("orin-nx", [ASR_N2, TTS_N1], registry)
+    assert set(plan.leaf_ids) == {ASR_N2, TTS_N1}
+
+
+# --- new validator check: NPU exclusivity ---------------------------------
+
+def test_reject_double_npu_without_serial(registry):
+    # qwen3 RK ASR + matcha RKNN TTS both declare resources.exclusive: npu.
+    with pytest.raises(lc.CompositionError) as exc:
+        lc.validate_composition("rk3588", [QWEN3_ASR_RK_3588_W8A8, MATCHA_RKNN_3588], registry)
+    assert "exclusive-resource" in str(exc.value)
+    assert "npu" in str(exc.value)
+
+
+def test_double_npu_ok_with_serial(registry):
+    plan = lc.validate_composition(
+        "rk3588", [QWEN3_ASR_RK_3588_W8A8, MATCHA_RKNN_3588], registry,
+        admission="serial")
+    assert plan.peak_unified_mb <= plan.headroom_mb
+
+
+def test_single_npu_leaf_no_exclusivity_error(registry):
+    # One NPU leaf alone never trips the exclusivity check.
+    plan = lc.validate_composition("rk3576", [SENSEVOICE_RKNN_3576], registry)
+    assert set(plan.leaf_ids) == {SENSEVOICE_RKNN_3576}

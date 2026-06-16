@@ -17,3 +17,41 @@ models:
   qwen3-asr:
     default_precision:
       jetson: fp16
+
+  # --- adapted ASR/TTS backend families (cross-platform) ---
+  # default_precision keyed by device_class (jetson / rk / rpi / mac). Flipping
+  # one line re-resolves every leaf of that model on that class.
+
+  paraformer-streaming:
+    default_precision:
+      jetson: fp16   # TRT encoder dp4_400 + decoder fp16
+      rk: fp16       # hybrid RKNN encoder prefix + RKNN decoder, both fp16
+      rpi: int8      # sherpa-onnx CPU int8
+      mac: int8
+
+  sensevoice:
+    default_precision:
+      jetson: fp16          # activation-rescaled fp16 TRT engine
+      rk: fp16-scaled       # RK3588 fp16-scaled / RK3576 plain fp16 (see leaf)
+      rpi: int8             # sherpa-onnx model.int8.onnx
+      mac: int8
+
+  matcha-icefall-zh-en:
+    default_precision:
+      jetson: bf16   # SPLIT_TRT estimator bf16 + vocos fp16
+      rk: fp16       # matcha-s64.rknn + vocos rknn fp16 (ORT acoustic)
+      rpi: onnx      # sherpa-onnx CPU (model-steps-3.onnx)
+      mac: onnx
+
+  kokoro-multi-lang-v1_0:
+    default_precision:
+      jetson: fp16   # split-generator engines (mixed fp16/bf16; fp16 nominal)
+      rk: int8       # RK3588 decoder-front int8 hybrid
+
+  moss-tts-nano-v1:
+    default_precision:
+      jetson: fp16   # TRT FP16 engines (ORT fallback is CPU fp32 but same model)
+
+  qwen3-asr-rk:
+    default_precision:
+      rk: w8a8       # RKLLM decoder default quant; w4a16g128 leaf pins explicitly

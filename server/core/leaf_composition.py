@@ -394,16 +394,46 @@ def resolve_env(
     return expanded
 
 
+def _backend_family(leaf: Leaf) -> str | None:
+    """Coarse backend family for a leaf, or ``None`` when not derivable.
+
+    Derived (in priority order) from:
+      * ``LANGUAGE_MODE=rk`` in the leaf ``runtime_env`` → ``"rk"`` (an rk leaf is
+        unambiguous regardless of its backend label);
+      * the backend prefix before the first ``.`` (``jetson.*`` → ``"jetson"``,
+        ``rk.*`` → ``"rk"``, ``cpu.*`` → ``"cpu"``).
+
+    Returns ``None`` for backends with no ``.`` prefix (e.g. the bare
+    ``sensevoice`` shared sub-leaf, or anything legacy) so the coupling check is
+    OPT-IN: leaves whose family cannot be derived never trigger a rejection.
+    Existing Jetson Qwen3 leaves all map to ``"jetson"`` (same family → no-op).
+    """
+    if str(leaf.runtime_env.get("LANGUAGE_MODE", "")).lower() == "rk":
+        return "rk"
+    backend = leaf.backend or ""
+    if "." in backend:
+        return backend.split(".", 1)[0]
+    return None
+
+
 def validate_composition(
     device: str,
     selected_leaf_ids: Iterable[str],
     registry: Registry,
+    *,
+    admission: str | None = None,
 ) -> CompositionPlan:
     """Validate a composition for ``device``; raise :class:`CompositionError`.
 
     Rejects, with a clear message:
       * unknown/unbuilt leaf id (never a silent fallback);
       * two leaves contributing the same capability (illegal pairing);
+      * two leaves whose derivable backend FAMILY is incompatible (e.g. a
+        ``jetson.*`` leaf paired with an ``rk.*`` leaf, or a ``LANGUAGE_MODE=rk``
+        leaf with a non-rk one) — see :func:`_backend_family`;
+      * two leaves on the same device that BOTH declare ``resources.exclusive:
+        npu`` unless the caller passes ``admission="serial"`` (the RK/RPi NPU is
+        a single shared accelerator and cannot run two models concurrently);
       * ``base_reservation_mb`` + sum of leaf DELTA ``peak_unified_mb`` over the
         device memory headroom.
 
@@ -413,6 +443,11 @@ def validate_composition(
     double-counted across leaves. Shared ``requires`` sub-leaves are included in
     the delta sum (each once) but do NOT count as a capability for the pairing
     check. Returns a :class:`CompositionPlan` on success.
+
+    The family-coupling and NPU-exclusive checks are OPT-IN: they only fire when
+    the relevant fields are present/derivable, so existing Jetson Qwen3 leaves
+    (which declare neither an ``rk`` family conflict nor ``resources.exclusive``)
+    are unaffected.
     """
     selected = tuple(selected_leaf_ids)
 
@@ -433,6 +468,40 @@ def validate_composition(
                 f"provide capability {leaf.capability!r} on {device!r}"
             )
         by_capability[leaf.capability] = lid
+
+    # Backend-family coupling: every directly-selected leaf with a derivable
+    # family must agree. (Shared sub-leaves are excluded — they often have a
+    # nominal/blank backend and are pulled by a concrete leaf of a known family.)
+    families: dict[str, str] = {}  # family -> first leaf id with that family
+    for lid in selected:
+        fam = _backend_family(registry.get_leaf(lid))
+        if fam is None:
+            continue
+        families.setdefault(fam, lid)
+    if len(families) > 1:
+        pairs = ", ".join(f"{lid!r}={fam}" for fam, lid in families.items())
+        raise CompositionError(
+            f"incompatible backend families on {device!r}: {pairs}. "
+            f"A composition must not mix backend families (e.g. jetson.* with "
+            f"rk.*, or a LANGUAGE_MODE=rk leaf with a non-rk leaf)."
+        )
+
+    # RK/RPi exclusive-resource: two leaves on the same device that BOTH claim
+    # an exclusive accelerator (resources.exclusive: npu) cannot run concurrently
+    # unless the composition opts into serial admission.
+    exclusive: dict[str, list[str]] = {}
+    for lid in selected:
+        res = registry.get_leaf(lid).resources.get("exclusive")
+        if res:
+            exclusive.setdefault(str(res), []).append(lid)
+    for resource, holders in exclusive.items():
+        if len(holders) > 1 and admission != "serial":
+            raise CompositionError(
+                f"exclusive-resource conflict on {device!r}: leaves {holders} "
+                f"both declare resources.exclusive={resource!r} (a single shared "
+                f"accelerator). Pass admission='serial' to run them serialized, "
+                f"or select only one."
+            )
 
     # Memory: device base reservation (idle baseline + non-leaf floor, counted
     # once) plus the sum of leaf DELTA footprints over the full expansion
