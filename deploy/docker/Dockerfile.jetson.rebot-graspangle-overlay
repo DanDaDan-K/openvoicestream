@@ -1,0 +1,26 @@
+# Thin overlay: jaw-faces-angled-box grasp fix (c9e177e). Re-aims the approach
+# azimuth so the gripper turns its head to face a rotated box, reachability
+# capped to the B601-DM IK yaw band. Pure-Python change → overwrites two .py
+# files on the existing agent image; no rebuild.
+#
+# Build (context = repo root, on the arm64 device; --sudo docker):
+#   docker build -f deploy/docker/Dockerfile.jetson.rebot-graspangle-overlay \
+#     --build-arg BASE=<live rebot agent image> -t <live image>-graspangle .
+ARG BASE
+FROM ${BASE}
+ARG BASE
+
+# ovs_agent lives at /opt/slv/agent/ovs_agent in the agent image.
+COPY agent/ovs_agent/apps/voice_rebot_arm/perception/ordinary_grasp.py \
+     /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/perception/ordinary_grasp.py
+COPY agent/ovs_agent/apps/voice_rebot_arm/grasp_service.py \
+     /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/grasp_service.py
+
+RUN python3 -c "import ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp as og; \
+assert hasattr(og, '_approach_aligned_to_short_axis'); \
+import ovs_agent.apps.voice_rebot_arm.grasp_service as gs; \
+assert hasattr(gs, '_relax_orientation'); \
+print('rebot graspangle overlay ok')"
+
+LABEL build.overlay="rebot-grasp-angle-azimuth-reaim"
+LABEL build.base="${BASE}"
