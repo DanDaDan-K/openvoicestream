@@ -204,64 +204,76 @@ def main() -> int:
     try:
         # ── stage 1: perception (camera-frame), multi-frame best ─────
         if args.detect_only or args.pose_only:
-            K = np.asarray(cam.K, dtype=np.float32)
-            best = None
-            best_depth = None
-            ndet = 0
-            for _f in range(args.frames):
-                cam.warm_up(1)
-                color_bgr, depth_mm = cam.get_frame()
-                if color_bgr is None or depth_mm is None:
-                    continue
-                results = seg.predict(color_bgr, conf=args.conf, only_names={args.target})
-                n = sum(len(getattr(r, "boxes", []) or []) for r in results)
-                ndet = max(ndet, n)
-                cand = select_best_grasp(
-                    estimate_grasps(results, depth_mm, K, depth_quantile=0.5)
-                )
-                if cand is not None and (best is None or cand.conf > best.conf):
-                    best, best_depth = cand, depth_mm
-            log.info("multi-frame: best conf=%s over %d frames",
-                     None if best is None else round(float(best.conf), 3), args.frames)
-            cam_out = {
-                "num_detections": ndet,
-                "best": None if best is None else {
-                    "class": best.class_name,
-                    "conf": float(best.conf),
-                    "center_px": list(best.center_px),
-                    "position_cam_m": [float(v) for v in best.position],
-                    "jaw_width_m": float(best.jaw_width_m),
-                },
-            }
-            log.info("camera-frame detection: %s", json.dumps(cam_out, ensure_ascii=False))
-
-            if args.detect_only:
-                print("RESULT", json.dumps({"detect_only": True, **cam_out}, ensure_ascii=False))
-                return 0 if best is not None else 1
-
-            if best is None:
-                print("RESULT", json.dumps({"pose_only": True, "error": "no detection", **cam_out}))
-                return 1
-
-            # ── stage 2: connect, read TCP, compute base pose, NO move ──
             from ovs_agent.apps.voice_rebot_arm.rebot_actuator import _make_rebot_arm
             from ovs_agent.apps.voice_rebot_arm.perception.transforms import (
                 transform_grasp_pose_to_base,
             )
 
-            log.info("connecting arm to read live TCP pose (no motion is commanded)")
-            actuator = _make_rebot_arm(_actuator_cfg())
-            actuator.connect()
-            try:
-                # pose-only issues NO motion: get_tcp_pose / check_ik only call
-                # the SDK's _request_and_poll (state read) + FK/IK solve. They do
-                # NOT drive the arm. They DO require the joint controllers to be
-                # live, though — _request_and_poll looks each up in the SDK
-                # _ctrl_map, and set_torque(False) tears the ArmEndPos controller
-                # (and its damiao entry) down → `KeyError: 'damiao'`. So keep
-                # torque ON for the reads (connect() already energised + started
-                # the controller); disconnect() de-energises at the end.
+            K = np.asarray(cam.K, dtype=np.float32)
+            # pose-only: connect the arm FIRST and read the live TCP pose so the
+            # detector gets up_hint_cam (gravity-up in camera frame). Without it
+            # estimate_grasp skips the TOP-FACE plane fit and falls back to the
+            # 2D silhouette, which on an obliquely-viewed box MERGES the top+side
+            # faces and reads a ~2x-inflated jaw width — the exact reason the
+            # standalone check disagreed with production (which always supplies
+            # up_hint). detect_only stays arm-free (pure camera probe, up=None).
+            actuator = None
+            up_hint = None
+            tcp_pose = None
+            if args.pose_only:
+                log.info("connecting arm to read live TCP pose (no motion is commanded)")
+                actuator = _make_rebot_arm(_actuator_cfg())
+                actuator.connect()
+                # NO motion: get_tcp_pose only calls the SDK _request_and_poll
+                # (state read) + FK. Keep torque ON (connect() started the
+                # controller); set_torque(False) would tear down the ArmEndPos
+                # controller and its 'damiao' ctrl-map entry → KeyError.
                 tcp_pose = np.asarray(actuator.robot.get_tcp_pose(), dtype=np.float64)
+                r_cam2base = (tcp_pose @ np.asarray(hand_eye, dtype=np.float64))[:3, :3] \
+                    if hand_eye is not None else None
+                if r_cam2base is not None:
+                    up_hint = r_cam2base.T @ np.array([0.0, 0.0, 1.0])
+            try:
+                best = None
+                best_depth = None
+                ndet = 0
+                for _f in range(args.frames):
+                    cam.warm_up(1)
+                    color_bgr, depth_mm = cam.get_frame()
+                    if color_bgr is None or depth_mm is None:
+                        continue
+                    results = seg.predict(color_bgr, conf=args.conf, only_names={args.target})
+                    n = sum(len(getattr(r, "boxes", []) or []) for r in results)
+                    ndet = max(ndet, n)
+                    cand = select_best_grasp(
+                        estimate_grasps(results, depth_mm, K, depth_quantile=0.5,
+                                        up_hint_cam=up_hint)
+                    )
+                    if cand is not None and (best is None or cand.conf > best.conf):
+                        best, best_depth = cand, depth_mm
+                log.info("multi-frame: best conf=%s over %d frames",
+                         None if best is None else round(float(best.conf), 3), args.frames)
+                cam_out = {
+                    "num_detections": ndet,
+                    "best": None if best is None else {
+                        "class": best.class_name,
+                        "conf": float(best.conf),
+                        "center_px": list(best.center_px),
+                        "position_cam_m": [float(v) for v in best.position],
+                        "jaw_width_m": float(best.jaw_width_m),
+                        "method": getattr(best, "method", "legacy"),
+                    },
+                }
+                log.info("camera-frame detection: %s", json.dumps(cam_out, ensure_ascii=False))
+
+                if args.detect_only:
+                    print("RESULT", json.dumps({"detect_only": True, **cam_out}, ensure_ascii=False))
+                    return 0 if best is not None else 1
+
+                if best is None:
+                    print("RESULT", json.dumps({"pose_only": True, "error": "no detection", **cam_out}))
+                    return 1
+
                 if hand_eye is None:
                     print("RESULT", json.dumps({"pose_only": True, "error": "no hand-eye"}))
                     return 1
@@ -289,7 +301,8 @@ def main() -> int:
                 print("RESULT", json.dumps(out, ensure_ascii=False))
                 return 0 if (pre_ok and gr_ok) else 2
             finally:
-                actuator.disconnect()
+                if actuator is not None:
+                    actuator.disconnect()
 
         # ── search: sweep scan_poses to FIND + point at (no grasp) ───
         if args.search:
