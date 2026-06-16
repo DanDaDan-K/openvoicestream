@@ -126,27 +126,72 @@ def estimate_grasp(
 
     mask = _depth_mask(result, index, depth_mm.shape, rect_points)
 
+    # ── TOP-FACE plane fit FIRST (the box detector) ────────────────────
+    # Real-machine regression 2026-06-16: the shape-general descriptor (full-cloud
+    # PCA) is NOT a reliable box detector under D405 depth noise. A box seen
+    # obliquely backprojects to a TWO/THREE-FACE shell (top + visible sides), and
+    # the PCA of that shell reads the *box dimensions* as a rod or a disc:
+    #   - a 0.10×0.06×0.08 box at yaw=0 reads elongation≈4.2 → "elongated" (jaw
+    #     across the wrong axis);
+    #   - the same box at yaw=90 reads elongation≈1.1, roundness≈0.94 → "round"
+    #     (jaw blows up to ~0.083 m, near the 0.088 limit → nothing held);
+    # and the descriptor's angle is noise-driven (clean 98° vs noisy −62°).
+    # The OLD ``planarity<=0.04`` gate never fired for these (the full shell is
+    # non-planar), so a perfectly graspable box fell through to the descriptor's
+    # non-box routes. Clean Tier-A passed only because the noise-free shell read
+    # cleaner.
+    #
+    # The fix: a box HAS a flat top → fit the TOP plane in 3D (RANSAC, normal
+    # aligned with up) BEFORE consulting the descriptor. When that fit is good
+    # (enough up-aligned inliers, in-plane width within the jaw), the object is
+    # planar-topped → KEEP the top/side path REGARDLESS of the full-cloud
+    # descriptor's elongation/roundness. The descriptor's elongated/round/
+    # cylinder/near-square routes fire ONLY when NO good top plane exists
+    # (genuinely curved bodies: banana/orange present no planar top, so this
+    # leaves them on the descriptor route, byte-identical to before). The
+    # top-plane PCA also gives the box grasp angle from a robust in-plane fit
+    # (the existing top/side path), so the angle is stable across noise —
+    # unlike the noisy full-cloud descriptor.
+    side_cands: list = []
+    top = None
+    if up_hint_cam is not None:
+        top = _top_face_grasp(
+            mask, depth_mm, K, np.asarray(up_hint_cam, dtype=np.float64),
+            side_out=side_cands,
+        )
+
     # ── SHAPE ARBITER (shape-general 3D descriptor) ────────────────────
     # One backprojected, depth-band-filtered cloud → PCA descriptor that decides
-    # the grasp strategy for ALL shapes (box / banana / orange / bottle), not the
-    # brittle 2D min-area-rect short axis. ``desc`` is None when the cloud is too
-    # sparse (<200 pts) → the legacy 2D silhouette path below is the fallback.
-    #
-    # PLANAR / RECTANGULAR objects (planarity<=0.04 AND a top face that aligns
-    # with up >=0.85) are LEFT to the existing top-face / side-face block below,
-    # byte-identical to before. The descriptor route fires ONLY for the
-    # non-planar families (elongated / round / cylinder / near-square), so the
-    # box path is unchanged.
+    # the grasp strategy for the NON-box families (banana / orange / bottle), not
+    # the brittle 2D min-area-rect short axis. ``desc`` is None when the cloud is
+    # too sparse (<200 pts) → the legacy 2D silhouette path below is the fallback.
     desc = None
     if up_hint_cam is not None:
         desc = _shape_descriptor(
             mask, depth_mm, K, np.asarray(up_hint_cam, dtype=np.float64)
         )
-    _is_rectangular = (
-        desc is not None
-        and desc.planarity <= 0.04
-        and desc.top_align >= 0.85
-    )
+    # PLANAR-TOPPED gate (the box guard): a confident, up-aligned top plane (the
+    # RANSAC fit in ``_top_face_grasp`` only returns non-None when it finds a
+    # plane with >= min_inliers inliers whose normal aligns with up >= 0.85)
+    # means a FLAT-TOPPED object — a box. Leave it to the top/side path below
+    # REGARDLESS of the full-cloud descriptor's elongation/roundness (that PCA
+    # reads the multi-face shell as a rod/disc and misroutes the box).
+    #
+    # NOTE: the gate does NOT condition on the top-plane WIDTH fitting the jaw.
+    # A box too wide to grasp from the top is STILL a planar-topped box, not a
+    # banana/orange; its width is handled by the top/side arbitration + the
+    # re-observation path below (an over-wide flat plate must trigger reobserve,
+    # not be re-interpreted by the descriptor's near-square route — which on a
+    # zero-thickness fronto-parallel plane degenerates to a 0 m jaw). This is the
+    # behaviour the OLD ``planarity<=0.04 AND top_align>=0.85`` gate produced for
+    # a flat plate (planarity≈0, top_align≈1 ⇒ suppressed); the new gate keys off
+    # the actual RANSAC top-plane fit, which is the reliable planar-top signal
+    # under a multi-face box shell where the full-cloud planarity is high.
+    _planar_topped = top is not None
+    # A side candidate with a sane (fit-jaw) horizontal extent is the tall-box
+    # case where the top is out of view but a vertical face is graspable — also a
+    # box, handled by the side path below ⇒ also suppress the descriptor.
+    _side_box = any(c[3] <= 0.088 for c in side_cands)
     # A TALL upright box reads as "elongated" (its major axis is the vertical
     # extent) but it is NOT a lying banana/bottle — the existing top/side path
     # owns it (IK-aware camera-ray approach, 8fb88ac over-wide guard). Defer to
@@ -161,7 +206,12 @@ def estimate_grasp(
         up = np.asarray(up_hint_cam, dtype=np.float64)
         up = up / max(float(np.linalg.norm(up)), 1e-9)
         _major_is_vertical = abs(float(np.dot(desc.axes[:, 0], up))) >= 0.70
-    if desc is not None and not _is_rectangular and not _major_is_vertical:
+    if (
+        desc is not None
+        and not _planar_topped
+        and not _side_box
+        and not _major_is_vertical
+    ):
         g = _descriptor_grasp(
             desc, class_name, conf, bbox_xyxy, rect_points, K
         )
@@ -176,12 +226,8 @@ def estimate_grasp(
     # plane measures the real graspable face: metric width, true angle, and
     # a face-normal approach. Falls back to the legacy estimators whenever
     # the fit is not confident (curved objects, sparse depth, no hint).
+    # ``top`` / ``side_cands`` were computed ABOVE (the box guard); reuse them.
     if up_hint_cam is not None:
-        side_cands: list = []
-        top = _top_face_grasp(
-            mask, depth_mm, K, np.asarray(up_hint_cam, dtype=np.float64),
-            side_out=side_cands,
-        )
         # Arbitration: TOP grasp when the top face is visible AND its width
         # fits the jaw; otherwise a SIDE grasp on a camera-facing vertical
         # face whose HORIZONTAL extent fits (tall objects whose top is out of
@@ -699,6 +745,23 @@ def _shape_descriptor(
     pts = _mask_cloud(mask, depth_mm, K)
     if pts is None or len(pts) < 200:
         return None
+    # ── OUTLIER-ROBUST PCA (noise hardening, 2026-06-16) ───────────────────
+    # D405 axial noise + edge "flying pixels" put a heavy tail on the cloud:
+    # those few far-from-body points lever the principal axes (the covariance is
+    # a SUM of squared deviations, so a handful of outliers at the cloud edge
+    # disproportionately inflate λ1 and the elongation/roundness verdict). Trim
+    # the extreme points before the PCA so the descriptor reflects the body, not
+    # the noise tail: compute the centroid, drop the points whose distance to it
+    # exceeds the 95th percentile (a robust radius), then PCA the trimmed set.
+    # This is the "require the verdict to be robust to dropping the extreme
+    # points" the noise suite checks; it never flips a genuine rod/disc (its
+    # extent is intrinsic, not tail-driven) but stops a noisy near-box from
+    # reading as elongated. Kept above the 200-pt floor (we only ever drop ~5%).
+    c0 = pts.mean(axis=0)
+    r = np.linalg.norm(pts - c0, axis=1)
+    keep = r <= np.percentile(r, 95.0)
+    if int(keep.sum()) >= 200:
+        pts = pts[keep]
     centroid = pts.mean(axis=0)
     centered = pts - centroid
     # covariance PCA; eigenvalues ascending → reorder major→minor.
@@ -918,7 +981,15 @@ def _descriptor_grasp(
     # of the body — i.e. the grasp (open) axis is the MID axis (the wider of the
     # two short axes) so the jaw spans the body thickness, gripping perpendicular
     # to the long (major) axis.
-    if elong >= 2.2:
+    # Evidence bar raised 2.2 → 2.6 (noise hardening, 2026-06-16): a box's
+    # multi-face shell under D405 noise read elongation up to ~1.9 on a 1.67
+    # aspect box, and the OUTLIER-TRIMMED descriptor + planar-topped gate already
+    # keep boxes off this route entirely (the descriptor fires 0× for boxes in
+    # the 840-case noise suite). 2.6 is belt-and-suspenders: it still fires for
+    # genuine rods (banana ≈ 18, bottle ≈ 11 — enormous headroom) but refuses a
+    # borderline near-box should it ever reach here (top-plane RANSAC narrowly
+    # failing). Tuned against the noise suite, not clean depth.
+    if elong >= 2.6:
         if desc.extent_mid >= desc.extent_minor:
             open_axis, width = mid, desc.extent_mid
         else:
