@@ -37,6 +37,7 @@ from ovs_agent.apps.voice_rebot_arm.tools.synthetic_grasp_harness import (
     default_T_cam2base,
     plan_grasp_from_depth_mask,
     reachable,
+    render_box_depth,
     render_capsule_depth,
     render_cylinder_depth,
     render_sphere_depth,
@@ -96,6 +97,28 @@ def _assert_common(g, T: np.ndarray, shape: str) -> None:
     assert z_commit >= TABLE_Z - Z_EPS, (
         f"{shape}: committed base_z {z_commit:.4f} below table {TABLE_Z}"
     )
+
+
+@pytest.mark.parametrize("dims", [(0.06, 0.06, 0.17), (0.07, 0.05, 0.15)])
+def test_tall_upright_box_routes_to_side_grasp(dims):
+    """A TALL standing box must be SIDE-grasped, never top-grasped.
+
+    Real machine 2026-06-17 cycle on a 17cm standing reComputer box: the
+    side_face grasp HELD through lift+carry, but the intermittently-chosen
+    top_face closed on the small/high top and held nothing ("gripper closed but
+    nothing held"), and the fused-face silhouette read an over-wide 0.156m jaw
+    (rejected). The shape descriptor's verticality (major axis ∥ gravity) is the
+    stable signal, so a tall-upright object is forced onto the side path.
+    """
+    T, K = default_T_cam2base(), default_K()
+    depth_mm, mask = render_box_depth(dims, (0.42, 0.0, 0.05, 0.0), T, K)
+    g = plan_grasp_from_depth_mask(depth_mm, mask, T, K, class_name="box")
+    assert g is not None and g.is_valid, "tall box must yield a valid grasp"
+    assert g.method == "side_face", (
+        f"tall {dims} box routed to {g.method!r}, expected side_face "
+        f"(top/legacy grab air / read over-wide on a standing box)"
+    )
+    assert g.jaw_width_m <= JAW_LIMIT, f"jaw {g.jaw_width_m:.3f} over limit"
 
 
 def test_elongated_capsule_grasps_across_minor_axis():

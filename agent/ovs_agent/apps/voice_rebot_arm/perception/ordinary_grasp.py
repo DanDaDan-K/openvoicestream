@@ -248,6 +248,27 @@ def estimate_grasp(
         # never trip this — their path stays byte-identical.
         if top is not None and top[3] > 0.085:
             top = None
+        # TALL UPRIGHT objects → force the SIDE grasp. The shape descriptor's
+        # verticality (major axis ∥ gravity, elongated, ≥~12cm tall) is STABLE
+        # across frames, unlike the per-frame top/legacy routing that
+        # intermittently grabs the small/high top ("gripper closed but nothing
+        # held") or reads the fused-face silhouette as an over-wide jaw
+        # (rejected at plausibility). Real machine 2026-06-17 cycle on a 17cm
+        # standing box: side_face HELD through lift+carry; top_face grabbed air
+        # and legacy read 0.156m. Drop any top fit so the side path below owns
+        # it (a tall box always presents a large camera-facing side face, which
+        # _top_face_grasp collects as a side candidate). Normal flat boxes have a
+        # horizontal major axis → this never fires → byte-identical.
+        _tall_upright = False
+        if desc is not None and up_hint_cam is not None and float(desc.elongation) >= 2.5:
+            _up = np.asarray(up_hint_cam, dtype=np.float64)
+            _up = _up / max(float(np.linalg.norm(_up)), 1e-9)
+            _tall_upright = (
+                abs(float(np.asarray(desc.axes[:, 0], dtype=np.float64) @ _up)) >= 0.85
+                and float(desc.extent_major) >= 0.12
+            )
+        if _tall_upright and any(c[3] <= 0.085 for c in side_cands):
+            top = None
         if top is None and side_cands:
             best_side = min(
                 (c for c in side_cands if c[3] <= 0.085),
