@@ -797,26 +797,38 @@ def _grasp_attempt(
                 insertion_depth_m=insertion_depth_m,
                 offset_axis_cam=best.position,
             )
-            # Minimum vertical bite for TOP grasps (real machine 2026-06-12):
-            # insertion runs along the camera ray, so a FLAT viewing angle
-            # leaves the fingers at the very top edge — they close above the
-            # box ("closed but nothing held", grasp z 0.188 vs success at
-            # 0.166 on a 0.19 box). Enforce the grasp point ≥28mm below the
-            # measured top surface (the depth the successful grasp used),
-            # floored at 25mm above the table for jaw clearance.
+            # TOP grasps: CENTRE on the top-face centroid + enforce a vertical
+            # bite. The insertion runs along the forward-tilted camera ray, so a
+            # fixed 25mm insertion contributes ~14mm of useful DOWNWARD bite but
+            # also ~21mm of HORIZONTAL shift toward the box's far edge (real
+            # machine 2026-06-17: the jaw closed ~2cm off-centre → could not hold
+            # → manual nudge needed). The horizontal shift is a pure artifact of
+            # offsetting along a tilted ray; the jaw should close on the object's
+            # CENTRE. So pin x,y to the top-face centroid (``surf``) and keep the
+            # bite via z. The vertical bite floor (≥28mm below the measured top
+            # surface, ≥25mm above the table for jaw clearance) preserves the
+            # 2026-06-12 "抓得深" fix — insertion alone left the fingers at the
+            # top edge ("closed but nothing held", grasp z 0.188 vs success 0.166
+            # on a 0.19m box). The pregrasp tracks the same x,y shift so the
+            # approach path stays consistent.
             if getattr(best, "method", "legacy") == "top_face":
                 surf = (
                     np.asarray(T_cam2base, dtype=np.float64)
                     @ np.append(np.asarray(best.position, dtype=np.float64), 1.0)
                 )[:3]
+                dx = float(surf[0]) - float(grasp6d[0])
+                dy = float(surf[1]) - float(grasp6d[1])
                 z_bite = max(float(surf[2]) - 0.028, 0.025)
-                if float(grasp6d[2]) > z_bite:
-                    logger.info(
-                        "grasp: deepening top-grasp bite z %.3f → %.3f "
-                        "(surface %.3f)", float(grasp6d[2]), z_bite, float(surf[2]),
-                    )
-                    grasp6d = [float(grasp6d[0]), float(grasp6d[1]), z_bite,
-                               *(float(v) for v in grasp6d[3:])]
+                gz = min(float(grasp6d[2]), z_bite)
+                logger.info(
+                    "grasp: centred top-grasp on centroid (dx %.3f dy %.3f) "
+                    "bite z %.3f→%.3f (surface %.3f)",
+                    dx, dy, float(grasp6d[2]), gz, float(surf[2]),
+                )
+                grasp6d = [float(surf[0]), float(surf[1]), gz,
+                           *(float(v) for v in grasp6d[3:])]
+                pre6d = [float(pre6d[0]) + dx, float(pre6d[1]) + dy,
+                         *(float(v) for v in pre6d[2:])]
             result["grasp_pose"] = [float(v) for v in grasp6d]
             result["pregrasp_pose"] = [float(v) for v in pre6d]
             gx, gy, gz = (float(v) for v in grasp6d[:3])
