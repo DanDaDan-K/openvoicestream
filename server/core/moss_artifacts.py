@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -115,16 +116,18 @@ def _check_after_download(path: Path, item: dict) -> None:
 def _download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    # urllib mishandles hf-mirror's cross-host redirect chain (hf-mirror 308 ->
+    # huggingface.co 307 -> /api/resolve-cache 200) and fails with a spurious
+    # redirect loop. curl follows it robustly, so shell out to it.
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp, tmp.open("wb") as out:
-            shutil.copyfileobj(resp, out, length=1 << 20)
-    except urllib.error.HTTPError as exc:
+        subprocess.run(
+            ["curl", "-fsSL", "--max-redirs", "10", "--retry", "3",
+             "--connect-timeout", "30", "-A", _UA, "-o", str(tmp), url],
+            check=True, timeout=1800,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         tmp.unlink(missing_ok=True)
-        raise MossArtifactError(f"HTTP {exc.code} fetching {url}") from exc
-    except (urllib.error.URLError, OSError) as exc:
-        tmp.unlink(missing_ok=True)
-        raise MossArtifactError(f"download failed: {url}: {exc}") from exc
+        raise MossArtifactError(f"download failed (curl): {url}: {exc}") from exc
     os.replace(tmp, dest)
 
 
@@ -173,6 +176,30 @@ def _resolve_targets(manifest: dict) -> dict[str, Path]:
         or DEFAULT_WORKER_DIR
     )
     return {"model_root": Path(model_root), "worker_dir": Path(worker_dir)}
+
+
+def _write_engine_meta_sidecars(model_root: Path) -> None:
+    """engine_resolver only trusts a local .plan/.engine if a ``.meta`` sidecar
+    records the current host signature + engine hash (server/core/engine_resolver
+    ._meta_matches). moss_artifacts stages the raw, md5-verified plans WITHOUT
+    that sidecar, so engine_resolver rejects them as 'no valid local engine' and
+    — the moss manifest being a file-list, not a host-keyed bundle — finds no HF
+    bundle either, failing startup. Write the sidecars now so the staged plans
+    resolve as a cache hit. (If a plan is not actually built for this host, TRT
+    deserialization fails later anyway — this only bridges the provenance gap.)
+    """
+    try:
+        from server.core.engine_resolver import _write_meta, detect_host_signature
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not import engine_resolver to write MOSS meta: %s", exc)
+        return
+    host = detect_host_signature()
+    for path in model_root.rglob("*"):
+        if path.is_file() and path.suffix in (".plan", ".engine"):
+            try:
+                _write_meta(path, host, "moss_prestaged", None)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("failed to write MOSS engine meta for %s: %s", path, exc)
 
 
 def ensure_moss_artifacts() -> None:
@@ -241,6 +268,7 @@ def ensure_moss_artifacts() -> None:
         if item.get("executable"):
             _chmod_exec(dest)
 
+    _write_engine_meta_sidecars(targets["model_root"])
     logger.info("MOSS artifacts ready under %s", targets["model_root"])
 
 

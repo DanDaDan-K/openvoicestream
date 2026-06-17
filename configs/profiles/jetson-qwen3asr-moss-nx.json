@@ -61,11 +61,9 @@
         "MAX_SEQ": "256"
       },
       "extra_files": [
-        "tts_browser_onnx_meta.json",
-        "browser_poc_manifest.json",
-        "tokenizer.model",
-        "moss_tts_global_shared.data",
-        "moss_tts_local_shared.data"
+        "engines/tokenizer.model",
+        "engines/moss_tts_global_shared.data",
+        "engines/moss_tts_local_shared.data"
       ],
       "hf_only": false,
       "required": true
@@ -120,9 +118,8 @@
         "MAX_FRAMES": "8"
       },
       "extra_files": [
-        "codec_browser_onnx_meta.json",
-        "moss_audio_tokenizer_encode.onnx",
-        "moss_audio_tokenizer_decode_shared.data"
+        "codec_onnx/moss_audio_tokenizer_encode.onnx",
+        "codec_onnx/moss_audio_tokenizer_decode_shared.data"
       ],
       "hf_only": false,
       "required": true
