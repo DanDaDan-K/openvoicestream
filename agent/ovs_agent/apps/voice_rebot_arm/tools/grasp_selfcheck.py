@@ -281,6 +281,14 @@ def main() -> int:
                     np.save(f"{args.save_frames}/K.npy", np.asarray(K))
                     if up_hint is not None:
                         np.save(f"{args.save_frames}/up_hint_cam.npy", np.asarray(up_hint))
+                    # T_cam2base = live TCP pose @ hand-eye — lets the offline
+                    # replay reproduce the FULL base-frame pose incl. the real
+                    # hand-eye calibration (pose-only path only; detect-only has
+                    # no arm so tcp_pose is None).
+                    if tcp_pose is not None and hand_eye is not None:
+                        np.save(f"{args.save_frames}/T_cam2base.npy",
+                                np.asarray(tcp_pose, dtype=np.float64)
+                                @ np.asarray(hand_eye, dtype=np.float64))
                     log.info("saved frames to %s", args.save_frames)
                 log.info("multi-frame: best conf=%s over %d frames",
                          None if best is None else round(float(best.conf), 3), args.frames)
