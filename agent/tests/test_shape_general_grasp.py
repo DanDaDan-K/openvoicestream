@@ -99,6 +99,33 @@ def _assert_common(g, T: np.ndarray, shape: str) -> None:
     )
 
 
+def test_overwide_elongated_box_uses_descriptor_not_legacy():
+    """An ELONGATED box whose top reads slightly over-wide must use the
+    depth-filtered descriptor (real graspable width), NOT the 2D legacy
+    silhouette.
+
+    Real machine 2026-06-17: a 0.165×0.085×0.043m box lying flat returned a
+    borderline-over-wide top (0.088, dropped by the >0.085 guard) and no side
+    candidate, so it fell to the legacy silhouette — whose raw-mask width, with
+    the embin mask bleeding onto the background, read an absurd ~0.50m jaw and
+    was rejected. The descriptor is depth-band-filtered (robust to the bleed)
+    and gives the true ~0.085m width. The over-wide top must therefore NOT
+    suppress the descriptor for a clearly-elongated object.
+    """
+    T, K = default_T_cam2base(), default_K()
+    depth_mm, mask = render_box_depth((0.18, 0.10, 0.045), (0.40, 0.0, 0.05, 0.0), T, K)
+    g = plan_grasp_from_depth_mask(depth_mm, mask, T, K, class_name="box")
+    assert g is not None and g.is_valid
+    assert g.method != "legacy", (
+        f"over-wide elongated box fell to legacy (method={g.method!r}, "
+        f"jaw {g.jaw_width_m:.3f}) — the bloated silhouette width should be "
+        f"replaced by the depth-filtered descriptor"
+    )
+    # the descriptor recovers a physically plausible width (not the ~0.5m
+    # silhouette garbage); near the jaw limit but sane.
+    assert g.jaw_width_m <= 0.10, f"descriptor jaw {g.jaw_width_m:.3f} implausibly wide"
+
+
 @pytest.mark.parametrize("dims", [(0.06, 0.06, 0.17), (0.07, 0.05, 0.15)])
 def test_tall_upright_box_routes_to_side_grasp(dims):
     """A TALL standing box must be SIDE-grasped, never top-grasped.

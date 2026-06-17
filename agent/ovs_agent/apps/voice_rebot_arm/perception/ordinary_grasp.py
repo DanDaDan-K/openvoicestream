@@ -188,6 +188,23 @@ def estimate_grasp(
     # the actual RANSAC top-plane fit, which is the reliable planar-top signal
     # under a multi-face box shell where the full-cloud planarity is high.
     _planar_topped = top is not None
+    # EXCEPTION (real machine 2026-06-17): an OVER-WIDE top plane on a clearly
+    # ELONGATED object must NOT suppress the descriptor. A box lying flat (e.g.
+    # 0.165×0.085×0.043m) returns a borderline-over-wide top (0.088 → dropped by
+    # the >0.085 guard below) but NO side candidate, so it fell through to the
+    # legacy 2D silhouette — whose width is computed from the RAW mask and, when
+    # the embin mask bleeds onto the background (depth 0.21→0.63m on the captured
+    # frame), reads an absurd ~0.50m jaw → rejected. The shape descriptor is
+    # depth-band-filtered (robust to that bleed) and its ELONGATED route gives
+    # the real graspable width (0.085m here, valid). So when the top is over-wide
+    # AND the object is clearly elongated, let the descriptor own it. The
+    # plate→reobserve intent above is preserved: a NON-elongated over-wide plate
+    # still suppresses the descriptor (elongation < 1.8).
+    if (
+        top is not None and top[3] > 0.085
+        and desc is not None and float(desc.elongation) >= 1.8
+    ):
+        _planar_topped = False
     # A side candidate with a sane (fit-jaw) horizontal extent is the tall-box
     # case where the top is out of view but a vertical face is graspable — also a
     # box, handled by the side path below ⇒ also suppress the descriptor.
