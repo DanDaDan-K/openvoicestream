@@ -180,31 +180,30 @@ leaves:
       exclusive: npu
       peak_unified_mb: 1800  # TBD-measure (placeholder)
 
-  # --- RK3576 Paraformer FULL encoder mode (experimental A/B vs hybrid) ---
-  # ENCODER_MODE=full: the whole encoder runs on the NPU as bucketed full-encoder
-  # RKNNs (encoder.{frames}.fp16.rknn — glob "encoder.*.rknn" in the backend,
-  # rkvoice_stream/backends/asr/paraformer_rknn.py:_load_full_encoder), NOT the
-  # hybrid prefix-to-block30 buckets + CPU/ONNX encoder suffix. So there is NO
-  # encoder_suffix_from_block30.onnx and NO decoder-rknn.onnx here — only the
-  # full-encoder buckets + the RKNN decoder + tokens (decoder/tokens are the same
-  # artifacts the hybrid leaf uses).
+  # --- RK3576 Paraformer FULL encoder mode — ⛔ NOT VIABLE on RK3576 (DO NOT USE) ---
+  # ENCODER_MODE=full runs the WHOLE encoder on the NPU as bucketed full-encoder
+  # RKNNs (encoder.{40,80,160,400}.fp16.rknn). Kept here ONLY as a documented
+  # dead-end; use asr.paraformer_rknn.rk3576.hybrid for production (it works).
   #
-  # File list source of truth: docs/perf/paraformer-rk3576-streaming-ab-20260608.md
-  # lines 72-73 — the rk3576-paraformer-full-rknn-matcha profile "successfully
-  # loaded full encoder buckets encoder.{40,80,160,400}.fp16.rknn and RKNN
-  # decoder". Bucket set is {40,80,160,400} (NOT the hybrid 40/80/160/240/400).
-  # Decoder filename = decoder.400x40.fp16.rknn (DEC_MAX_ENC_FRAMES x DEC_MAX_TOKENS,
-  # same as hybrid). Env from configs/profiles/rk3576-paraformer-full-rknn-matcha.json.
-  #
-  # repo "": these full-encoder RKNNs are NOT in deploy/artifacts/rk_manifest.json
-  # (the manifest only carries the *hybrid* paraformer sets). They are an
-  # experimental artifact set, generated/validated ad-hoc on cat-remote.
-  # TODO: this full-encoder RKNN is documented as NOT safe to use on RK3576
-  #   without reconversion/graph repair (same AB doc lines 74-78: warmup produced
-  #   invalid output; a 40-frame probe showed non-finite values inside real audio
-  #   frames). When a packaged, repaired full-encoder set ships, add it to
-  #   rk_manifest.json (with sha256/size) and switch repo "" → the RK artifacts
-  #   repo, mirroring the hybrid leaf.
+  # ⛔ CONCLUSIVE FINDING (2026-06-16, cat-remote, exhaustive): the full encoder
+  # CANNOT run finite on the RK3576 NPU, and it is NOT fixable by RKNN conversion
+  # settings — only by model-side surgery. Root cause = intrinsic fp16 dynamic-
+  # range overflow in the deep encoder residual stream:
+  #   * per-block probe (real audio): residual magnitude grows monotonically; it
+  #     first breaches fp16 max (65504) at encoder block 31's residual Add, full
+  #     collapse (~11% elements → Inf/NaN) by block 35. (This is exactly why the
+  #     HYBRID split — NPU prefix-to-block30 + CPU/ONNX suffix-from-block30 — works.)
+  #   * fp16 optimization_level=0: STILL non-finite (rules out RKNN graph fusion).
+  #   * bf16: RK3576 toolkit can't convert this graph (unsupported tensor dtype in
+  #     Sub/per-layer-mul → SIGSEGV). tf32: "Can not support request type tfloat32".
+  #   RK3576 NPU is fp16-only, so there is NO precision/opt-level recipe that makes
+  #   the full encoder finite + parity-passing.
+  # The ONLY fix is model-side range control BEFORE conversion (scale/normalize/
+  # clamp the residual adds in blocks 31–48 to keep activations < 65504, or split
+  # the suffix into a separate higher-headroom sub-graph) — significant model
+  # surgery for marginal gain (the CPU suffix in hybrid mode works fine). Until
+  # that ships, this leaf is non-functional. See docs/perf/paraformer-rk3576-
+  # streaming-ab-20260608.md. repo "" (no artifact; the buckets are non-finite).
   asr.paraformer_rknn.rk3576.full:
     capability: asr
     backend: rk.paraformer_rknn
