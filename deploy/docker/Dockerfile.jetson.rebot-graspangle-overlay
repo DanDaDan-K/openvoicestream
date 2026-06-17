@@ -17,6 +17,12 @@ COPY agent/ovs_agent/apps/voice_rebot_arm/perception/transforms.py \
      /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/perception/transforms.py
 COPY agent/ovs_agent/apps/voice_rebot_arm/grasp_service.py \
      /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/grasp_service.py
+# grasp_plugin.py + config.yaml: rigid-class fixed-force override (box no longer
+# under-gripped by the adaptive ramp once the jaw aligns flush).
+COPY agent/ovs_agent/apps/voice_rebot_arm/grasp_plugin.py \
+     /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/grasp_plugin.py
+COPY agent/ovs_agent/apps/voice_rebot_arm/config.yaml \
+     /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/config.yaml
 
 RUN python3 -c "import inspect; \
 import ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp as og; \
@@ -25,6 +31,8 @@ import ovs_agent.apps.voice_rebot_arm.perception.transforms as tf; \
 assert 'offset_axis_cam' in inspect.signature(tf.transform_grasp_pose_to_base).parameters; \
 import ovs_agent.apps.voice_rebot_arm.grasp_service as gs; \
 assert hasattr(gs, '_relax_orientation'); \
+import ovs_agent.apps.voice_rebot_arm.grasp_plugin as gp; \
+assert hasattr(gp.GraspPlugin, '_force_is_fixed_for_class'); \
 print('rebot graspangle overlay ok')"
 
 LABEL build.overlay="rebot-grasp-angle-azimuth-reaim"
