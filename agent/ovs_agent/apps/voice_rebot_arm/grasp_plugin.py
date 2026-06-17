@@ -588,9 +588,23 @@ class GraspPlugin(Plugin):
             #   box demo.
             ceiling, is_listed = self._force_ceiling_for_class(target)
             if self._adaptive_force_default():
-                params["adaptive_force"] = True
-                if ceiling is not None:
+                # Per-class FIXED-force OVERRIDE: a rigid class in
+                # grasp_force_fixed_classes uses its configured force as a fixed
+                # grip (no ramp) even though adaptive is the default — the ramp
+                # under-grips rigid boxes (no compression → stops at the ~0.2
+                # start → the flush-aligned jaw slips). Soft classes fall through
+                # to the ramp below (configured value = crush-avoiding ceiling).
+                if (
+                    is_listed
+                    and ceiling is not None
+                    and self._force_is_fixed_for_class(target)
+                ):
                     params["grasp_force"] = ceiling
+                    params["adaptive_force"] = False
+                else:
+                    params["adaptive_force"] = True
+                    if ceiling is not None:
+                        params["grasp_force"] = ceiling
             elif is_listed and ceiling is not None:
                 params["grasp_force"] = ceiling
                 params["adaptive_force"] = False
@@ -1188,6 +1202,24 @@ class GraspPlugin(Plugin):
         (value, is_listed) form used by the dispatch policy."""
         value, _ = self._force_ceiling_for_class(target)
         return value
+
+    def _force_is_fixed_for_class(self, target: str) -> bool:
+        """True iff this class uses its configured grasp_force_by_class value as
+        a FIXED grip (no adaptive ramp) EVEN when adaptive_force_default=true.
+
+        Driven by grasp_force_fixed_classes (env REBOT_FORCE_FIXED_CLASSES, JSON
+        list). Rigid objects (box family) belong here: the adaptive ramp settles
+        at the lowest non-creeping force, which under-grips a rigid box (it never
+        compresses → reads "stable" at the ramp start → the flush-aligned jaw
+        slips). Soft classes stay off the list so they keep the crush-avoiding
+        ramp."""
+        names = self._list_override(
+            "REBOT_FORCE_FIXED_CLASSES", "grasp_force_fixed_classes"
+        )
+        if not isinstance(names, list) or not target:
+            return False
+        tl = target.strip().lower()
+        return any(str(n).strip().lower() == tl for n in names)
 
     def _grasp_params(self) -> dict:
         # Numeric grasp params often arrive as "${VAR:-default}" → an env-

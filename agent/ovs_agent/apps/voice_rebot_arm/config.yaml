@@ -478,6 +478,15 @@ metadata:
       orange: ${REBOT_GRASP_FORCE_ORANGE:-0.35}
       cup: ${REBOT_GRASP_FORCE_CUP:-0.30}
       "water bottle": ${REBOT_GRASP_FORCE_BOTTLE:-0.5}
+    # Classes that use their grasp_force_by_class value as a FIXED grip even
+    # when adaptive_force_default=true (the configured force OVERRIDES the ramp).
+    # Rigid objects (the box family) belong here: the adaptive ramp settles at
+    # the lowest force that stops the gap creeping, but a rigid box never
+    # compresses → it reads "stable" at the ~0.2 ramp start → too weak, and once
+    # the jaw is aligned flush (2026-06-16 grasp-angle fix) the box slides out.
+    # Soft classes (fruit/cup) stay OFF this list so they keep the crush-avoiding
+    # ramp. Env override (JSON list): REBOT_FORCE_FIXED_CLASSES.
+    grasp_force_fixed_classes: ["box", "cardboard box", "carton", "package"]
     # How far the TCP advances along the approach axis past the detected grasp
     # point before closing (m). Pipeline default was 0.015 — real-machine feel
     # "抓得浅": the jaw barely wrapped the box rim. 0.025 wraps ~1cm deeper for

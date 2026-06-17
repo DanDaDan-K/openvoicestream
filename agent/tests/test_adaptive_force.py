@@ -131,6 +131,38 @@ def test_listed_box_ramps_to_high_ceiling() -> None:
     assert seen["grasp_force"] == 0.8
 
 
+def test_fixed_class_overrides_ramp_with_configured_force() -> None:
+    # A rigid class in grasp_force_fixed_classes uses its configured force as a
+    # FIXED grip (adaptive=False) EVEN with adaptive_force_default=True — the
+    # ramp under-grips a rigid box (no compression → settles at the ~0.2 start →
+    # the flush-aligned jaw slips). 2026-06-16.
+    plugin, _ = _make_plugin({
+        "yolo_classes": ["box"],
+        "grasp_force": 0.8,
+        "adaptive_force_default": True,
+        "grasp_force_by_class": _BY_CLASS,
+        "grasp_force_fixed_classes": ["box", "cardboard box", "carton", "package"],
+    })
+    _, seen = _capture_run_kwargs(plugin, "box")
+    assert seen["adaptive_force"] is False
+    assert seen["grasp_force"] == 0.8
+
+
+def test_fixed_class_list_does_not_affect_soft_classes() -> None:
+    # A soft class (banana) NOT in grasp_force_fixed_classes still ramps to its
+    # low ceiling even when the box family is pinned to fixed force.
+    plugin, _ = _make_plugin({
+        "yolo_classes": ["yellow banana", "box"],
+        "grasp_force": 0.8,
+        "adaptive_force_default": True,
+        "grasp_force_by_class": _BY_CLASS,
+        "grasp_force_fixed_classes": ["box", "cardboard box", "carton", "package"],
+    })
+    _, seen = _capture_run_kwargs(plugin, "yellow banana")
+    assert seen["adaptive_force"] is True
+    assert seen["grasp_force"] == 0.35
+
+
 def test_unlisted_class_ramps_to_global_ceiling() -> None:
     # An UNLISTED class → adaptive with the GLOBAL grasp_force as the ceiling.
     plugin, _ = _make_plugin({
