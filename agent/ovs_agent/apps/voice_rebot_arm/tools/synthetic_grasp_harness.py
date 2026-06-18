@@ -57,7 +57,7 @@ from ..perception.ordinary_grasp import (
     estimate_grasps,
     select_best_grasp,
 )
-from ..perception.transforms import transform_grasp_pose_to_base
+from ..perception.transforms import pose6d_to_mat4, transform_grasp_pose_to_base
 from ..perception.yolo_onnx import YoloResult, _Box, _Boxes, _Masks
 
 
@@ -934,25 +934,51 @@ def reachable(
     pregrasp_offset_m: float = 0.08,
     insertion_depth_m: float = 0.025,
 ) -> tuple[bool, str]:
-    """Transform the grasp to base via the production transform, then check it
-    against the measured IK envelope. Uses the GRASP pose (not pregrasp).
+    """Whether the EXECUTED grasp is reachable, mirroring grasp_service.
 
-    pitch/yaw fed to the envelope are the base-frame ry/rz of the grasp pose.
+    Faithfulness fixes (2026-06-18 sim-vs-real audit): use the production
+    ``finalize_grasp_pose`` (side face-normal insertion axis + deeper side
+    insertion + top centring), and check BOTH the grasp AND the pregrasp
+    standoff against the measured IK envelope — the bare grasp-only check let
+    the sim pass poses whose real pregrasp failed (e.g. the level side reach).
+    For side grasps that fail only on the pregrasp, model
+    ``grasp_service._level_side_to_reachable``: tilt the head down in steps to
+    the most-level reachable pitch.
+
+    NOTE: the CSV envelope is conservative on low/level poses (the real
+    pinocchio reaches z<0.08 / pitch<0.225 that the CSV flags), so this can be
+    PESSIMISTIC vs the real arm — recalibrating the CSV from real check_ik logs
+    is the remaining gap.
     """
     if grasp_pose is None or not grasp_pose.is_valid:
         return False, "grasp invalid / None"
-    grasp6, _pregrasp6 = transform_grasp_pose_to_base(
-        np.asarray(grasp_pose.position, dtype=np.float64),
-        np.asarray(grasp_pose.tcp_rotation, dtype=np.float64),
-        np.asarray(T_cam2base, dtype=np.float64),
-        pregrasp_offset_m=pregrasp_offset_m,
-        insertion_depth_m=insertion_depth_m,
+    from ..perception.grasp_geometry import finalize_grasp_pose
+
+    grasp6, pre6 = finalize_grasp_pose(
+        grasp_pose, np.asarray(T_cam2base, dtype=np.float64),
+        pregrasp_offset_m, insertion_depth_m,
     )
-    x, y, z, rx, ry, rz = grasp6
-    ok, why = _envelope().feasible(x, y, z, ry, rz)
-    return ok, (
-        f"base=(x={x:.3f},y={y:.3f},z={z:.3f},roll={rx:.3f},pitch={ry:.3f},"
-        f"yaw={rz:.3f}) — {why}"
+    env = _envelope()
+    ok_g, why_g = env.feasible(grasp6[0], grasp6[1], grasp6[2], grasp6[4], grasp6[5])
+    ok_p, why_p = env.feasible(pre6[0], pre6[1], pre6[2], pre6[4], pre6[5])
+    if ok_g and ok_p:
+        return True, f"grasp+pregrasp reachable (pitch={grasp6[4]:.3f})"
+    # side-pitch ladder: tilt the head down to the most-level reachable pitch.
+    if getattr(grasp_pose, "method", "") == "side_face" and ok_g and not ok_p:
+        x, y, z, r, p0, yaw = grasp6
+        for dp in (0.08, 0.16, 0.24, 0.32, 0.40, 0.48):
+            p = p0 + dp
+            tool_x = np.asarray(pose6d_to_mat4(x, y, z, r, p, yaw), dtype=np.float64)[:3, 0]
+            pre = (x - float(tool_x[0]) * pregrasp_offset_m,
+                   y - float(tool_x[1]) * pregrasp_offset_m,
+                   z - float(tool_x[2]) * pregrasp_offset_m)
+            okg, _ = env.feasible(x, y, z, p, yaw)
+            okp, _ = env.feasible(pre[0], pre[1], pre[2], p, yaw)
+            if okg and okp:
+                return True, f"side ladder reachable @ pitch {p:.3f} (head tilted)"
+        return False, f"side level unreachable: pregrasp {why_p}; ladder exhausted"
+    return False, (
+        f"grasp {'OK' if ok_g else why_g} / pregrasp {'OK' if ok_p else why_p}"
     )
 
 
