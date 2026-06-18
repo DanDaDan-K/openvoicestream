@@ -361,6 +361,7 @@ def render_box_depth(
     K: np.ndarray,
     img_hw: tuple[int, int] = IMG_HW,
     noise: Optional[NoiseModel] = None,
+    mask_bleed_px: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Render a metric oriented box on a table plane via analytic z-buffer.
 
@@ -415,6 +416,21 @@ def render_box_depth(
     ).astype(np.uint16)
 
     mask = ((id_buf >= 1) & (id_buf <= 6)).astype(np.uint8)
+    if mask_bleed_px > 0:
+        # SEGMENTATION BLEED (2026-06-18 sim-vs-real audit, gap #1): the real
+        # embin mask spills onto the surrounding table/background (captured
+        # frames: mask 2-4× the box, masked-depth spread 0.2-0.6m vs the clean
+        # silhouette's ~0.03m), which inflated the legacy width to 0.16-0.50m
+        # and was wrongly rejected. The clean synthetic mask is the exact box
+        # silhouette → it never reproduces this. Dilate the box mask onto
+        # neighbouring rendered pixels (table + its recession to farther depth).
+        # NOTE: the analytic scene has only box+table (no far clutter), so this
+        # under-models the worst real bleed — the REAL-frame replay
+        # (grasp_replay) remains the faithful width check.
+        import cv2
+        k = np.ones((int(mask_bleed_px), int(mask_bleed_px)), np.uint8)
+        mask = cv2.dilate(mask, k)
+        mask = (mask & (depth_mm > 0).astype(np.uint8)).astype(np.uint8)
     return depth_mm, mask
 
 
