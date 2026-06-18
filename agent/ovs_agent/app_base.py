@@ -745,6 +745,24 @@ class BaseApp:
             # No running loop (called from sync context like tests).
             self._sleep_task = None
 
+    def _ensure_sleep_timer(self) -> None:
+        """Arm the auto-sleep countdown only if one is NOT already running —
+        does NOT restart a running one.
+
+        Used after a NOISE / empty asr_final recovers the FSM to IDLE: ambient
+        room speech produces a stream of empty finals, and restarting the
+        countdown on each one keeps the device hot-mic FOREVER (operator
+        2026-06-18: "触发太灵敏，设备一直不会到待命状态"). A noise final is not user
+        activity, so let the countdown started at the last REAL activity (wake /
+        a command with content) keep running — the device returns to standby
+        ``sleep_timeout_s`` after the last real command regardless of background
+        noise. If no timer is running (already slept / never armed), arm one."""
+        if getattr(self.config, "pipeline_mode", "always_on") == "always_on":
+            return
+        if self._sleep_task is not None and not self._sleep_task.done():
+            return  # already counting down — a noise final must not extend it
+        self._reset_sleep_timer()
+
     def _wake_command_single_turn_enabled(self) -> bool:
         return (
             getattr(self.config, "pipeline_mode", "always_on") == "wake_word"
@@ -2740,7 +2758,10 @@ class BaseApp:
                 cur_state = getattr(self, "_state", ConvState.IDLE)
                 if cur_state in (ConvState.LISTENING, ConvState.BARGED_IN):
                     self._set_state(ConvState.IDLE)
-                    self._reset_sleep_timer()
+                    # noise final → don't extend the hot-mic window (see
+                    # _ensure_sleep_timer): ambient room speech must not keep the
+                    # device awake forever.
+                    self._ensure_sleep_timer()
                 elif cur_state == ConvState.THINKING and _had_pending_eos:
                     # Race #2: we sent client-EOS expecting a real
                     # final but SLV returned an empty/low-signal one
@@ -2758,7 +2779,7 @@ class BaseApp:
                             await self._broadcast("on_assistant_done")
                     else:
                         self._set_state(ConvState.IDLE)
-                        self._reset_sleep_timer()
+                        self._ensure_sleep_timer()  # noise final must not extend
                 elif cur_state in (ConvState.THINKING, ConvState.SPEAKING):
                     logger.debug(
                         "low-signal final arrived during %s; FSM left alone "
