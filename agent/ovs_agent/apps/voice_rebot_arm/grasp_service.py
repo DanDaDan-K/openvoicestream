@@ -338,6 +338,55 @@ def _relax_orientation(arm: Any, pre6d, grasp6d):
     return None
 
 
+def _level_side_to_reachable(arm: Any, pre6d, grasp6d, pregrasp_offset_m: float):
+    """Most-LEVEL reachable side approach.
+
+    Side grasps approach the vertical face LEVEL (head ~horizontal) so the jaw
+    bites flat-on at full depth instead of stabbing in tilted-down and catching
+    a shallow edge (operator 2026-06-17). But a fully level reach at extension
+    can push the pregrasp STANDOFF out of the IK envelope (real machine: grasp
+    reachable, pregrasp not). Tilt the head DOWN from the level pitch in small
+    steps — keeping the grasp position and recomputing the standoff along the
+    new approach each step — and return the FIRST (most level) pitch where BOTH
+    the grasp and its standoff are IK-reachable. Returns ``(pre6d', grasp6d')``
+    or ``None``. Only called after the level pregrasp already failed IK.
+    """
+    chk = getattr(arm, "check_ik", None)
+    if not callable(chk):
+        return None
+    from .perception.transforms import pose6d_to_mat4
+
+    x, y, z, r, p0, yaw = (float(v) for v in grasp6d)
+    for dp in (0.08, 0.16, 0.24, 0.32, 0.40, 0.48):
+        p = p0 + dp
+        g = [x, y, z, r, p, yaw]
+        try:
+            tool_x = np.asarray(pose6d_to_mat4(*g), dtype=np.float64)[:3, 0]
+        except Exception:
+            return None
+        # standoff sits BACK along the approach (tool-X points into the box).
+        pre = [
+            x - float(tool_x[0]) * pregrasp_offset_m,
+            y - float(tool_x[1]) * pregrasp_offset_m,
+            z - float(tool_x[2]) * pregrasp_offset_m,
+            r, p, yaw,
+        ]
+        try:
+            ok_g, _ = chk(*g)
+            ok_p, _ = chk(*pre)
+        except Exception:
+            logger.debug("side-level ladder: check_ik raised", exc_info=True)
+            return None
+        if ok_g and ok_p:
+            logger.info(
+                "grasp: side approach tilted to most-level reachable pitch "
+                "%.2f→%.2f (head %.0f°→%.0f° down)",
+                p0, p, np.degrees(p0), np.degrees(p),
+            )
+            return pre, g
+    return None
+
+
 def _grasp_is_reachable(arm: Any, pre6d, grasp6d, method: str) -> bool:
     """Predict whether the executor will be able to reach this grasp, mirroring
     the exact feasibility logic in the move stage: ``check_ik`` must pass for
@@ -954,6 +1003,13 @@ def _grasp_attempt(
             relaxed = None
             if result.get("grasp_method") != "side_face":
                 relaxed = _relax_orientation(arm, pre6d, grasp6d)
+            else:
+                # SIDE grasps approach LEVEL (head horizontal into the vertical
+                # face). If the level standoff is out of reach, tilt the head
+                # down to the most-level REACHABLE pitch rather than failing.
+                relaxed = _level_side_to_reachable(
+                    arm, pre6d, grasp6d, pregrasp_offset_m
+                )
             if relaxed is not None:
                 pre6d, grasp6d = relaxed
                 result["orientation_relaxed"] = True
