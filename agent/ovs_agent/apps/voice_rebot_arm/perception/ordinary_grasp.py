@@ -61,6 +61,12 @@ class GraspPose:
     # GG-CNN second-opinion vote (None = refiner off/unavailable): False
     # makes grasp_service trigger a re-observation before committing.
     ggcnn_agree: "Optional[bool]" = None
+    # Camera-frame direction the insertion/pregrasp offset should advance along
+    # (unit). None → the finalizer's default. SIDE grasps set this to the face
+    # normal (into the box) so the insertion wraps the jaw INTO the body instead
+    # of partly down the tilted camera ray (which both lowers the grip and
+    # shallows the wrap → the box slips). See grasp_geometry.finalize_grasp_pose.
+    insertion_axis_cam: "Optional[np.ndarray]" = None
 
     @property
     def is_valid(self) -> bool:
@@ -311,6 +317,14 @@ def estimate_grasp(
                         rotation[:, 0], rotation[:, 1], rotation[:, 2]
                     ).astype(np.float32)
                     u, v = _project(c_pos, K)
+                    # Insertion advances along the FACE NORMAL into the box
+                    # (``_n_cam`` faces the camera → ``-_n_cam`` points into the
+                    # body), NOT the tilted camera ray. Real machine 2026-06-17:
+                    # along the camera ray a 25mm insertion put only ~21mm into
+                    # depth and wasted ~13mm LOWERING the grip → the jaw wrapped
+                    # the box shallowly and it slipped down. The face normal is
+                    # ~93% horizontal → the full insertion wraps INTO the body.
+                    _into_box = _normalize(-np.asarray(_n_cam, dtype=np.float64))
                     return GraspPose(
                         class_name=class_name,
                         conf=conf,
@@ -329,6 +343,10 @@ def estimate_grasp(
                         ),
                         valid_depth_pixels=int(n_in),
                         method="side_face",
+                        insertion_axis_cam=(
+                            None if _into_box is None
+                            else _into_box.astype(np.float32)
+                        ),
                     )
         if top is not None:
             position_t, open_axis_t, _face_normal_t, width_t, length_t, n_in = top
