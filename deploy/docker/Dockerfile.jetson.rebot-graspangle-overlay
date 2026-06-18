@@ -28,6 +28,11 @@ COPY agent/ovs_agent/apps/voice_rebot_arm/grasp_plugin.py \
      /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/grasp_plugin.py
 COPY agent/ovs_agent/apps/voice_rebot_arm/config.yaml \
      /opt/slv/agent/ovs_agent/apps/voice_rebot_arm/config.yaml
+# app_base.py: noise/empty asr_final no longer restarts the auto-sleep
+# countdown, so the device returns to standby after the last REAL command even
+# in a noisy room (was "触发太灵敏，设备一直不会到待命状态").
+COPY agent/ovs_agent/app_base.py \
+     /opt/slv/agent/ovs_agent/app_base.py
 
 RUN python3 -c "import inspect; \
 import ovs_agent.apps.voice_rebot_arm.perception.ordinary_grasp as og; \
@@ -41,6 +46,8 @@ import ovs_agent.apps.voice_rebot_arm.perception.grasp_geometry as gg; \
 assert hasattr(gg, 'finalize_grasp_pose'); \
 import ovs_agent.apps.voice_rebot_arm.grasp_plugin as gp; \
 assert hasattr(gp.GraspPlugin, '_force_is_fixed_for_class'); \
+import ovs_agent.app_base as ab; \
+assert hasattr(ab.BaseApp, '_ensure_sleep_timer'); \
 print('rebot graspangle overlay ok')"
 
 LABEL build.overlay="rebot-grasp-angle-azimuth-reaim"
