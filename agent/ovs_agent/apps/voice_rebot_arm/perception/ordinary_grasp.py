@@ -300,12 +300,21 @@ def estimate_grasp(
             )
             if best_side is not None:
                 c_pos, horiz, _n_cam, h_width, v_len, n_in = best_side
-                approach_s = _normalize(-c_pos)
+                # Approach LEVEL into the vertical face along the FACE NORMAL,
+                # so the jaw enters flat-on and contacts the full grip depth.
+                # The old camera-ray approach (-c_pos) tilted the head ~30° DOWN
+                # → the jaw met the vertical face at an angle and only its lower
+                # edge bit → shallow grip → slip (real machine 2026-06-17,
+                # operator: "倾斜向下抓，哪怕到最深处也很浅"). ``_n_cam`` faces the
+                # camera and is ~horizontal, so tool-forward = -_n_cam goes
+                # straight into the box (head ~level, ~4° down).
+                approach_s = _normalize(np.asarray(_n_cam, dtype=np.float64))
+                if approach_s is None:
+                    approach_s = _normalize(-c_pos)
                 if approach_s is None:
                     approach_s = np.array([0.0, 0.0, -1.0], dtype=np.float64)
-                # Same azimuth re-aim as the top path: keep the jaw open-axis on
-                # the true horizontal face extent instead of its tilt-biased
-                # projection.
+                # Azimuth re-aim keeps the jaw open-axis on the true horizontal
+                # face extent (a no-op when the face normal is already ⊥ horiz).
                 approach_s = _approach_aligned_to_short_axis(
                     approach_s, horiz, np.asarray(up_hint_cam, dtype=np.float64)
                 )
