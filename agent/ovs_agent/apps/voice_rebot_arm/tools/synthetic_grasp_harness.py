@@ -979,8 +979,11 @@ def reachable(
     ok_p, why_p = env.feasible(pre6[0], pre6[1], pre6[2], pre6[4], pre6[5])
     if ok_g and ok_p:
         return True, f"grasp+pregrasp reachable (pitch={grasp6[4]:.3f})"
-    # side-pitch ladder: tilt the head down to the most-level reachable pitch.
-    if getattr(grasp_pose, "method", "") == "side_face" and ok_g and not ok_p:
+    # side-pitch ladder: tilt the head down to the most-level pitch where BOTH
+    # grasp and pregrasp reach. Fires whenever the level pose is not fully
+    # reachable (the level grasp itself can be out of reach, e.g. high yaw), not
+    # only on pregrasp failure — matching grasp_service._level_side_to_reachable.
+    if getattr(grasp_pose, "method", "") == "side_face":
         x, y, z, r, p0, yaw = grasp6
         for dp in (0.08, 0.16, 0.24, 0.32, 0.40, 0.48):
             p = p0 + dp
