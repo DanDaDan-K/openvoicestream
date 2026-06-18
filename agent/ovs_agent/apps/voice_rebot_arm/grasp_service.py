@@ -810,24 +810,33 @@ def _grasp_attempt(
 
             # SIDE grasps need jaw-body clearance above the TABLE: the fingers
             # wrap a vertical face, so a grip too close to the tabletop presses
-            # the jaw into it. The OLD check used an ABSOLUTE floor (gz < 0.045)
-            # that assumed the table at base z≈0; on a table mounted below the
-            # arm base (real machine 2026-06-17: table at z≈-0.05) it wrongly
-            # rejected a perfectly clear grasp (gz≈0.043 with ~10cm of real
-            # clearance) every attempt → the standing box never grasped. Use a
-            # table-height-INDEPENDENT measure instead: the grasp sits at the
-            # vertical-face centroid, so ~half the visible face extent is BELOW
-            # the grip — and the box stands ON the table, so that is the grip's
-            # height above the table. Reject only when it is genuinely small.
+            # the jaw into it. Two signals, and BOTH must look low to reject —
+            # either one alone gives false rejects:
+            #   • absolute z (gz): the OLD sole check (gz<0.045) assumed the
+            #     table at base z≈0; on a table ~5cm below the arm base it
+            #     wrongly rejected clear grasps (gz≈0.043) → fixed by also
+            #     requiring the face signal.
+            #   • face clearance (½ the visible vertical face below the centroid):
+            #     assumes the visible face reaches the table, which FAILS when
+            #     detection captures only the UPPER part of a tall box — a grip
+            #     high on the box (gz≈0.158, ~20cm clear) then reads a tiny face
+            #     clearance and gets wrongly rejected (real machine 2026-06-17).
+            # So reject only when the grasp is BOTH absolutely low AND has little
+            # face below it — a genuinely near-table grip. A high grasp (gz large)
+            # or a full visible face passes.
             _side_clearance = 0.5 * float(getattr(best, "object_length_m", 0.0) or 0.0)
-            if result["grasp_method"] == "side_face" and _side_clearance < 0.045:
+            if (
+                result["grasp_method"] == "side_face"
+                and gz < 0.045
+                and _side_clearance < 0.045
+            ):
                 return {
                     **result,
                     "stage": "plausibility",
                     "stage_ms": timings,
                     "error": (
-                        f"side grasp too low (face clearance {_side_clearance:.3f}m, "
-                        f"z={gz:.3f}m)"
+                        f"side grasp too low (z={gz:.3f}m, face clearance "
+                        f"{_side_clearance:.3f}m)"
                     ),
                     "_retriable": True,
                 }
