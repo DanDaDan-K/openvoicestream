@@ -3,7 +3,7 @@
 **Date**: 2026-06-12
 **Status**: BLOCKED — no real-path low-bit quantization of the CustomVoice talker has ever
 worked; FP16 is the only EOS-valid precision. Five distinct quant schemes exhausted.
-**Supersedes / continues**: `third_party/qwen3-edgellm-jetson/engine-overlay/addon/docs/known-issues/w8a16-talker-handoff.md` (v1, 2026-05-25).
+**Supersedes / continues**: `third_party/jetson-voice-engine/engine-overlay/addon/docs/known-issues/w8a16-talker-handoff.md` (v1, 2026-05-25).
 **Goal that motivated this**: run the talker engine at <16-bit to save memory so Orin NX 16 GB
 can co-resident ASR+TTS+LLM, and ideally make **W8A16 the default CustomVoice precision on
 Jetson**. 2026-06-12 update: FP16 CustomVoice with a 1024-token Talker KV cap now passes a clean
@@ -103,7 +103,7 @@ On **orin-nx** unless noted. (`seeed-orin-nx` is real production — never touch
 | **W8A16LinearPlugin ported into v0.8.0** | `~/project/edgellm-v080/build/libNvInfer_edgellm_plugin.so` md5 `7d3fabe24661a0ce47b03e71b29bd6c5` | v0.7.1 plugin was already `IPluginV3` → trivial port. Registers W8A16LinearPlugin; all v0.8.0 plugins (GDN/int4/attention) retained; FP16 unbroken. Backup: `…so.1.0.bak` md5 `90e4dddddd6d9924ccc2fa5a9f477758`. **A v0.8.0 worker can now load a W8A16 engine.** |
 | W8A16 plugin/kernel source | `~/project/edgellm-v080/cpp/plugins/w8A16LinearPlugin/`, `cpp/kernels/w8A16LinearKernels/` | Kernel is **per-output only** (`w8A16Linear.cu:302` rejects non-`kPerOutput`; `:306` group_size only 0/1/k). `scale_mode`/`group_size` plugin fields exist but no groupwise kernel path. |
 | int4 groupwise plugin (native groupwise) | `~/project/edgellm-v080/cpp/plugins/int4GroupwiseGemmPlugin/` | 3 inputs: act kHALF, packed int4 weights kINT8 `[N/2,K]`, per-group scales kHALF `[K/group,N]`; attrs gemm_n/gemm_k/group_size. Used by Qwen3.5-4B-AWQ. |
-| AWQ ONNX rewriter | `third_party/qwen3-edgellm-jetson/engine-overlay/addon/scripts/quantize_onnx_matmul_w8a16_awq.py` | Bakes `pre_quant_scale` as `Mul` nodes + per-output int8 weight. **Collapses per-group amax to per-output** (~line 139) because W8A16LinearPlugin is per-output. |
+| AWQ ONNX rewriter | `third_party/jetson-voice-engine/engine-overlay/addon/scripts/quantize_onnx_matmul_w8a16_awq.py` | Bakes `pre_quant_scale` as `Mul` nodes + per-output int8 weight. **Collapses per-group amax to per-output** (~line 139) because W8A16LinearPlugin is per-output. |
 | int4 DQ→plugin fold | `tensorrt_edgellm/llm_models/layers/int4_gemm_plugin.py:581` `int4_dq_gemm_to_plugin(graph)` | Folds `DequantizeLinear(int4, per-group scales, block_size)→MatMul` into `Int4GroupwiseGemmPlugin`. Standalone-runnable. |
 | Full-EOS-coverage calibration driver | wsl2-local `~/w8a16-calib/calib_talker_awq2.py` (+ `_sq` SmoothQuant, `_w4` variants) | modelopt 0.43/0.44, talker = `Qwen3TTSTalkerForConditionalGeneration`, 196 linears, head excludes, calibration that **reaches natural EOS** (`max_new>=128`). Includes the 5 transformers-5.3 compat patches needed to load the model. |
 | SmoothQuant QDQ rewriter | wsl2-local `~/w8a16-calib/quantize_onnx_matmul_w8a8_qdq.py` | Emits native QDQ (Quantize/DequantizeLinear) int8; TRT builds int8×int8 natively (no plugin). Note `mtq.export_onnx` does NOT exist in modelopt 0.44 and torch.onnx can't reproduce the KV-cache+AttentionPlugin graph — that's why a rewriter is used. |
@@ -179,7 +179,7 @@ Ranked by expected value:
 
 ## References
 
-- v1 handoff: `third_party/qwen3-edgellm-jetson/engine-overlay/addon/docs/known-issues/w8a16-talker-handoff.md`
+- v1 handoff: `third_party/jetson-voice-engine/engine-overlay/addon/docs/known-issues/w8a16-talker-handoff.md`
 - Original CustomVoice W8A16 session (preload "PASS" at L2817): `~/.claude/projects/-Users-harvest-project-seeed-local-voice/8e644b32-8e6e-4441-9d31-a67425e8faff.jsonl`; W8A16 subagent `a5e30e7f119fd6d5b`.
 - v0.7.1 fork (plugin/kernel source): `mac:/Users/harvest/project/TensorRT-Edge-LLM`, `orin-nx:~/project/v071-build/TensorRT-Edge-LLM`.
 - modelopt configs: `INT4_AWQ_CFG` (W4 groupwise, awq_lite, input_quantizer disabled), `INT8_SMOOTHQUANT_CFG` (W8A8). modelopt 0.43/0.44 has **no** `INT8_AWQ_CFG`.

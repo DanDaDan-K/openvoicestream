@@ -8,7 +8,7 @@ flat `artifact_set` bundling for artifact provisioning + profile assembly.
 Today "what to pull" is baked into **device-level bundles**: the
 `QWEN3_ARTIFACT_MANIFEST` artifact_set (e.g. `orin-nx-highperf-2026-05-14`)
 carries a flat `required_files` list that mixes ASR + TTS engine files in one
-unit (`third_party/qwen3-edgellm-jetson/deploy/artifacts/qwen3_manifest.json`).
+unit (`third_party/jetson-voice-engine/deploy/artifacts/qwen3_manifest.json`).
 Consequences:
 
 - Selecting a TTS variant (e.g. concurrency b1↔b2 talker) is entangled with the

@@ -14,7 +14,7 @@ the deployed source had no durable home. This commit gives it one.
 `qwen3_asr_worker.cpp` here (`md5 13b34dcb`) = the production build source
 (`md5 1236d9f2`, orin-nx `v080-worker-build`, git `ee4c4ed`) **+ the strip fix**.
 It is NOT the same generation as the older vendored copy at
-`third_party/qwen3-edgellm-jetson/native/edgellm_voice_worker/qwen3_asr_worker.cpp`
+`third_party/jetson-voice-engine/native/edgellm_voice_worker/qwen3_asr_worker.cpp`
 (`md5 5f1620d5`, uses `runStreamingHop`/`parseAsrText`) — do not confuse them.
 
 ## The bug (real-machine + isolated experiment 2026-06-15)
