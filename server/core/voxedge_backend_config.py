@@ -873,6 +873,23 @@ def build_trt_edge_llm_tts_config(
     # model_id: OVS_TTS_MODEL_ID → backend name "trt_edgellm" (legacy fallback).
     model_id = env.get("OVS_TTS_MODEL_ID") or "trt_edgellm"
 
+    # BASE-model fixed speaker embedding (Qwen3-TTS 0.6B base path). Either the
+    # base64 string directly (EDGE_LLM_TTS_BASE_SPK_EMBED_B64) or a file holding
+    # the base64 text (EDGE_LLM_TTS_BASE_SPK_EMBED_PATH, e.g. ref_embedding.b64.txt).
+    # Empty → unchanged CustomVoice/named-speaker behavior.
+    def _resolve_base_spk_embed_b64() -> str:
+        direct = (env.get("EDGE_LLM_TTS_BASE_SPK_EMBED_B64") or "").strip()
+        if direct:
+            return direct
+        path = (env.get("EDGE_LLM_TTS_BASE_SPK_EMBED_PATH") or "").strip()
+        if path and os.path.exists(path):
+            try:
+                return open(path).read().strip()
+            except Exception:
+                return ""
+        return ""
+    base_speaker_embedding_b64 = _resolve_base_spk_embed_b64()
+
     return TRTEdgeLLMTTSConfig(
         tts_binary=env.get("EDGE_LLM_TTS_BIN") or TTS_BINARY,
         worker_binary=resolve_tts_worker_binary(),
@@ -890,6 +907,7 @@ def build_trt_edge_llm_tts_config(
         tokenizer_dir=resolve_tts_tokenizer_dir(),
         code2wav_dir=resolve_tts_code2wav_dir(),
         speaker_encoder=speaker_encoder,
+        base_speaker_embedding_b64=base_speaker_embedding_b64,
         model_id=model_id,
         backend_mode=_first(
             "OVS_TTS_BACKEND", "EDGE_LLM_TTS_BACKEND", default="edgellm_worker"
