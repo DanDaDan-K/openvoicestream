@@ -126,7 +126,15 @@ leaf `configs/leaves/qwen3-tts-base.yaml`, registry already maps `jetson.trt_edg
   speaker,speaker_id`; events `ready{init_ms}`, `chunk{audio_b64,frames,samples,sample_rate,is_final,code2wav_ms}`,
   `done`, `error`, `cancelled`.
 
-## RESULT (2026-06-20) — SHIPPED fp16
+## FINAL (2026-06-20) — int4 + fp8, fully NATIVE, ASR-validated
+Config: **int4-AWQ talker + int4-AWQ CodePredictor + fp8 text_embedding + fp16 code2wav** + v3 normalized ref_06 embedding + talker_temperature 0.9 + first_chunk_frames 4.
+- Perf: **RTF 0.44, warm TTFA 0.21s** (fp16 was 0.69/0.54). VRAM: talker 907→245, CP 191→98, text_embedding 622→320 = **~−1.06GB/instance**, no speed/quality cost.
+- Quality: EN WER 0%, ZH CER 1.7% (= fp16 baseline) — ASR/CER A/B validated, clean EOS CN+EN.
+- All upstream-native: int4 = stock v0.8.0 quantize.py int4_awq (Int4GroupwiseGemmPlugin, sm_87 source-compiled, NO backport); fp8 embedding = existing portable fp8 kernel + small runtime patch (load fp8+scales, wire scales at TTS embedding call sites). code2wav INT8 NOT viable (TRT10.3 can't QDQ Conv1D).
+- **Quant recipes** (reproducible): int4 talker/CP = wsl2 `~/project/edgellm-v080-export/{quantize_talker_stage1,stage2_export,quantize_cp_stage1,cp_stage2_export}.py` (rebuild as Qwen3ForCausalLM → INT4_AWQ_CFG → re-prefix → existing _export → int4 ONNX; exclude lm_head + CP down_proj). fp8 emb = `scripts/quantize_text_embedding_fp8.py` (e4m3 per-group128 scale=amax/448) or numpy/ml_dtypes equiv. Branch suharvest port/qwen3-tts-base-v080 @ 873ca22 (C++: cuBLAS GEMM fallback + M=1 GEMV + shim link + fp8 runtime patch).
+- **GOTCHA (the lesson)**: always normalize CN script (opencc t2s) before CER — raw whisper traditional-vs-simplified inflated a phantom "15pt int4 degradation" to a real ~0. And: lowering talker_temperature breaks EOS (120s runaway); pitch consistency = longer/normalized ref embedding, NOT temperature.
+
+## RESULT (2026-06-20) — SHIPPED fp16 (superseded by int4+fp8 above)
 Working streaming Qwen3-TTS **0.6B base** on v0.8.0 / orin-nano sm_87: **RTF 0.69, warm TTFA 0.54s, N=2 parallel** (5.6GB free), intelligibility ASR-verified. CuTe-DSL GEMM not viable sm_87 → cuBLAS-free tiled+M=1 GEMV fallback. W8A16 concluded NOT viable (EOS) → fp16 ships.
 Commits: fork `suharvest/port/qwen3-tts-base-v080` (worker + runtime speakerEmbedding + kernel fallback + shim link); voxedge `origin/main b783037` (base_speaker_embedding_b64 injection in jetson.trt_edge_llm); seeed-local-voice `7231f23` (profile+leaf+builder).
 
