@@ -48,9 +48,27 @@
 
 ---
 
+## 表 C — v0.8.0 N>1 实测(2026-06-21,全部真机 + byte-identical gate + 0 CUDA)
+
+> 这是本轮迁移把「R&D 并发/流式」提升为产线后跑出的实测。N=2 = 已验上限。
+> 工件锚点:fork tip `port/qwen3-tts-base-v080-n1n2` @ `7142a30`;镜像 `seeed-local-voice:v0.8.0-n1n2-rebake`;
+> workers asr `5ebd436b` / tts shared `190178f6`;引擎 int4 talker(HF base int4fp8 245.9MB)/ asr-b2 `4122dfcc` / talker-b2 `f7339e02`。
+
+| 维度 | 设备 | gate | 结果 | 出处 |
+|---|---|---|---|---|
+| **ASR N=2 streaming** | Orin NX | v080-0023(through-service) | 单会话 9 partials→final CER **0.105**(offline 同 clip ~0.05);N=2 zh/en 隔离无串话;5 并发→2 进 3 拒 `4429 too_many_sessions`;**0 CUDA** | edgellm-v080-migration/docs/plans/v080-0023-* + 任务记录 |
+| **TTS N=2 int4 slot-pool** | Orin Nano | staggered(G1/G2/G3) | G1 staggered(B 不被 A 阻塞)/ G2 byte-identical(concurrent==solo)/ G3 4429 全 PASS;系统 RAM ~**4GB**(tegrastats peak 5718/7620,baseline 1703);worker RSS 908MB;无 OOM,fits 8G/16G;int4 talker **245.9MB** vs fp16 **903MB**(−73%) | 任务记录(staggered gate) |
+| **TTS N=2 shared-engine** | Orin Nano | shared-engine gate | N=1 peak 3805MB→N=2 **5385MB**,2nd slot 仅 **+1.6GB**(context/KV 非二次权重),vs 独立省 **~436MB**;byte-identical(A `154f7880` / B `1a5324be` concurrent==solo);**0 CUDA** | 任务记录 / INDEX §2 shared-engine ctor |
+| **TTS M5 spike** | Orin NX | phase5b | concurrent==solo RVQ hash byte-exact + audio md5 byte-exact + **0 CUDA** | 任务记录(phase5b M5) |
+| **v0.8.0 vs v0.7.1 baseline** | Orin NX | ASR `--check` | **17/20 PASS**;英文+干净中文全过;多条优于 golden(zh_long_01 0.080→0.043);3 FAIL = 高基线 CER 硬 clip 的 abs-tolerance gate 脆性(非衰退) | seeed-local-voice/bench/regression/baselines/v080-c2-before-20260621/(工件在 ~/project/edgellm-v080-migration) |
+
+对外视图:repo 根 `BENCHMARKS.md`(本表的外向子集)+ runbook `docs/deploy-v080-n1n2.md`。
+
+---
+
 ## GAPS(尚无数据,需补测)
 
-1. **Qwen3-TTS Base int4+fp8 N=2** — 只有 fp16 阶段做过 N=2 burst+5.6GB free 验证;int4+fp8 的 N=2 burst/MD5 gate **未单独跑**(对应 plan F5)。
+1. ~~**Qwen3-TTS Base int4+fp8 N=2**~~ — ✅ **CLOSED 2026-06-21**:int4 slot-pool N=2 staggered gate(G1/G2/G3)全 PASS,~4GB RAM fits 8G/16G;另有 shared-engine N=2(+1.6GB/省 436MB)byte-identical。见**表 C**。
 2. **Qwen3-ASR int4 过 production worker + N≥2** — 现仅裸 `llm_inference` 生产解码契约验证(CER 0% / WER 11%);未过真实 `qwen3_asr_worker` streaming 路径,也无 int4 N≥2 记录(对应 plan F2/F3)。
 3. **Qwen3-TTS CustomVoice int4 全链 perf** — 仅 ASR smoke 可懂 + talker 246MB;**无 RTF/TTFA 记录**,未过 streaming worker(对应 plan F4)。⚠️ experimental,不进默认/hero。
 4. **Jetson AGX Orin** — 整套 VRAM/N 上限全 TBD(leaf 注册标 TBD-measure)。
