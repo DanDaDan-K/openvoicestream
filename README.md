@@ -163,6 +163,7 @@ Kokoro RKNN TTS.
 - **Reusable edge voice library** — the backends ship as the standalone, pip-installable [`voxedge`](https://github.com/suharvest/voxedge) package (`pip install --pre voxedge`); this repo is the product server + deploy on top of it.
 - **Stable backend contract** — clients keep the same `/asr/stream`, `/tts`, `/tts/stream`, and `/health` calls when profiles change.
 - **Measured low latency** — 58 ms EOS-to-first-audio on Jetson Orin NX with Paraformer + Matcha; 157 ms with Qwen3 ASR/TTS voice clone.
+- **Concurrent N=2 on v0.8.0** — verified 2-session ASR streaming (zh/en, no cross-talk) and N=2 Qwen3-TTS Base (int4 talker, ~4 GB RAM; or shared-engine with only +1.6 GB for the 2nd slot). See [BENCHMARKS.md](BENCHMARKS.md).
 - **Multilingual options** — Chinese+English, English-only, and 52-language Qwen3 paths are exposed through the same service.
 - **Container-first deploy** — prebuilt images, target-specific compose files, host checks, model downloads, and verification scripts are included.
 - **LLM-ready agent layer** — `agent/` streams ASR results into an OpenAI-compatible or EdgeLLM backend, then streams LLM tokens directly back to TTS.
@@ -374,6 +375,30 @@ Qwen3 ASR + Matcha split when low-latency concurrent dialogue matters. Full raw
 JSON paths and methodology are in
 [`docs/benchmarks/streaming-release-gate-2026-05-18.md`](docs/benchmarks/streaming-release-gate-2026-05-18.md).
 
+### v0.8.0 Concurrency (N>1) — verified 2026-06-21
+
+The TensorRT-Edge-LLM v0.8.0 stack adds **validated 2-session concurrency** on
+Jetson, with a byte-identical audio/transcript gate (concurrent output ==
+solo output) and zero CUDA/race errors. N=2 is the validated ceiling.
+
+- **ASR N=2 streaming** (Orin NX, gate v080-0023) — two concurrent sessions
+  (e.g. one Chinese + one English) with no cross-talk; a 3rd concurrent session
+  is rejected with `4429 too_many_sessions`. Streaming final CER 0.105 (offline
+  ~0.05 on the same clip); 0 CUDA errors.
+- **TTS N=2, int4 talker** (Orin Nano) — slot-pool concurrency (independent,
+  staggered-friendly lanes). ~4 GB system RAM at N=2 (fits 8 GB and 16 GB), no
+  OOM. int4-AWQ+fp8 talker engine is **245.9 MB vs 903 MB fp16 (−73%)**.
+- **TTS N=2, shared-engine** (Orin Nano) — the 2nd slot reuses resident weights,
+  so it adds **only +1.6 GB** (context/KV, not a 2nd weight copy) — ~436 MB
+  saved vs two independent instances. Concurrent output byte-identical to solo.
+- **Zero regression vs v0.7.1** (Orin NX) — ASR `--check` 17/20 PASS; English and
+  clean Chinese all pass, several clips improved (e.g. `zh_long_01` CER
+  0.080 → 0.043). The 3 FAILs are abs-tolerance gate brittleness on high-baseline
+  hard-clip clips, not a regression.
+
+Full tables, gates, and reproduction artifacts are in [BENCHMARKS.md](BENCHMARKS.md);
+the deployment runbook is [docs/deploy-v080-n1n2.md](docs/deploy-v080-n1n2.md).
+
 ### TTS Model Comparison
 
 The current release uses Matcha/Vocos for the bilingual path, Kokoro for
@@ -555,7 +580,41 @@ The **per-engine ASR/TTS backends live in the sibling [`voxedge`](https://github
 
 Clone with `--recurse-submodules` to pull `third_party/*`, or run `git submodule update --init --recursive` after cloning.
 
+### Unified backend structure (self-serve reproduce & publish)
+
+Every backend — Jetson (TensorRT-Edge-LLM), Rockchip (RKNN), and Raspberry Pi
+(sherpa-onnx) — follows the **same layout**, so any one of them can be
+reproduced, rebuilt, and published without insider knowledge:
+
+| Per-backend asset | Purpose |
+|---|---|
+| `recipes/` | the engine/model build + export steps (pin the upstream commit, run the export API) |
+| `HF_ARTIFACTS` | the published Hugging Face bundles end users pull (e.g. `harvestsu/qwen3-tts-0.6b-base-jetson-trtllm-int4fp8`) |
+| `docs/` (runbook) | deploy + verify steps for that backend (e.g. [docs/deploy-v080-n1n2.md](docs/deploy-v080-n1n2.md)) |
+| `AGENTS` | the agent/dispatch guardrails for working on that backend |
+
+Jetson, RK, and RPi are **first-class peers** — none is the "main" backend, and
+the same `recipes → HF_ARTIFACTS → docs → AGENTS` contract holds for each, so
+anyone can self-serve a reproduction or a release.
+
+> **DIVERGENCE — fork vs self-authored runtime.** The one structural difference
+> is the *source* of the runtime: the Jetson backend's runtime extensions live
+> in our **fork of TensorRT-Edge-LLM** (upstream-bug fixes + local runtime
+> extensions land in the fork; `jetson-voice-engine` only carries overlay /
+> recipes and regenerates patches from it). The RK and RPi runtimes are
+> **self-authored** (`rkvoice-stream`, patched sherpa-onnx). This is a deliberate
+> ownership boundary, not an inconsistency — every backend still exposes the same
+> recipes/artifacts/docs/agents surface above.
+
 ## Changelog
+
+### 2026-06 — v0.8.0 N>1 concurrency verified
+
+- **N=2 ASR streaming + N=2 Qwen3-TTS Base verified on Jetson** (2026-06-21).
+  Byte-identical concurrent==solo gate, 0 CUDA errors. int4 talker 245.9 MB
+  (−73% vs fp16); shared-engine 2nd slot only +1.6 GB. Zero regression vs v0.7.1
+  (ASR 17/20, several clips improved). See [BENCHMARKS.md](BENCHMARKS.md) and the
+  [deploy runbook](docs/deploy-v080-n1n2.md).
 
 ### 2026-06 — Open source & edge voice library split
 
