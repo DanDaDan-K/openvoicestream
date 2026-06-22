@@ -1,5 +1,7 @@
 # OpenVoiceStream
 
+> **English** | [中文](README.zh-CN.md)
+
 **Native-engine streaming ASR + TTS for edge dialogue.** One container, stable HTTP/WebSocket APIs, and validated paths across Jetson, Rockchip, and Raspberry Pi ecosystems.
 
 <p align="center">
