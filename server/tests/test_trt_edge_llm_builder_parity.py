@@ -207,3 +207,22 @@ class TestASRBuilderParity:
         env = {"EDGE_LLM_ASR_MAX_CONCURRENT": "2"}
         cfg = build_trt_edge_llm_asr_config(profile=profile, env=env)
         assert cfg.max_slots == 2
+
+
+# ---------------------------------------------------------------------------
+# env=None path: OVS wrappers read os.environ when env not passed
+# ---------------------------------------------------------------------------
+
+def test_tts_wrapper_env_none_reads_os_environ(monkeypatch):
+    """OVS wrapper 默认 env=None 时应透传 os.environ 给 voxedge factory。"""
+    monkeypatch.setenv("EDGE_LLM_TTS_WORKER_BIN", "/tmp/fake_tts_worker")
+    from server.core.voxedge_backend_config import build_trt_edge_llm_tts_config
+    cfg = build_trt_edge_llm_tts_config()
+    assert cfg.worker_binary == "/tmp/fake_tts_worker"
+
+
+def test_asr_wrapper_env_none_reads_os_environ(monkeypatch):
+    monkeypatch.setenv("EDGE_LLM_ASR_WORKER_BIN", "/tmp/fake_asr_worker")
+    from server.core.voxedge_backend_config import build_trt_edge_llm_asr_config
+    cfg = build_trt_edge_llm_asr_config()
+    assert cfg.worker_binary == "/tmp/fake_asr_worker"
