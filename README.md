@@ -1,5 +1,7 @@
 # OpenVoiceStream
 
+> **English** | [中文](README.zh-CN.md)
+
 **Native-engine streaming ASR + TTS for edge dialogue.** One container, stable HTTP/WebSocket APIs, and validated paths across Jetson, Rockchip, and Raspberry Pi ecosystems.
 
 <p align="center">
@@ -16,7 +18,9 @@
   <img src="docs/media/hero.png" alt="OpenVoiceStream - streaming ASR and TTS for edge dialogue" width="760" />
 </p>
 
-OpenVoiceStream is a local voice stack for products that need real-time ASR and TTS on edge hardware. It runs fully on-device, avoids heavyweight ML frameworks in the hot path, and keeps the client API stable while you switch between sherpa-onnx, TensorRT-EdgeLLM, RKNN, and CPU ONNX backends.
+**OpenVoiceStream is the deployable voice product** — the FastAPI/WebSocket server, device profiles, install/deploy machinery, and the agent gallery (voice-controlled robot arm, live captioning, simultaneous interpretation, translation). It runs fully on-device, avoids heavyweight ML frameworks in the hot path, and keeps the client API stable while you switch between sherpa-onnx, TensorRT-EdgeLLM, RKNN, and CPU ONNX backends.
+
+**The speech engine underneath is [`voxedge`](https://github.com/suharvest/voxedge)** — a standalone, pip-installable (`pip install voxedge`), pure-Python/numpy library that does the real-time ASR + TTS + conversation loop. This repo *consumes* voxedge (as a wheel) and adds everything needed to ship it as a product. Want to embed edge voice in your own app? Use voxedge directly. Want a turnkey on-device voice server with prebuilt images and agents? You're in the right place.
 
 ## Why This Matters
 
@@ -356,7 +360,6 @@ The RK rows use the 2026-06-10 high-performance Qwen3 ASR W8A8 + Matcha
 recheck. Forced client-EOS V2V p50 is 528 ms on RK3588 and 1020 ms on RK3576;
 long-dictation average error is 10.1% / 9.8%. The real `/v2v/stream` path still
 depends on the configured VAD endpointing delay.
-hangover.
 
 Deployment footprint from the same run:
 

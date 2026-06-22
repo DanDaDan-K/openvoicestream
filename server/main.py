@@ -3110,9 +3110,18 @@ async def _v2v_stream_via_engine(
         multi_utterance,
     )
 
+    # Resolve the half-open idle watchdog from product env and inject it — the
+    # voxedge transport no longer reads env itself. None/invalid → its 90s
+    # default (same value/parse as before, behaviour unchanged).
+    _idle_raw = os.environ.get("OVS_V2V_IDLE_TIMEOUT_S")
+    try:
+        _idle_timeout_s = float(_idle_raw) if _idle_raw not in (None, "") else 90.0
+    except (TypeError, ValueError):
+        _idle_timeout_s = 90.0
+
     # The engine drives the conversation and closes the transport (which closes
     # the WS) at the end. Admission release stays in the caller's finally.
-    await engine.run(WebSocketTransport(ws))
+    await engine.run(WebSocketTransport(ws, idle_timeout_s=_idle_timeout_s))
 
 
 @app.websocket("/v2v/stream")
