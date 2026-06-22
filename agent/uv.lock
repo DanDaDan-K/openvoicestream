@@ -3257,6 +3257,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "ctranslate2", marker = "extra == 'translator'", specifier = ">=4.0" },
+    { name = "httpx", marker = "extra == 'llm'", specifier = ">=0.24" },
     { name = "huggingface-hub", marker = "extra == 'artifacts'", specifier = ">=0.20" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "onnxruntime", marker = "extra == 'jetson'", specifier = ">=1.16" },
@@ -3270,7 +3271,10 @@ requires-dist = [
     { name = "tokenizers", marker = "extra == 'jetson'", specifier = ">=0.15" },
     { name = "webrtcvad", marker = "extra == 'jetson'", specifier = ">=2.0.10" },
 ]
-provides-extras = ["rk", "sherpa", "jetson", "translator", "text", "artifacts"]
+provides-extras = ["rk", "sherpa", "jetson", "translator", "text", "artifacts", "llm"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "httpx", specifier = ">=0.28.1" }]
 
 [[package]]
 name = "watchfiles"

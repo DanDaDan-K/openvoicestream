@@ -46,7 +46,6 @@ _FLAG_TABLE = [
     ("voxedge.backends.sherpa.asr",          "SherpaASRBackend",     True),
     ("voxedge.backends.jetson.kokoro_trt",       "KokoroTRTBackend",     True),
     ("voxedge.backends.jetson.matcha_trt",       "MatchaTRTBackend",     True),
-    ("voxedge.backends.jetson.qwen3_trt",        "Qwen3TRTBackend",      False),
     ("voxedge.backends.rk.tts",              "RKTTSBackend",         False),
     ("voxedge.backends.rk.asr",              "RKASRBackend",         False),
 ]
@@ -321,14 +320,3 @@ def test_matcha_trt_unload_clears_fields():
     inst.unload()
 
 
-def test_qwen3_trt_unload_drops_engine_and_tokenizer():
-    cls = _import_or_none("voxedge.backends.jetson.qwen3_trt", "Qwen3TRTBackend")
-    inst = _safe_construct(cls)
-    inst._ready = True
-    inst._engine = object()
-    inst._tokenizer = object()
-    inst.unload()
-    assert inst._engine is None
-    assert inst._tokenizer is None
-    assert inst.is_ready() is False
-    inst.unload()

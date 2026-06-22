@@ -626,95 +626,6 @@ def build_kokoro_trt_config(
     )
 
 
-def build_qwen3_trt_config(
-    profile: Optional[dict] = None,
-    env: Optional[dict] = None,
-):
-    """Build a ``Qwen3TRTConfig`` from env.
-
-    Mirrors the module-scope + per-method env reads in legacy
-    ``app/backends/jetson/qwen3_trt.py`` (``_resolve_paths`` + the customvoice
-    detection + the synth-time engine env reads). Path fields are left ``None``
-    so ``__post_init__`` rebuilds them from ``model_base``.
-
-    env → Qwen3TRTConfig field map (see voxedge qwen3_trt header):
-      QWEN3_MODEL_BASE                     → model_base ("/opt/models/qwen3-tts")
-      QWEN3_SHERPA_DIR                     → sherpa_dir (<base>/onnx)
-      QWEN3_MODEL_DIR                      → model_dir (<base>/onnx)
-      QWEN3_TALKER_ENGINE                  → talker_engine (<base>/engines/talker_decode_bf16.engine)
-      QWEN3_CP_ENGINE                      → cp_engine (<base>/engines/cp_bf16.engine)
-      QWEN3_SPEAKER_ENCODER                → speaker_encoder (<base>/onnx/speaker_encoder.onnx)
-      QWEN3_TOKENIZER_DIR                  → tokenizer_dir (<base>/tokenizer)
-      QWEN3_EXTRACT_SCRIPT                 → extract_script (<base>/extract_speaker_emb.py)
-      QWEN3_TTS_VARIANT/OVS_TTS_MODEL_ID   → is_customvoice (→ supports_voice_cloning auto)
-      OVS_TTS_MODEL_ID                     → model_id ("qwen3-tts"; customvoice→"qwen3-tts-customvoice")
-      TTS_INT8_EOS_LOGIT_OFFSET            → int8_eos_logit_offset (-10.0)
-      TTS_TALKER_CUDA_GRAPH                → talker_cuda_graph (True)
-      TTS_TRT_VOCODER_MAX_FRAMES           → vocoder_max_frames (100)
-      TTS_VOCODER_TRT                      → use_trt_vocoder (True)
-      QWEN3_TTS_OFFLINE_STREAMING_FOR_LONG → offline_streaming_for_long (True)
-      QWEN3_TTS_NUMPY_SAMPLING             → numpy_sampling (True)
-      OVS_TTS_SEED                         → default_seed (0)
-      QWEN3_TTS_PRODUCT_SEGMENT_TEXT       → product_segment_text (False)
-      QWEN3_TTS_PRODUCT_SEGMENT_MAX_CHARS  → product_segment_max_chars (20)
-      QWEN3_TTS_PRODUCT_COMMA_PAUSE_MS     → product_comma_pause_ms (120)
-      QWEN3_TTS_PRODUCT_HARD_PAUSE_MS      → product_hard_pause_ms (180)
-    """
-    from voxedge.backends.jetson.qwen3_trt import Qwen3TRTConfig
-
-    if env is None:
-        env = os.environ
-
-    def _int(name: str, default: int) -> int:
-        try:
-            return int(env.get(name, str(default)))
-        except ValueError:
-            return default
-
-    def _bool(name: str, default: bool) -> bool:
-        v = env.get(name)
-        if v is None:
-            return default
-        return v.lower() not in ("0", "false", "no")
-
-    # CustomVoice detection mirrors legacy ``_is_customvoice_variant``:
-    #   QWEN3_TTS_VARIANT=customvoice, OR "customvoice" in OVS_TTS_MODEL_ID.
-    variant = env.get("QWEN3_TTS_VARIANT", "").strip().lower()
-    base_model_id = (env.get("OVS_TTS_MODEL_ID") or "").strip().lower()
-    is_customvoice = (variant == "customvoice") or ("customvoice" in base_model_id)
-
-    # model_id: legacy pins to "qwen3-tts-customvoice" when the customvoice
-    # variant is detected via env but OVS_TTS_MODEL_ID wasn't the customvoice key.
-    model_id = env.get("OVS_TTS_MODEL_ID") or "qwen3-tts"
-    if is_customvoice and "customvoice" not in base_model_id:
-        model_id = "qwen3-tts-customvoice"
-
-    return Qwen3TRTConfig(
-        model_base=env.get("QWEN3_MODEL_BASE", "/opt/models/qwen3-tts"),
-        sherpa_dir=env.get("QWEN3_SHERPA_DIR") or None,
-        model_dir=env.get("QWEN3_MODEL_DIR") or None,
-        talker_engine=env.get("QWEN3_TALKER_ENGINE") or None,
-        cp_engine=env.get("QWEN3_CP_ENGINE") or None,
-        speaker_encoder=env.get("QWEN3_SPEAKER_ENCODER") or None,
-        tokenizer_dir=env.get("QWEN3_TOKENIZER_DIR") or None,
-        extract_script=env.get("QWEN3_EXTRACT_SCRIPT") or None,
-        supports_voice_cloning=None,  # auto from is_customvoice in __post_init__
-        is_customvoice=is_customvoice,
-        model_id=model_id,
-        int8_eos_logit_offset=float(env.get("TTS_INT8_EOS_LOGIT_OFFSET", "-10.0")),
-        talker_cuda_graph=(env.get("TTS_TALKER_CUDA_GRAPH", "1") == "1"),
-        vocoder_max_frames=_int("TTS_TRT_VOCODER_MAX_FRAMES", 100),
-        use_trt_vocoder=_bool("TTS_VOCODER_TRT", True),
-        offline_streaming_for_long=_bool("QWEN3_TTS_OFFLINE_STREAMING_FOR_LONG", True),
-        numpy_sampling=_bool("QWEN3_TTS_NUMPY_SAMPLING", True),
-        default_seed=_int("OVS_TTS_SEED", 0),
-        product_segment_text=_bool("QWEN3_TTS_PRODUCT_SEGMENT_TEXT", False),
-        product_segment_max_chars=_int("QWEN3_TTS_PRODUCT_SEGMENT_MAX_CHARS", 20),
-        product_comma_pause_ms=_int("QWEN3_TTS_PRODUCT_COMMA_PAUSE_MS", 120),
-        product_hard_pause_ms=_int("QWEN3_TTS_PRODUCT_HARD_PAUSE_MS", 180),
-    )
-
-
 def build_trt_edge_llm_tts_config(
     profile: Optional[dict] = None,
     env: Optional[dict] = None,
@@ -1120,7 +1031,6 @@ _TTS_CONFIG_BUILDERS = {
     "jetson.trt_edge_llm": build_trt_edge_llm_tts_config,
     "jetson.matcha_trt": build_matcha_tts_config,
     "jetson.kokoro_trt": build_kokoro_trt_config,
-    "jetson.qwen3_trt": build_qwen3_trt_config,
     "jetson.moss_tts_nano": build_moss_tts_nano_config,
     "cpu.sherpa": build_sherpa_tts_config,
     "rk.tts": build_rk_tts_config,

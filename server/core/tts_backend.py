@@ -146,7 +146,6 @@ _TTS_REGISTRY: Dict[str, Tuple[str, str]] = {
     "jetson.trt_edge_llm": ("voxedge.backends.jetson.trt_edge_llm_tts", "TRTEdgeLLMTTSBackend"),
     "jetson.matcha_trt":   ("voxedge.backends.jetson.matcha_trt",   "MatchaTRTBackend"),
     "jetson.kokoro_trt":   ("voxedge.backends.jetson.kokoro_trt",   "KokoroTRTBackend"),
-    "jetson.qwen3_trt":    ("voxedge.backends.jetson.qwen3_trt",    "Qwen3TRTBackend"),
     "jetson.moss_tts_nano":("voxedge.backends.jetson.moss_tts_nano","MossTtsNanoBackend"),
     "cpu.sherpa":          ("voxedge.backends.sherpa.tts",          "SherpaTTSBackend"),
     "rk.tts":              ("voxedge.backends.rk.tts",              "RKTTSBackend"),
@@ -186,9 +185,6 @@ def create_tts_backend() -> TTSBackend:
     if spec == "jetson.kokoro_trt":
         from server.core.voxedge_backend_config import build_kokoro_trt_config
         return cls(config=build_kokoro_trt_config(profile=current_profile()))
-    if spec == "jetson.qwen3_trt":
-        from server.core.voxedge_backend_config import build_qwen3_trt_config
-        return cls(config=build_qwen3_trt_config(profile=current_profile()))
     if spec == "jetson.moss_tts_nano":
         from server.core.voxedge_backend_config import build_moss_tts_nano_config
         return cls(config=build_moss_tts_nano_config(profile=current_profile()))
