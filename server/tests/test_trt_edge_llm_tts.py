@@ -114,28 +114,6 @@ def test_cjk_default_segmentation_prefers_sentence_boundary(monkeypatch):
     ]
 
 
-def test_product_backend_bypasses_generic_segmentation(monkeypatch):
-    import voxedge.backends.jetson.trt_edge_llm_tts as tts_mod
-
-    calls = []
-
-    class FakeProductBackend:
-        def synthesize(self, text, **kwargs):
-            calls.append((text, kwargs.get("seed")))
-            return _make_wav_bytes(240), {"backend": "product_explicit_kv"}
-
-    monkeypatch.setenv("OVS_TTS_SEED", "42")
-    backend = tts_mod.TRTEdgeLLMTTSBackend()
-    backend._ready = True
-    backend._product_backend = FakeProductBackend()
-
-    text = "你好，今天我们继续验证语音合成的稳定性。这个版本应该保持清晰自然，不应该出现逐渐变沙、吞音或者明显的噪声积累。"
-    _, meta = backend.synthesize(text, seed=42)
-
-    assert meta["backend"] == "product_explicit_kv"
-    assert calls == [(text, 42)]
-
-
 # NOTE: the qwen3 product-segmentation synthesize orchestration and
 # product_explicit_kv backend selection moved to voxedge — re-covered in
 # voxedge/tests/test_tts_oneshot_and_product_segment.py. backend selection is

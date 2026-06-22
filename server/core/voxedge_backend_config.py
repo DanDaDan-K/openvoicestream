@@ -684,8 +684,6 @@ def build_trt_edge_llm_tts_config(
       EDGE_LLM_TTS_SEGMENT_PAUSE_MS                     → segment_pause_ms (80)
       EDGE_LLM_TTS_HARD_SEGMENT_PAUSE_MS               → segment_hard_pause_ms (120)
       EDGE_LLM_TTS_STREAMING_PROFILE                   → streaming_profile ("continuous_playback")
-      OVS_TTS_MODEL_BASE                               → product_model_base (legacy /home/harvest/voice_test/...)
-      OVS_TTS_NATIVE_MODULE_DIR                        → product_overlay_dir (legacy /home/harvest/voice_test/app_overlay)
 
     NB: the production model_id resolution is ``OVS_TTS_MODEL_ID`` → backend
     name "trt_edgellm" (legacy ``TTSBackend.model_id`` fallback to ``self.name``).
@@ -869,14 +867,6 @@ def build_trt_edge_llm_tts_config(
         chunk_growth_frames=(
             int(env["EDGE_LLM_TTS_CHUNK_GROWTH_FRAMES"])
             if "EDGE_LLM_TTS_CHUNK_GROWTH_FRAMES" in env else None
-        ),
-        product_model_base=_first(
-            "OVS_TTS_MODEL_BASE",
-            default="/home/harvest/voice_test/models/qwen3-tts",
-        ),
-        product_overlay_dir=_first(
-            "OVS_TTS_NATIVE_MODULE_DIR",
-            default="/home/harvest/voice_test/app_overlay",
         ),
     )
 
