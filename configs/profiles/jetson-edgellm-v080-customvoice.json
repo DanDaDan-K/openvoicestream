@@ -61,21 +61,21 @@
       "model_id": "qwen3-tts-customvoice",
       "engine_file": "llm.engine",
       "engine_path": "/opt/models/qwen3-tts-customvoice/talker_assembled_dir/llm.engine",
-      "env_var": "EDGE_LLM_TTS_TALKER_DIR",
+      "env_var": "EDGE_LLM_TTS_TALKER_ENGINE_FILE",
       "required": true
     },
     {
       "model_id": "qwen3-tts-customvoice",
       "engine_file": "llm.engine",
       "engine_path": "/opt/models/qwen3-tts-customvoice/code_predictor/llm.engine",
-      "env_var": "EDGE_LLM_TTS_CP_DIR",
+      "env_var": "EDGE_LLM_TTS_CP_ENGINE_FILE",
       "required": true
     },
     {
       "model_id": "qwen3-tts-customvoice",
       "engine_file": "code2wav.engine",
       "engine_path": "/opt/models/qwen3-tts-customvoice/code2wav/code2wav.engine",
-      "env_var": "EDGE_LLM_TTS_CODE2WAV_DIR",
+      "env_var": "EDGE_LLM_TTS_CODE2WAV_ENGINE_FILE",
       "required": true
     }
   ],

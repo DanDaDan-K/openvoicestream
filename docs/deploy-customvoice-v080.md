@@ -19,6 +19,28 @@ Profile: [`configs/profiles/jetson-edgellm-v080-customvoice.json`](../configs/pr
 Worker reached ready, no `tts_manager_start_failed`, 0 CUDA errors. Standalone
 worker gate (langId 2055/2050 → 9-row, langId -1 → 8-row, all EOS) also PASS.
 
+## Shipped image
+
+`sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:v0.8.0-n1n2-cv`
+digest `sha256:7fa8ba47e6b315516cc12a021ff87994d8a179a5110fce97218520b529a87dde`
+(baked-path through-service gate PASS, zh/en/Base exact). NOTE: this pushed image
+predates the `profile_owned_env` change, so it still needs the `-e EDGE_LLM_TTS_*`
+overrides at runtime. A future image built from current `main` (which has both
+`profile_owned_env` and the `*_ENGINE_FILE` fix below) needs `OVS_PROFILE` only.
+
+### Two baked-`/opt` deploy bugs found + fixed (the `/opt` path had never been served before)
+
+1. **Engine-resolver cache miss** — baked engines must ship `.meta.json` sidecars
+   (host-correct, e.g. `sm87-trt10.3-jp6.2-cuda12.6`) next to each `*.engine`, or
+   the resolver attempts an HF fetch and fails offline. Generate them with the
+   resolver's own `_write_meta` when assembling the bundle.
+2. **`required_engines[].env_var` clobber** — those `env_var`s must NOT reuse the
+   `EDGE_LLM_TTS_TALKER_DIR`/`CP_DIR`/`CODE2WAV_DIR` names the TTS backend reads as
+   **directories**: `resolve_all` overwrites them with the engine **file** path →
+   `tts_manager_start_failed`. The profile now uses non-clobbering
+   `EDGE_LLM_TTS_*_ENGINE_FILE` names (resolver still validates the files; the dir
+   vars from the `env` block survive).
+
 ## Image
 
 Overlay the CV worker + a **dedicated CV plugin** onto the `:v0.8.0-n1n2-rebake`
