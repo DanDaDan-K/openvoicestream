@@ -246,16 +246,27 @@ def apply_profile(
 
         new_keys = set(merged.keys())
 
+        # Profile-owned operator keys: a profile may declare operator-prefixed
+        # keys it FULLY owns (e.g. a CustomVoice profile owning its EDGE_LLM_TTS_*
+        # engine wiring). For those, the profile's value overrides the import-time
+        # operator snapshot (image-baked defaults / inherited env) instead of being
+        # silently shadowed by it. Default (field absent) = no owned keys =
+        # byte-identical behavior for every existing profile. Use this only when a
+        # profile carries the COMPLETE set of values for those keys; partial
+        # profiles that rely on baked defaults must NOT list them.
+        owned = {str(k) for k in (profile.get("profile_owned_env") or [])}
+        eff_operator = _OPERATOR_KEYS - owned
+
         # 1. Clear stale keys (in previous profile but not in this one),
         #    skipping operator-owned keys.
         stale = _APPLIED_KEYS - new_keys
         for k in stale:
-            if k not in _OPERATOR_KEYS:
+            if k not in eff_operator:
                 os.environ.pop(k, None)
 
         # 2. Write new values, unconditionally overwriting unless operator-owned.
         for k, v in merged.items():
-            if k in _OPERATOR_KEYS:
+            if k in eff_operator:
                 existing = os.environ.get(k)
                 if existing != v:
                     if k in CRITICAL_KEYS:
@@ -275,7 +286,7 @@ def apply_profile(
 
         # 3. Update bookkeeping.
         _APPLIED_KEYS.clear()
-        _APPLIED_KEYS.update(k for k in new_keys if k not in _OPERATOR_KEYS)
+        _APPLIED_KEYS.update(k for k in new_keys if k not in eff_operator)
         _CURRENT_PROFILE = profile
 
         if resolve_engines:

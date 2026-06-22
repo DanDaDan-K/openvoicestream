@@ -100,6 +100,49 @@ def test_operator_env_never_overwritten(tmp_path, monkeypatch):
     assert "OVS_OPERATOR_TEST" not in profile_loader.get_applied_keys()
 
 
+def test_profile_owned_env_overrides_operator_baked(tmp_path, monkeypatch):
+    """A profile that declares profile_owned_env owns those operator-prefixed
+    keys: the profile value overrides the import-time operator snapshot (e.g.
+    image-baked EDGE_LLM_TTS_* defaults) instead of being shadowed. Contrast
+    with test_operator_env_never_overwritten (no opt-in → operator wins)."""
+    import os
+
+    # Simulate a baked/operator value present at snapshot time.
+    monkeypatch.setenv("EDGE_LLM_TTS_TALKER_DIR", "/opt/baked/wrong")
+    monkeypatch.setattr(
+        profile_loader, "_OPERATOR_KEYS", frozenset({"EDGE_LLM_TTS_TALKER_DIR"})
+    )
+
+    p = _write_profile(
+        tmp_path, "CV",
+        {
+            "env": {"EDGE_LLM_TTS_TALKER_DIR": "/opt/models/cv/talker"},
+            "profile_owned_env": ["EDGE_LLM_TTS_TALKER_DIR"],
+        },
+    )
+    profile_loader.apply_profile(str(p))
+
+    # Owned → profile wins over the baked snapshot, and it is tracked as applied
+    # (so a later profile switch clears it).
+    assert os.environ["EDGE_LLM_TTS_TALKER_DIR"] == "/opt/models/cv/talker"
+    assert "EDGE_LLM_TTS_TALKER_DIR" in profile_loader.get_applied_keys()
+
+
+def test_profile_owned_env_absent_is_unchanged(tmp_path, monkeypatch):
+    """No profile_owned_env field → byte-identical to today: operator wins."""
+    import os
+
+    monkeypatch.setenv("EDGE_LLM_TTS_TALKER_DIR", "/opt/baked/wins")
+    monkeypatch.setattr(
+        profile_loader, "_OPERATOR_KEYS", frozenset({"EDGE_LLM_TTS_TALKER_DIR"})
+    )
+    p = _write_profile(
+        tmp_path, "P", {"env": {"EDGE_LLM_TTS_TALKER_DIR": "/opt/models/cv/talker"}}
+    )
+    profile_loader.apply_profile(str(p))
+    assert os.environ["EDGE_LLM_TTS_TALKER_DIR"] == "/opt/baked/wins"
+
+
 def test_snapshot_operator_keys_excludes_empty_values(monkeypatch):
     """docker-compose passes declared-but-unset vars as empty strings,
     not unset; these must not be treated as operator-owned (otherwise

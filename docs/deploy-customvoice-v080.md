@@ -49,43 +49,45 @@ code2wav + tokenizer) bakes to `/opt/models/qwen3-tts-customvoice/`.
    value. The CV plugin path therefore MUST live in the **profile env** (it does,
    above) — not just `-e`. *(See "Open items" — this asymmetry is a footgun.)*
 
-3. **The baked entrypoint pre-stamps `EDGE_LLM_TTS_*` + `OVS_TTS_WORKER_CONCURRENCY`.**
-   Those ARE operator-prefixed, so they win over the profile and point the talker
-   at the wrong (baked Base) path → `tts_manager_start_failed`. Until the
-   entrypoint is made conditional, pass the CV paths as explicit `-e` operator
-   overrides. Also `EDGE_LLM_TTS_STATEFUL_CODE2WAV=1` is REQUIRED — the streaming
-   worker uses `_synthesize_worker_via_stream` (gated on `stateful_code2wav_enabled()`);
-   `=0` takes the non-streaming branch that raises `KeyError: 'output_file'`.
+3. **`EDGE_LLM_TTS_STATEFUL_CODE2WAV=1` is REQUIRED** — the streaming worker uses
+   `_synthesize_worker_via_stream` (gated on `stateful_code2wav_enabled()`); `=0`
+   takes the non-streaming branch that raises `KeyError: 'output_file'`. (This is
+   set in the profile env.)
 
-## Run recipe (until the entrypoint is fixed)
+### Solved: the entrypoint-prestamp shadowing (`profile_owned_env`)
 
-Bring up the CV image with the profile **and** these operator `-e` overrides (the
-entrypoint pre-stamp defeats the profile for `EDGE_LLM_TTS_*`/`OVS_TTS_*`):
+The baked entrypoint pre-stamps `EDGE_LLM_TTS_*` + `OVS_TTS_*`. Those are
+operator-prefixed, so `profile_loader` snapshots them as operator-owned and the
+profile's values were silently shadowed → talker pointed at the wrong (baked Base)
+path → `tts_manager_start_failed`. This is now fixed: the profile declares
+`profile_owned_env` (the list of operator-prefixed keys it FULLY owns), and
+`apply_profile` lets the profile override the operator snapshot for exactly those
+keys. **The CV profile owns its TTS engine wiring, so `OVS_PROFILE` alone drives
+it — no `-e` overrides needed.** This is opt-in per profile: profiles that omit
+`profile_owned_env` (e.g. the multilang profiles that rely on baked TTS defaults,
+and the MOSS profile) are byte-identical to before.
+
+## Run recipe
+
+Bring up the CV image with just the profile (and the slim-image host lib mounts):
 
 ```bash
--e OVS_PROFILE=jetson-edgellm-v080-customvoice \
--e EDGE_LLM_TTS_WORKER_BIN=/opt/jv-workers/qwen3_tts_streaming_worker \
--e EDGE_LLM_TTS_TALKER_DIR=/opt/models/qwen3-tts-customvoice/talker_assembled_dir \
--e EDGE_LLM_TTS_CP_DIR=/opt/models/qwen3-tts-customvoice/code_predictor \
--e EDGE_LLM_TTS_CODE2WAV_DIR=/opt/models/qwen3-tts-customvoice/code2wav \
--e EDGE_LLM_TTS_TOKENIZER_DIR=/opt/models/qwen3-tts-customvoice/tokenizer \
--e EDGE_LLM_TTS_STATEFUL_CODE2WAV=1 \
--e OVS_TTS_MODEL_ID=qwen3-tts-customvoice \
--e OVS_TTS_WORKER_CONCURRENCY=1
-# EDGELLM_PLUGIN_PATH comes from the profile (NOT operator-prefixed — see gotcha 2).
+-e OVS_PROFILE=jetson-edgellm-v080-customvoice
+# The profile owns EDGE_LLM_TTS_* + OVS_TTS_* via profile_owned_env, and carries
+# EDGELLM_PLUGIN_PATH (not operator-prefixed). No other -e overrides needed.
 # The :v0.8.0-n1n2-rebake base is a SLIM image: also bind-mount host CUDA/TRT libs
 # (/host-cuda, /host-nvidia-libs, /host-libs) per deploy/jetson-release-highperf.sh.
 ```
 
+> NOTE: this applies to images whose server code includes the `profile_owned_env`
+> support in `profile_loader.py`. A CV image built BEFORE that change still needs
+> the explicit `-e EDGE_LLM_TTS_*` / `OVS_TTS_*` overrides for the same paths.
+
 ## Open items (for review / follow-up)
 
-- **Fix the `EDGELLM_` vs `EDGE_LLM_` operator-prefix asymmetry** in
-  `profile_loader.py` (rename the var to `EDGE_LLM_PLUGIN_PATH`, or add `EDGELLM_`
-  to the operator prefixes). Today the gap *happens* to help (profile carries the
-  CV plugin) but it is a silent footgun.
-- **Make the image entrypoint not pre-stamp `EDGE_LLM_TTS_*`/`OVS_TTS_*`** when a
-  profile supplies them, so the profile alone drives CV (drops the `-e` recipe).
+- **`EDGELLM_` vs `EDGE_LLM_` operator-prefix asymmetry** in `profile_loader.py`
+  is a latent footgun (it currently *helps* — the profile carries the CV plugin).
+  Optional cleanup: rename to `EDGE_LLM_PLUGIN_PATH` for consistency. Not urgent.
 - **Bake the CV bundle to `/opt/models/qwen3-tts-customvoice/`** and re-run the
   through-service gate against the baked `/opt` paths (the PASS above used a
   RO-mounted `/cv-bundle`).
-- **Image push** is held — not pushed to any registry yet.
