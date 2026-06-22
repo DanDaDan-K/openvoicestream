@@ -16,7 +16,9 @@
   <img src="docs/media/hero.png" alt="OpenVoiceStream - streaming ASR and TTS for edge dialogue" width="760" />
 </p>
 
-OpenVoiceStream is a local voice stack for products that need real-time ASR and TTS on edge hardware. It runs fully on-device, avoids heavyweight ML frameworks in the hot path, and keeps the client API stable while you switch between sherpa-onnx, TensorRT-EdgeLLM, RKNN, and CPU ONNX backends.
+**OpenVoiceStream is the deployable voice product** — the FastAPI/WebSocket server, device profiles, install/deploy machinery, and the agent gallery (voice-controlled robot arm, live captioning, simultaneous interpretation, translation). It runs fully on-device, avoids heavyweight ML frameworks in the hot path, and keeps the client API stable while you switch between sherpa-onnx, TensorRT-EdgeLLM, RKNN, and CPU ONNX backends.
+
+**The speech engine underneath is [`voxedge`](https://github.com/suharvest/voxedge)** — a standalone, pip-installable (`pip install voxedge`), pure-Python/numpy library that does the real-time ASR + TTS + conversation loop. This repo *consumes* voxedge (as a wheel) and adds everything needed to ship it as a product. Want to embed edge voice in your own app? Use voxedge directly. Want a turnkey on-device voice server with prebuilt images and agents? You're in the right place.
 
 ## Why This Matters
 
