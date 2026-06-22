@@ -360,7 +360,6 @@ The RK rows use the 2026-06-10 high-performance Qwen3 ASR W8A8 + Matcha
 recheck. Forced client-EOS V2V p50 is 528 ms on RK3588 and 1020 ms on RK3576;
 long-dictation average error is 10.1% / 9.8%. The real `/v2v/stream` path still
 depends on the configured VAD endpointing delay.
-hangover.
 
 Deployment footprint from the same run:
 

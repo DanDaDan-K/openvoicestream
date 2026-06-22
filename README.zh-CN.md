@@ -328,7 +328,6 @@ Jetson/RPi 行来自最初针对 `http://127.0.0.1:8621` 的本地 forced-EOS ga
 | Raspberry Pi 5 `rpi5-default` | `rpi-v1.0-onnx` | `sherpa` | `sherpa_asr` | 0.078 | 0.000 | 20.0% | 3 ms |
 
 RK 行使用 2026-06-10 的高性能 Qwen3 ASR W8A8 + Matcha 复检。强制客户端-EOS 的 V2V p50 在 RK3588 上为 528 ms，在 RK3576 上为 1020 ms；长篇听写平均错误率为 10.1% / 9.8%。真实的 `/v2v/stream` 路径仍取决于所配置的 VAD endpointing 延迟。
-hangover.
 
 同一次运行得到的部署占用：
 
