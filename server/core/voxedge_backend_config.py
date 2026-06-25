@@ -594,6 +594,8 @@ def build_sparktts_trt_config(
       SPARKTTS_MAX_TOKENS             → max_tokens (800, runaway cap)
       SPARKTTS_MAX_SEMANTIC           → max_semantic (600, BiCodec T ceiling)
       SPARKTTS_DEFAULT_GENDER/PITCH/SPEED → default style labels
+      SPARKTTS_VOICES_DIR             → voices_dir (clone VoiceProfile registry dir; None→off)
+      SPARKTTS_CLONE_USE_REF_SEMANTIC → clone_use_ref_semantic (strategy B; default off)
       OVS_TTS_WORKER_CONCURRENCY / profile sparktts_worker_concurrency /
         tts_worker_concurrency → worker_concurrency (1; gates worker --max_slots)
       OVS_TTS_MODEL_ID                → model_id ("sparktts-0p5b")
@@ -658,6 +660,10 @@ def build_sparktts_trt_config(
         default_gender=env.get("SPARKTTS_DEFAULT_GENDER", "female"),
         default_pitch=env.get("SPARKTTS_DEFAULT_PITCH", "moderate"),
         default_speed=env.get("SPARKTTS_DEFAULT_SPEED", "moderate"),
+        voices_dir=env.get("SPARKTTS_VOICES_DIR") or None,
+        clone_use_ref_semantic=str(
+            env.get("SPARKTTS_CLONE_USE_REF_SEMANTIC", "0")
+        ).strip().lower() in ("1", "true", "yes", "on"),
         worker_concurrency=conc,
         model_id=env.get("OVS_TTS_MODEL_ID") or "sparktts-0p5b",
     )

@@ -8,7 +8,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 class _WSHandle:
@@ -179,6 +179,10 @@ class TTSRequest(BaseModel):
     speed: float | None = None
     pitch: float | None = None
     language: str | None = None
+    # Named voice selector (string). For SparkTTS this routes to a registered clone
+    # VoiceProfile (voice_id, e.g. "clone:alice") when it hits the backend's voice
+    # registry; otherwise the backend may interpret it as a controllable style spec.
+    voice: str | None = None
 
 
 class CloneRequest(BaseModel):
@@ -307,6 +311,12 @@ def _request_voice_kwargs(req: TTSRequest, *, backend=None) -> dict:
         out["speed"] = merged["speed"]
     if merged.get("pitch_shift") is not None:
         out["pitch_shift"] = merged["pitch_shift"]
+    # Named voice selector (e.g. SparkTTS clone "voice_id"). Forwarded as a string so
+    # a clone-capable backend can route it through its voice registry. Backends that
+    # don't recognise it ignore the extra kwarg.
+    voice = getattr(req, "voice", None)
+    if voice:
+        out["voice"] = voice
     return out
 
 
@@ -1472,6 +1482,76 @@ async def tts_speakers_delete(
     if not ok:
         return JSONResponse({"error": f"Speaker {speaker_id} not found"}, status_code=404)
     return {"deleted": True, "speaker_id": speaker_id}
+
+
+# ── SparkTTS clone voices (reference-token VoiceProfile registry, spec §4.4) ──
+# Distinct from /tts/speakers (preset/embedding) and /tts/clone (embedding-based,
+# CustomVoice). These manage host-enrolled VoiceProfiles selected at synth time via
+# the `voice` field (e.g. {"text": "...", "voice": "clone:alice"}).
+
+@app.get("/tts/voices")
+async def tts_voices_list(_: None = Depends(_require_api_key)):
+    """List registered SparkTTS clone voices (VoiceProfiles)."""
+    from server.core import sparktts_voices
+    return {"voices": sparktts_voices.list_voices(),
+            "voices_dir": sparktts_voices.voices_dir()}
+
+
+@app.post("/tts/voices/profile")
+async def tts_voices_register_profile(
+    profile_json: UploadFile = File(..., description="VoiceProfile .json"),
+    profile_npz: UploadFile = File(..., description="VoiceProfile .npz"),
+    voice_id: str | None = Form(None),
+    _: None = Depends(_require_api_key),
+):
+    """Register a host-enrolled VoiceProfile (json + npz). Always available — no torch.
+
+    The analysis chain runs on a GPU host (enroll_voice.py); this endpoint persists the
+    resulting pair into the shared voices dir and reloads the live backend registry.
+    """
+    from server.core import sparktts_voices
+    jb = await profile_json.read()
+    nb = await profile_npz.read()
+    try:
+        res = sparktts_voices.register_from_profile_files(jb, nb, voice_id=voice_id)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return res
+
+
+@app.post("/tts/voices/enroll")
+async def tts_voices_enroll(
+    file: UploadFile = File(..., description="reference wav (3-15s, single speaker)"),
+    voice_id: str = Form(...),
+    ref_text: str | None = Form(None),
+    _: None = Depends(_require_api_key),
+):
+    """Enroll a clone voice from reference audio by running the analysis chain in-process.
+
+    Only works on a host with the SparkTTS PyTorch stack (spec §3.2). On a Jetson this
+    returns 501 with guidance to use POST /tts/voices/profile with a host-generated pair.
+    """
+    from server.core import sparktts_voices
+    audio = await file.read()
+    try:
+        res = sparktts_voices.enroll_from_audio(audio, voice_id, ref_text=ref_text)
+    except sparktts_voices.EnrollmentUnavailable as exc:
+        return JSONResponse(
+            {"error": str(exc), "hint": "POST /tts/voices/profile with a host-enrolled .json+.npz"},
+            status_code=501,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return res
+
+
+@app.delete("/tts/voices/{voice_id:path}")
+async def tts_voices_delete(voice_id: str, _: None = Depends(_require_api_key)):
+    """Delete a clone voice's VoiceProfile (json + npz) and reload the registry."""
+    from server.core import sparktts_voices
+    if not sparktts_voices.delete_voice(voice_id):
+        return JSONResponse({"error": f"clone voice {voice_id!r} not found"}, status_code=404)
+    return {"deleted": True, "voice_id": voice_id}
 
 
 # ── TTS ──────────────────────────────────────────────────────────
