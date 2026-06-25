@@ -147,6 +147,7 @@ _TTS_REGISTRY: Dict[str, Tuple[str, str]] = {
     "jetson.matcha_trt":   ("voxedge.backends.jetson.matcha_trt",   "MatchaTRTBackend"),
     "jetson.kokoro_trt":   ("voxedge.backends.jetson.kokoro_trt",   "KokoroTRTBackend"),
     "jetson.moss_tts_nano":("voxedge.backends.jetson.moss_tts_nano","MossTtsNanoBackend"),
+    "jetson.sparktts":     ("voxedge.backends.jetson.sparktts_trt", "SparkTTSBackend"),
     "cpu.sherpa":          ("voxedge.backends.sherpa.tts",          "SherpaTTSBackend"),
     "rk.tts":              ("voxedge.backends.rk.tts",              "RKTTSBackend"),
 }
@@ -188,6 +189,9 @@ def create_tts_backend() -> TTSBackend:
     if spec == "jetson.moss_tts_nano":
         from server.core.voxedge_backend_config import build_moss_tts_nano_config
         return cls(config=build_moss_tts_nano_config(profile=current_profile()))
+    if spec == "jetson.sparktts":
+        from server.core.voxedge_backend_config import build_sparktts_trt_config
+        return cls(config=build_sparktts_trt_config(profile=current_profile()))
     if spec == "cpu.sherpa":
         from server.core.voxedge_backend_config import build_sherpa_tts_config
         return cls(config=build_sherpa_tts_config(profile=current_profile()))

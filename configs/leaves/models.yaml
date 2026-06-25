@@ -52,6 +52,14 @@ models:
     default_precision:
       jetson: fp16   # TRT FP16 engines (ORT fallback is CPU fp32 but same model)
 
+  sparktts-0p5b:
+    default_precision:
+      # SparkTTS 0.5B controllable LLM is exported as a MIXED-precision TRT engine
+      # (edge-llm bf16-hybrid build); BiCodec vocoder fp16; speaker_decoder fp32.
+      # Single precision label models the dominant LLM engine. Flipping this
+      # re-resolves every SparkTTS leaf with no other change.
+      jetson: mixed_bf16
+
   qwen3-asr-rk:
     default_precision:
       rk: w8a8       # RKLLM decoder default quant; w4a16g128 leaf pins explicitly
