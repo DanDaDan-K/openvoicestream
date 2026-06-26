@@ -17,6 +17,8 @@ import logging
 import os
 import threading
 
+from server.core.env_helpers import truthy
+
 # Stateless helpers + model id come straight from voxedge (single source).
 try:
     from voxedge.capabilities.speaker_embedding import (  # noqa: F401
@@ -40,10 +42,6 @@ _HF_URL_DEFAULT = (
 _embedder = None        # cached voxedge SpeakerEmbedder
 _lock = threading.Lock()
 _load_failed = False
-
-
-def _truthy(v: str) -> bool:
-    return v.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _trt_engine_file() -> str:
@@ -79,7 +77,7 @@ def speaker_embedding_enabled() -> bool:
     """Global default, from ``OVS_SPEAKER_EMB`` (default off). Overridable per
     connection via ``?speaker_embedding=`` / v2v config field.
     """
-    return _truthy(os.environ.get("OVS_SPEAKER_EMB", ""))
+    return truthy(os.environ.get("OVS_SPEAKER_EMB", ""))
 
 
 def _model_path() -> str:
