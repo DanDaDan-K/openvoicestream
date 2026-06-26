@@ -169,11 +169,12 @@ POST /diarize
 
 | 设备 | 出向量(CAM++) | 聚类 | 流式 | 非流式 |
 |---|---|---|---|---|
-| Jetson Orin NX/Nano | **TRT engine**(分轨,见 §7) | numpy | ✅ | ✅ |
-| RK3576/3588 | CPU sherpa-onnx(NPU 让给 ASR) | numpy | ⚠️ 实测并发 | ✅ |
+| Jetson Orin NX/Nano | **TRT engine**(分轨,见 §7) | numpy | ✅ parity 0.99999 | ✅ |
+| RK3576/3588 | CPU sherpa-onnx(NPU 让给 ASR) | numpy | ✅ 实测低并发(≤~3 流) | ✅ |
 | RPi / CPU-only | CPU sherpa-onnx | numpy | ⚠️ 小并发/可只开离线 | ✅ |
 
 - **聚类对所有设备一致**(numpy,~µs 级,与设备无关)。瓶颈只在每段一次 CAM++ 前向。
+- **RK3576 实测**(cat-remote,2026-06-26):CAM++ sherpa CPU RTF≈0.09–0.13(1s→125ms/3s→255ms/5s→428ms,2 线程),聚类 N=10 仅 1.45ms。每句一次 embedding 在 VAD finalize 后算、不阻塞音频流 → **online 低并发(≤~3 流)实时可行**,offline 无条件可行;NPU 留给 ASR,不需要 TRT。多并发 finalize 时 CPU 竞争近线性(~RTF 0.1×N)。
 - 通过 `ConcurrencyCapability` 声明 diarization 的 `vram_mb_per_slot` / `max_concurrent`,纳入 `capability_resolver` 的 session ceiling,与 ASR/TTS 错峰共享资源。
 
 ---
