@@ -573,6 +573,102 @@ def build_moss_tts_nano_config(
     )
 
 
+def build_sparktts_trt_config(
+    profile: Optional[dict] = None,
+    env: Optional[dict] = None,
+):
+    """Build a ``SparkTTSConfig`` from env + profile (controllable SparkTTS worker).
+
+    env → SparkTTSConfig field map (see voxedge sparktts_trt header):
+      SPARKTTS_WORKER_BINARY          → worker_binary
+      SPARKTTS_PLUGIN_PATH            → plugin_path (edge-llm plugin .so, LD_PRELOAD'd)
+      SPARKTTS_LLM_ENGINE_DIR         → llm_engine_dir (mixed-precision LLM engine dir)
+      SPARKTTS_TOKENIZER_DIR          → tokenizer_dir (None → llm_engine_dir)
+      SPARKTTS_BICODEC_ENGINE         → bicodec_engine (.engine file)
+      SPARKTTS_SPEAKER_DECODER_ENGINE → speaker_decoder_engine (.engine file)
+      SPARKTTS_LD_LIBRARY_PATH        → ld_library_path (edge-llm build dir)
+      SPARKTTS_SAMPLE_RATE            → sample_rate (16000)
+      SPARKTTS_FIRST_CHUNK_TOKENS     → first_chunk_tokens (6)
+      SPARKTTS_CHUNK_TOKENS           → chunk_tokens (16)
+      SPARKTTS_LEFT_OVERLAP_TOKENS    → left_overlap_tokens (12)
+      SPARKTTS_MAX_TOKENS             → max_tokens (800, runaway cap)
+      SPARKTTS_MAX_SEMANTIC           → max_semantic (600, BiCodec T ceiling)
+      SPARKTTS_DEFAULT_GENDER/PITCH/SPEED → default style labels
+      SPARKTTS_VOICES_DIR             → voices_dir (clone VoiceProfile registry dir; None→off)
+      SPARKTTS_CLONE_USE_REF_SEMANTIC → clone_use_ref_semantic (strategy B; default off)
+      OVS_TTS_WORKER_CONCURRENCY / profile sparktts_worker_concurrency /
+        tts_worker_concurrency → worker_concurrency (1; gates worker --max_slots)
+      OVS_TTS_MODEL_ID                → model_id ("sparktts-0p5b")
+
+    NOTE: env reads happen HERE (product layer), never at voxedge import/module
+    scope — preserves voxedge's zero-env property (trt_edge_llm_tts_env_staleness).
+    """
+    from voxedge.backends.jetson.sparktts_trt import SparkTTSConfig
+
+    if env is None:
+        env = os.environ
+    p = profile if isinstance(profile, dict) else {}
+
+    def _pint(envkey, *pkeys, default):
+        v = env.get(envkey)
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                pass
+        for k in pkeys:
+            pv = p.get(k)
+            if pv is not None:
+                try:
+                    return int(pv)
+                except (TypeError, ValueError):
+                    pass
+        return default
+
+    def _pfloat(envkey, default):
+        v = env.get(envkey)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+        return default
+
+    # worker_concurrency precedence: env OVS_TTS_WORKER_CONCURRENCY → profile → 1.
+    conc = _pint("OVS_TTS_WORKER_CONCURRENCY",
+                 "sparktts_worker_concurrency", "tts_worker_concurrency", default=1)
+
+    return SparkTTSConfig(
+        worker_binary=env.get("SPARKTTS_WORKER_BINARY", "/opt/jv-workers/spark_tts_worker"),
+        plugin_path=env.get("SPARKTTS_PLUGIN_PATH", "/opt/edgellm/libNvInfer_edgellm_plugin.so"),
+        llm_engine_dir=env.get("SPARKTTS_LLM_ENGINE_DIR", "/opt/models/sparktts-0p5b/llm_engine"),
+        tokenizer_dir=env.get("SPARKTTS_TOKENIZER_DIR") or None,
+        bicodec_engine=env.get("SPARKTTS_BICODEC_ENGINE",
+                               "/opt/models/sparktts-0p5b/bicodec_decoder_dynT.fp16.engine"),
+        speaker_decoder_engine=env.get("SPARKTTS_SPEAKER_DECODER_ENGINE",
+                                       "/opt/models/sparktts-0p5b/sparktts_speaker_decoder.fp32.engine"),
+        ld_library_path=env.get("SPARKTTS_LD_LIBRARY_PATH") or None,
+        sample_rate=_pint("SPARKTTS_SAMPLE_RATE", "tts_sample_rate", default=16000),
+        first_chunk_tokens=_pint("SPARKTTS_FIRST_CHUNK_TOKENS", default=6),
+        chunk_tokens=_pint("SPARKTTS_CHUNK_TOKENS", default=16),
+        left_overlap_tokens=_pint("SPARKTTS_LEFT_OVERLAP_TOKENS", default=12),
+        max_tokens=_pint("SPARKTTS_MAX_TOKENS", default=800),
+        max_semantic=_pint("SPARKTTS_MAX_SEMANTIC", default=600),
+        temperature=_pfloat("SPARKTTS_TEMPERATURE", default=1.0),
+        top_k=_pint("SPARKTTS_TOP_K", default=1),
+        top_p=_pfloat("SPARKTTS_TOP_P", default=1.0),
+        default_gender=env.get("SPARKTTS_DEFAULT_GENDER", "female"),
+        default_pitch=env.get("SPARKTTS_DEFAULT_PITCH", "moderate"),
+        default_speed=env.get("SPARKTTS_DEFAULT_SPEED", "moderate"),
+        voices_dir=env.get("SPARKTTS_VOICES_DIR") or None,
+        clone_use_ref_semantic=str(
+            env.get("SPARKTTS_CLONE_USE_REF_SEMANTIC", "0")
+        ).strip().lower() in ("1", "true", "yes", "on"),
+        worker_concurrency=conc,
+        model_id=env.get("OVS_TTS_MODEL_ID") or "sparktts-0p5b",
+    )
+
+
 def build_sherpa_tts_config(
     profile: Optional[dict] = None,
     env: Optional[dict] = None,
@@ -667,6 +763,7 @@ _TTS_CONFIG_BUILDERS = {
     "jetson.matcha_trt": build_matcha_tts_config,
     "jetson.kokoro_trt": build_kokoro_trt_config,
     "jetson.moss_tts_nano": build_moss_tts_nano_config,
+    "jetson.sparktts": build_sparktts_trt_config,
     "cpu.sherpa": build_sherpa_tts_config,
     "rk.tts": build_rk_tts_config,
 }
