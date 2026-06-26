@@ -770,13 +770,23 @@ def _flag_or(value, env_default: bool) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-async def _augment_final_payload(payload, raw_text, seg, punct_on, spk_on, sample_rate):
+async def _augment_final_payload(
+    payload, raw_text, seg, punct_on, spk_on, sample_rate,
+    *, diarizer=None, seg_start=None, seg_end=None,
+):
     """Apply optional punctuation + speaker embedding to a *final* payload.
 
     Mutates ``payload`` in place: rewrites ``payload['text']`` with restored
     punctuation, and adds {speaker_embedding, embedding_model, dim, normalized}
     from the utterance audio in ``seg`` (a list of float32 numpy chunks). A
     no-op (zero cost, behavior identical to before) when both flags are off.
+
+    P0b/P1 additions (purely additive — existing fields untouched, off-path is
+    byte-identical): when speaker embedding is on, the segment's session-relative
+    ``start``/``end`` seconds are added. When ``diarizer`` is provided (diarize
+    on), the embedding is fed to the online diarizer and ``speaker`` /
+    ``speaker_conf`` are added too.
+
     Runs the CPU models in the default executor so the event loop and the ASR
     decode executor are not blocked. Never raises to the caller.
     """
@@ -799,8 +809,23 @@ async def _augment_final_payload(payload, raw_text, seg, punct_on, spk_on, sampl
             emb = await loop.run_in_executor(
                 None, _spk.compute_embedding, samples, sample_rate
             )
+            # P0b: tag the segment with its session-relative time window so a
+            # consumer (or the diarizer below) can order the transcript.
+            if seg_start is not None and seg_end is not None:
+                payload["start"] = round(float(seg_start), 3)
+                payload["end"] = round(float(seg_end), 3)
             if emb is not None:
                 payload.update(_spk.embedding_payload(emb))
+                # P1: online blind diarization — assign a speaker label.
+                if diarizer is not None:
+                    try:
+                        _ds = diarizer.assign(
+                            emb, float(seg_start or 0.0), float(seg_end or 0.0)
+                        )
+                        payload["speaker"] = _ds.speaker
+                        payload["speaker_conf"] = round(float(_ds.confidence), 3)
+                    except Exception:
+                        logger.exception("diarize assign on final failed; skipping label")
         except Exception:
             logger.exception("speaker embedding on final failed; skipping")
 
@@ -2532,6 +2557,42 @@ async def speaker_embedding(
     return payload
 
 
+# ── Diarization (optional, opt-in, blind clustering) ────────────────
+
+@app.post("/diarize")
+async def diarize(
+    file: UploadFile = File(...),
+    sample_rate: int = Query(16000),
+    num_speakers: Optional[int] = Query(None),
+    return_embeddings: bool = Query(False),
+    _: None = Depends(_require_api_key),
+):
+    """Offline blind speaker diarization of a (possibly multi-speaker) clip.
+
+    Accepts a PCM16 WAV or raw int16 PCM (``?sample_rate=`` for the latter).
+    Internally: VAD/energy-segment → CAM++ embedding per segment → numpy
+    agglomerative clustering. ``?num_speakers=`` pins the cluster count when
+    known; ``?return_embeddings=true`` attaches per-segment vectors. Returns
+    spec §4.2: ``{num_speakers, segments:[{start,end,speaker,confidence}],
+    embedding_model, dim}``. Blind clustering only — identification (mapping
+    ``spk_N`` → a name) is the consumer's responsibility (default off).
+    """
+    from server.core import diarization as _diar
+    from server.core import speaker_embedding as _spk
+    from server.core.session_limiter import acquire_http
+
+    audio_bytes = await file.read()
+    async with acquire_http("/diarize"):
+        loop = asyncio.get_running_loop()
+
+        def _run():
+            samples = _spk.decode_audio_to_16k_mono(audio_bytes, fallback_sr=sample_rate)
+            return _diar.diarize_audio(samples, 16000, num_speakers=num_speakers)
+
+        segments = await loop.run_in_executor(None, _run)
+    return _diar.diarize_response(segments, return_embeddings=return_embeddings)
+
+
 @app.websocket("/asr/stream")
 async def asr_stream(
     ws: WebSocket,
@@ -2541,6 +2602,7 @@ async def asr_stream(
     vad_silence_ms: Optional[int] = None,
     punctuate: Optional[str] = None,          # default from OVS_PUNCT
     speaker_embedding: Optional[str] = None,  # default from OVS_SPEAKER_EMB
+    diarize: Optional[str] = None,            # default from OVS_DIARIZE
 ):
     """Streaming ASR via WebSocket.
 
@@ -2607,8 +2669,13 @@ async def asr_stream(
     # Optional final-payload enrichments: query overrides env default (off).
     from server.core import punctuation as _punct_mod
     from server.core import speaker_embedding as _spk_mod
+    from server.core import diarization as _diar_mod
     punct_on = _flag_or(punctuate, _punct_mod.punctuation_enabled())
     spk_on = _flag_or(speaker_embedding, _spk_mod.speaker_embedding_enabled())
+    diarize_on = _flag_or(diarize, _diar_mod.diarize_enabled())
+    # Diarization clusters over per-segment embeddings, so it implies embedding.
+    if diarize_on:
+        spk_on = True
 
     # Choose backend: prefer ASR backend with STREAMING, fall back to sherpa
     asr_be = _get_asr_backend()
@@ -2652,7 +2719,7 @@ async def asr_stream(
             async with get_coordinator().acquire("asr"):
                 await _asr_stream_backend(
                     ws, asr_be, language, sample_rate, vad_session,
-                    punct_on=punct_on, spk_on=spk_on,
+                    punct_on=punct_on, spk_on=spk_on, diarize_on=diarize_on,
                 )
         else:
             await ws.send_json({"error": "no streaming ASR available"})
@@ -2687,6 +2754,7 @@ async def _asr_stream_backend(
     vad_session=None,
     punct_on: bool = False,
     spk_on: bool = False,
+    diarize_on: bool = False,
 ):
     """Streaming ASR using ASR backend (accumulate-then-transcribe).
 
@@ -2702,12 +2770,30 @@ async def _asr_stream_backend(
     import json as _json
     import numpy as np
 
+    from server.core import diarization as _diar_mod_be
+
     stream = asr_be.create_stream(language=language)
     logger.info("ASR stream opened (backend=%s)", asr_be.name)
 
     # Per-utterance audio buffer for speaker embedding. Only populated when
     # spk_on; cleared after every finalize / reset (see _augment_final_payload).
     _seg: list = []
+
+    # P0b/P1: session-relative timeline. ``_t_samples`` counts every sample fed
+    # to the buffer; a segment spans [_t_samples - len(_seg), _t_samples] / sr.
+    # Only advanced when spk_on (zero overhead otherwise). One OnlineDiarizer
+    # per connection holds the running speaker centroids when diarize_on.
+    _t_samples: int = 0
+    _diarizer = _diar_mod_be.make_session_diarizer() if diarize_on else None
+
+    def _seg_window():
+        """Session-relative (start, end) seconds for the current buffer."""
+        if not sample_rate:
+            return 0.0, 0.0
+        _len = sum(int(len(s)) for s in _seg)
+        end = _t_samples / float(sample_rate)
+        start = (_t_samples - _len) / float(sample_rate)
+        return start, end
 
     # Close-frame override: set to 4429 on slot-pool saturation so the finally
     # block closes with a reject-not-queue code instead of the default 1000.
@@ -2761,7 +2847,11 @@ async def _asr_stream_backend(
                     }
                     if detected_language:
                         payload["language"] = detected_language
-                    await _augment_final_payload(payload, final_text, _seg, punct_on, spk_on, sample_rate)
+                    _st, _en = _seg_window()
+                    await _augment_final_payload(
+                        payload, final_text, _seg, punct_on, spk_on, sample_rate,
+                        diarizer=_diarizer, seg_start=_st, seg_end=_en,
+                    )
                     _seg.clear()
                     await ws.send_json(payload)
                     logger.debug("ASR utterance endpoint forced (backend=%s)", asr_be.name)
@@ -2787,15 +2877,28 @@ async def _asr_stream_backend(
                 }
                 if detected_language:
                     payload["language"] = detected_language
-                await _augment_final_payload(payload, final_text, _seg, punct_on, spk_on, sample_rate)
+                _st, _en = _seg_window()
+                await _augment_final_payload(
+                    payload, final_text, _seg, punct_on, spk_on, sample_rate,
+                    diarizer=_diarizer, seg_start=_st, seg_end=_en,
+                )
                 _seg.clear()
                 await ws.send_json(payload)
+                # P1: optional session-end blind-diarization summary (relabel()).
+                if _diarizer is not None:
+                    _summary = _diar_mod_be.summary_payload(_diarizer)
+                    if _summary is not None:
+                        try:
+                            await ws.send_json(_summary)
+                        except Exception:
+                            pass
                 break
 
             # Buffer audio (run in thread to avoid blocking event loop)
             samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
             if spk_on:
                 _seg.append(samples)
+                _t_samples += int(len(samples))
             _loop = asyncio.get_event_loop()
             await _loop.run_in_executor(_get_asr_executor(), stream.accept_waveform, sample_rate, samples)
 
@@ -2820,7 +2923,11 @@ async def _asr_stream_backend(
                         }
                         if detected_language:
                             payload["language"] = detected_language
-                        await _augment_final_payload(payload, final_text, _seg, punct_on, spk_on, sample_rate)
+                        _st, _en = _seg_window()
+                        await _augment_final_payload(
+                            payload, final_text, _seg, punct_on, spk_on, sample_rate,
+                            diarizer=_diarizer, seg_start=_st, seg_end=_en,
+                        )
                         await ws.send_json(payload)
                     except Exception:
                         # Client gone during a slow finalize (e.g. TRT-EdgeLLM
@@ -2856,7 +2963,11 @@ async def _asr_stream_backend(
                         "is_final": True,
                         "is_stable": True,
                     }
-                    await _augment_final_payload(payload, partial_text, _seg, punct_on, spk_on, sample_rate)
+                    _st, _en = _seg_window()
+                    await _augment_final_payload(
+                        payload, partial_text, _seg, punct_on, spk_on, sample_rate,
+                        diarizer=_diarizer, seg_start=_st, seg_end=_en,
+                    )
                     _seg.clear()
                     await ws.send_json(payload)
                 else:
@@ -3398,6 +3509,7 @@ async def v2v_stream(ws: WebSocket):
         # BackendManagers.
         punct_on = False
         spk_on = False
+        diarize_on = False
         try:
             asr_language    = cfg.get("asr_language")  # e.g. "zh" / "Chinese" / "en" / "auto" / None
             tts_language    = cfg.get("tts_language")  # truthy = enable TTS; "auto" = let backend detect
@@ -3437,8 +3549,13 @@ async def v2v_stream(ws: WebSocket):
             # Optional, default-off final-payload enrichments (config overrides env).
             from server.core import punctuation as _punct_mod
             from server.core import speaker_embedding as _spk_mod
+            from server.core import diarization as _diar_mod
             punct_on = _flag_or(cfg.get("punctuate"), _punct_mod.punctuation_enabled())
             spk_on   = _flag_or(cfg.get("speaker_embedding"), _spk_mod.speaker_embedding_enabled())
+            diarize_on = _flag_or(cfg.get("diarize"), _diar_mod.diarize_enabled())
+            # Diarization clusters over embeddings, so it implies embedding.
+            if diarize_on:
+                spk_on = True
         except (ValueError, TypeError) as _cfg_exc:
             try:
                 await ws.send_json({"type": v2v_proto.SERVER_ERROR,
@@ -3639,7 +3756,16 @@ async def v2v_stream(ws: WebSocket):
             # captured here so the finalize closure needn't reach for it.
             "spk_seg": [],
             "sample_rate": sample_rate,
+            # P0b/P1: session-cumulative speech-sample counter for diarization
+            # timestamps. NOT reset per turn (unlike asr_audio_samples_accepted)
+            # so start/end are relative to session start. TODO(P5): inter-turn
+            # silence is not counted here, so the timeline is speech-compacted —
+            # fine for ordering blind clusters, not wall-clock accurate.
+            "diar_samples": 0,
         }
+        # One OnlineDiarizer per v2v session when diarize_on (holds running
+        # centroids); None otherwise (zero overhead).
+        _v2v_diarizer = _diar_mod.make_session_diarizer() if diarize_on else None
         tts_q: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_event_loop()
     
@@ -3899,6 +4025,7 @@ async def v2v_stream(ws: WebSocket):
                                         state["asr_audio_samples_accepted"] += int(len(pre))
                                         if spk_on:
                                             state["spk_seg"].append(pre)
+                                            state["diar_samples"] += int(len(pre))
                                     state["preroll"] = []
                                     state["preroll_samples"] = 0
                             elif event == vad_mod.VADSession.SPEECH_END:
@@ -3956,6 +4083,7 @@ async def v2v_stream(ws: WebSocket):
                             state["asr_audio_samples_accepted"] += int(len(samples))
                             if spk_on:
                                 state["spk_seg"].append(samples)
+                                state["diar_samples"] += int(len(samples))
                         # Now safe to flag the endpoint — audio chunk that
                         # carried the speech-end has been delivered to the
                         # stream. asr_out_task will pick this up on the next
@@ -4289,15 +4417,32 @@ async def v2v_stream(ws: WebSocket):
                             from server.core import speaker_embedding as _spk
                             _seg = state["spk_seg"]
                             _seg_all = np.concatenate(_seg) if len(_seg) > 1 else _seg[0]
+                            _sr = int(state.get("sample_rate", 16000))
                             _emb = await loop.run_in_executor(
-                                None, _spk.compute_embedding, _seg_all,
-                                int(state.get("sample_rate", 16000)),
+                                None, _spk.compute_embedding, _seg_all, _sr,
                             )
                             if _emb is not None:
                                 _spk_fields = _spk.embedding_payload(_emb)
+                                # P0b: session-relative segment time window.
+                                _seg_len = int(len(_seg_all))
+                                _d_end = state["diar_samples"] / float(_sr) if _sr else 0.0
+                                _d_start = (state["diar_samples"] - _seg_len) / float(_sr) if _sr else 0.0
+                                _spk_fields["start"] = round(_d_start, 3)
+                                _spk_fields["end"] = round(_d_end, 3)
+                                # P1: online blind diarization speaker label.
+                                if diarize_on and _v2v_diarizer is not None:
+                                    try:
+                                        _ds = _v2v_diarizer.assign(_emb, _d_start, _d_end)
+                                        _spk_fields["speaker"] = _ds.speaker
+                                        _spk_fields["speaker_conf"] = round(float(_ds.confidence), 3)
+                                    except Exception:
+                                        logger.exception("v2v diarize assign failed; skipping label")
                         except Exception:
                             logger.exception("v2v speaker embedding failed; skipping")
                     state["spk_seg"] = []
+                    # TODO(P2/v2v): emit a diarization_summary (relabel()) on
+                    # session close. Deferred — the v2v close path is complex
+                    # (multi-utterance / barge-in); /asr/stream already does it.
 
                     # Multi-utterance: mid-session finals carry
                     # session_complete=False; close-out final on
