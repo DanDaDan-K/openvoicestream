@@ -23,6 +23,7 @@ import os
 from typing import List, Mapping, Optional
 
 from server.core.concurrency_capability import ConcurrencyCapability
+from server.core.env_helpers import env_float, env_int, truthy
 
 logger = logging.getLogger(__name__)
 
@@ -45,47 +46,29 @@ except Exception:
     SPEAKER_MODEL_NAME = "campplus_sv_zh_en_3dspeaker"
 
 
-def _truthy(v: str) -> bool:
-    return v.strip().lower() in ("1", "true", "yes", "on")
-
-
 def diarize_enabled() -> bool:
     """Global default, from ``OVS_DIARIZE`` (default off). Overridable per
     connection via ``?diarize=`` (/asr/stream) or the v2v ``config`` field.
     """
-    return _truthy(os.environ.get("OVS_DIARIZE", ""))
+    return truthy(os.environ.get("OVS_DIARIZE", ""))
 
 
 # ── tuning params (env, with leaf-friendly defaults from spec §8) ────────────
 
-def _env_float(key: str, default: float) -> float:
-    try:
-        return float(os.environ.get(key, default))
-    except (TypeError, ValueError):
-        return default
-
-
-def _env_int(key: str, default: int) -> int:
-    try:
-        return int(os.environ.get(key, default))
-    except (TypeError, ValueError):
-        return default
-
-
 def _online_threshold() -> float:
-    return _env_float("OVS_DIARIZE_THRESHOLD", 0.55)
+    return env_float("OVS_DIARIZE_THRESHOLD", 0.55)
 
 
 def _ema() -> float:
-    return _env_float("OVS_DIARIZE_EMA", 0.7)
+    return env_float("OVS_DIARIZE_EMA", 0.7)
 
 
 def _max_speakers() -> int:
-    return _env_int("OVS_DIARIZE_MAX_SPEAKERS", 10)
+    return env_int("OVS_DIARIZE_MAX_SPEAKERS", 10)
 
 
 def _offline_min_sim() -> float:
-    return _env_float("OVS_DIARIZE_MIN_SIM", 0.50)
+    return env_float("OVS_DIARIZE_MIN_SIM", 0.50)
 
 
 def _min_segment_ms() -> int:
@@ -99,7 +82,7 @@ def _min_segment_ms() -> int:
     # prefers the production silero VAD (utterance-level spans, P5 done); this
     # floor still applies as a safety net under both the silero and energy
     # paths.
-    return _env_int("OVS_DIARIZE_MIN_SEGMENT_MS", 600)
+    return env_int("OVS_DIARIZE_MIN_SEGMENT_MS", 600)
 
 
 # ── concurrency capability (folds into the session ceiling) ──────────────────
@@ -149,7 +132,7 @@ def diarization_concurrency_capability(
     """
     try:
         env_map = env if env is not None else os.environ
-        enabled = _truthy(env_map.get("OVS_DIARIZE", ""))
+        enabled = truthy(env_map.get("OVS_DIARIZE", ""))
         if not enabled and isinstance(profile, Mapping):
             enabled = bool(profile.get("diarize"))
         if not enabled:
@@ -397,19 +380,12 @@ def _segment_audio(samples, sr: int, min_segment_ms: int):
     file). Never raises.
     """
     spans = _segment_audio_silero(samples, sr, min_segment_ms)
-    if spans is None:
-        # silero unavailable / unsupported sr → energy fallback.
-        return _segment_audio_energy(samples, sr, min_segment_ms)
-    if not spans:
-        # silero ran but found no qualifying speech. For a non-empty clip,
-        # avoid returning nothing on a borderline/low-energy utterance: let the
-        # energy splitter take a pass (it emits the whole clip as a last resort
-        # for single-speaker short audio).
-        import numpy as np
-
-        if np.asarray(samples).shape[0] > 0:
-            return _segment_audio_energy(samples, sr, min_segment_ms)
-    return spans
+    if spans:
+        return spans
+    # silero unavailable (None) or found no qualifying speech ([]) → energy
+    # splitter. It handles empty audio (→ []) and emits the whole clip as a
+    # last resort for borderline single-speaker short audio.
+    return _segment_audio_energy(samples, sr, min_segment_ms)
 
 
 def diarize_audio(samples, sr: int, num_speakers: Optional[int] = None):
@@ -449,17 +425,12 @@ def diarize_audio(samples, sr: int, num_speakers: Optional[int] = None):
         if not items:
             return []
 
-        segs = OfflineDiarizer(
+        # cluster() attaches each segment's embedding, so ?return_embeddings=true
+        # is honoured without re-matching segments back to their vectors.
+        return OfflineDiarizer(
             min_sim=_offline_min_sim(),
             max_speakers=_max_speakers(),
         ).cluster(items, num_speakers=num_speakers)
-
-        # Attach embeddings (kernel drops them by default) so the endpoint can
-        # honour ?return_embeddings=true. Matched back by (start, end).
-        by_span = {(round(s, 3), round(e, 3)): emb for (emb, s, e) in items}
-        for seg in segs:
-            seg.embedding = by_span.get((round(seg.start, 3), round(seg.end, 3)))
-        return segs
     except Exception:
         logger.exception("diarize_audio failed; returning empty result")
         return []
