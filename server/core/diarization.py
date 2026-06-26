@@ -93,8 +93,10 @@ def _min_segment_ms() -> int:
     # >=0.63s score >=0.73 cosine to their speaker centroid; everything that
     # broke was <=0.54s. A 600ms floor drops those fragments and restores
     # correct blind speaker counts (2/3/1) without touching the cosine
-    # threshold (which is well-centered, sep gap 0.545). TODO(P5): real silero
-    # VAD gives utterance-level spans and addresses the same root cause sharper.
+    # threshold (which is well-centered, sep gap 0.545). The segmenter now
+    # prefers the production silero VAD (utterance-level spans, P5 done); this
+    # floor still applies as a safety net under both the silero and energy
+    # paths.
     return _env_int("OVS_DIARIZE_MIN_SEGMENT_MS", 600)
 
 
@@ -185,15 +187,91 @@ def diarize_response(segments: List, return_embeddings: bool = False) -> dict:
 
 # ── offline: audio → segments → embeddings → clustering ──────────────────────
 
-def _segment_audio(samples, sr: int, min_segment_ms: int):
-    """Split a mono float32 waveform into speech spans → list of (start, end).
+def _segment_audio_silero(samples, sr: int, min_segment_ms: int):
+    """Utterance-level speech spans via the production silero VAD.
 
-    TODO(P5): reuse the production silero VAD (``server.core.vad``) for sharper
-    endpoints. That requires loading the VAD model, which is unavailable in
-    CPU/CI smoke runs, so for now this is a dependency-free energy/silence
-    splitter: 30 ms frames, an adaptive energy gate, runs of speech frames
-    grouped into segments and short fragments (< ``min_segment_ms``) dropped.
-    Good enough to lay out the segment time-axis for blind clustering.
+    Same model the streaming path uses (``server.core.vad.SileroVADSession``),
+    so ``POST /diarize`` and ``?diarize`` endpoint identically. Feeds the clip
+    through the VAD one 16 ms window at a time, tracking sample position, and
+    turns its ``SPEECH_START`` / ``SPEECH_END`` transitions into closed
+    ``(start, end)`` spans. The trailing ``silence_ms`` that triggers an
+    endpoint is trimmed back off each span end so boundaries hug the actual
+    speech.
+
+    Returns:
+      * ``list[(start, end)]`` (possibly empty) on success — the caller treats
+        this as authoritative and does NOT fall back, or
+      * ``None`` when silero is unavailable (no onnxruntime / no model file) or
+        the sample rate is unsupported, signalling the caller to fall back to
+        the energy splitter.
+
+    Never raises — any unexpected failure also returns ``None`` (fall back).
+    """
+    # silero (the bundled v5 ONNX) only runs at 16 kHz; defer anything else.
+    if sr != 16000:
+        return None
+
+    import numpy as np
+
+    samples = np.asarray(samples, dtype=np.float32)
+    n = samples.shape[0]
+    if n == 0:
+        return []
+
+    try:
+        from server.core.vad import SileroVADSession
+    except Exception:
+        return None
+
+    # Tighter endpoint than the streaming default (400 ms): offline we want
+    # crisp utterance boundaries, not conversational turn-taking latency.
+    silence_ms = 300
+    try:
+        vad = SileroVADSession(sample_rate=sr, silence_ms=silence_ms)
+    except Exception:
+        # onnxruntime missing or model file absent (CI / CPU smoke) → fall back.
+        return None
+
+    try:
+        window = vad.WINDOW_16K  # 256 samples = 16 ms at 16 kHz
+        silence_s = silence_ms / 1000.0
+        spans = []
+        cur_start = None
+        i = 0
+        while i + window <= n:
+            ev = vad.process(samples[i : i + window])
+            if ev == SileroVADSession.SPEECH_START:
+                cur_start = i / float(sr)
+            elif ev == SileroVADSession.SPEECH_END:
+                if cur_start is not None:
+                    win_end_s = (i + window) / float(sr)
+                    end_s = max(cur_start, win_end_s - silence_s)
+                    spans.append((cur_start, end_s))
+                    cur_start = None
+            i += window
+        # Speech still open at clip end → close it at the final sample.
+        if cur_start is not None:
+            spans.append((cur_start, n / float(sr)))
+    except Exception:
+        logger.exception("silero VAD segmentation failed; falling back to energy")
+        return None
+
+    # Same safety floor the energy path uses: drop sub-min_segment_ms scraps
+    # whose embeddings are unreliable and inflate the blind speaker count.
+    spans = [
+        (s, e) for (s, e) in spans if (e - s) * 1000.0 >= min_segment_ms
+    ]
+    return spans
+
+
+def _segment_audio_energy(samples, sr: int, min_segment_ms: int):
+    """Dependency-free energy/silence splitter — the silero fallback.
+
+    Used when the silero model is unavailable (CI / CPU smoke runs with no
+    onnxruntime or no bundled ONNX). 30 ms frames, an adaptive energy gate,
+    runs of speech frames grouped into segments and short fragments
+    (< ``min_segment_ms``) dropped. Coarser endpoints than silero, but good
+    enough to lay out the segment time-axis for blind clustering.
     """
     import numpy as np
 
@@ -235,6 +313,33 @@ def _segment_audio(samples, sr: int, min_segment_ms: int):
     # still emit it so single-speaker short clips are not dropped.
     if not spans:
         spans.append((0.0, n / float(sr)))
+    return spans
+
+
+def _segment_audio(samples, sr: int, min_segment_ms: int):
+    """Split a mono float32 waveform into speech spans → list of (start, end).
+
+    Prefers the production silero VAD (``_segment_audio_silero``) — the same
+    model the streaming ``?diarize`` path uses — for utterance-level spans that
+    fix the over-segmentation root cause (energy fragments < ~0.6 s yield
+    unreliable embeddings that inflate the blind ``num_speakers`` estimate).
+    Falls back to the dependency-free energy splitter (``_segment_audio_energy``)
+    when silero is unavailable (CI / CPU smoke: no onnxruntime or no model
+    file). Never raises.
+    """
+    spans = _segment_audio_silero(samples, sr, min_segment_ms)
+    if spans is None:
+        # silero unavailable / unsupported sr → energy fallback.
+        return _segment_audio_energy(samples, sr, min_segment_ms)
+    if not spans:
+        # silero ran but found no qualifying speech. For a non-empty clip,
+        # avoid returning nothing on a borderline/low-energy utterance: let the
+        # energy splitter take a pass (it emits the whole clip as a last resort
+        # for single-speaker short audio).
+        import numpy as np
+
+        if np.asarray(samples).shape[0] > 0:
+            return _segment_audio_energy(samples, sr, min_segment_ms)
     return spans
 
 
