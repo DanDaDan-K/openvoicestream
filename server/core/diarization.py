@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import List, Optional
+from typing import List, Mapping, Optional
+
+from server.core.concurrency_capability import ConcurrencyCapability
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,73 @@ def _min_segment_ms() -> int:
     # floor still applies as a safety net under both the silero and energy
     # paths.
     return _env_int("OVS_DIARIZE_MIN_SEGMENT_MS", 600)
+
+
+# ── concurrency capability (folds into the session ceiling) ──────────────────
+
+def _max_concurrent(env_map: Optional[Mapping[str, str]] = None) -> Optional[int]:
+    """Read ``OVS_DIARIZE_MAX_CONCURRENT``; **default None** (no fixed cap).
+
+    Deliberately *not* using ``_env_int`` (whose default is an int): for the
+    diarization concurrency ceiling an unset — or non-positive / unparseable —
+    value means "do not constrain", so it is dropped from the ``min()``
+    aggregate (treated as ``+inf``) rather than pinned to a number.
+    """
+    m = env_map if env_map is not None else os.environ
+    raw = m.get("OVS_DIARIZE_MAX_CONCURRENT")
+    if raw is None:
+        return None
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def diarization_concurrency_capability(
+    profile: Optional[Mapping[str, object]] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[ConcurrencyCapability]:
+    """Diarization's runtime concurrency descriptor, or ``None`` when it does
+    not participate in the session ceiling.
+
+    Returns ``None`` (does **not** constrain the ceiling) unless diarization is
+    enabled — either globally via ``OVS_DIARIZE`` (``diarize_enabled()``) or by
+    a profile that opts in (``profile["diarize"]`` truthy). Default-off, so the
+    common path returns ``None`` and the ceiling is byte-identical to a deploy
+    that never declared diarization at all.
+
+    Design / cost model: the blind clustering kernel is pure numpy and its CPU
+    cost is negligible. The real per-stream constraint is the *one CAM++ forward
+    pass per speech segment*, which competes for CPU/accelerator. That ceiling
+    is device-specific (real-CAM++ validation: Pi4 / RK3576 ≈ 3 concurrent
+    streams, Pi5 ≈ 6), so we do **not** hard-limit by default
+    (``max_concurrent=_max_concurrent()`` → ``None``). Operators pin the
+    measured per-device limit via ``OVS_DIARIZE_MAX_CONCURRENT``.
+
+    Never raises — any failure returns ``None`` so a malformed env/profile can
+    never break (or silently tighten) the aggregate ceiling.
+    """
+    try:
+        env_map = env if env is not None else os.environ
+        enabled = _truthy(env_map.get("OVS_DIARIZE", ""))
+        if not enabled and isinstance(profile, Mapping):
+            enabled = bool(profile.get("diarize"))
+        if not enabled:
+            return None
+
+        trt = (env_map.get("DIAR_CAMPPLUS_ENGINE_FILE", "") or "").strip()
+        vram = 90 if (trt and os.path.exists(trt)) else 120
+        return ConcurrencyCapability(
+            supports_parallel=True,
+            max_concurrent=_max_concurrent(env_map),
+            is_stateful=True,
+            requires_exclusive_device=False,
+            scaling_mode="per_call_isolated",
+            vram_mb_per_slot=vram,
+        )
+    except Exception:
+        return None
 
 
 def make_session_diarizer():
