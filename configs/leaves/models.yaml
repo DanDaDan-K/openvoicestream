@@ -54,11 +54,13 @@ models:
 
   sparktts-0p5b:
     default_precision:
-      # SparkTTS 0.5B controllable LLM is exported as a MIXED-precision TRT engine
-      # (edge-llm bf16-hybrid build); BiCodec vocoder fp16; speaker_decoder fp32.
-      # Single precision label models the dominant LLM engine. Flipping this
-      # re-resolves every SparkTTS leaf with no other change.
-      jetson: mixed_bf16
+      # SparkTTS 0.5B controllable LLM default = W4A16 (int4 weight-only groupwise
+      # GEMM w/ bf16 output, edge-llm sparktts-converged build = bf16-hybrid +
+      # int4 quant plugin + shared-engine). BiCodec vocoder fp16; speaker_decoder
+      # fp32. Single precision label models the dominant LLM engine. Flipping this
+      # re-resolves every SparkTTS leaf with no other change. (mixed_bf16 remains
+      # the prior 1.53GB fp16-ish engine; w4a16 = 645MB int4, ~2.2GB N=1 VRAM.)
+      jetson: w4a16
 
   qwen3-asr-rk:
     default_precision:
