@@ -92,9 +92,10 @@ def test_active_sets_talker_b2_env():
     )
     # shared sub-leaf env also applied.
     assert os.environ["EDGE_LLM_TTS_TALKER_BACKEND"] == "qwen3_tts_explicit_kv"
-    # ASR engine env applied.
+    # ASR engine env applied (v0.8.0 engine set: highperf-v080, per
+    # configs/leaves/qwen3-asr-nx.yaml — the old highperf-v2 path is retired).
     assert os.environ["EDGE_LLM_ASR_ENGINE_DIR"] == (
-        "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v2/"
+        "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v080/"
         "asr_thinker_full_fp8embed"
     )
     assert pulls  # non-empty
