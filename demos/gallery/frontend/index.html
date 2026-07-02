@@ -87,6 +87,7 @@
 
 <script type="module">
 import { createStatusPill, createModelSwitchPanel } from "/common/ui.js";
+import { createAttractLoop } from "/kiosk.js";
 
 /* ── i18n (default zh) ─────────────────────────────────────────────── */
 const I18N = {
@@ -102,6 +103,11 @@ const I18N = {
     unsupported: "暂不支持",
     unknown: "状态未知",
     open: "打开体验 →",
+    attractSuffix: "全程本机推理",
+    attractSub: "无云端 · 无 API 费用 · 数据不出设备",
+    attractMetric: "<0.5s",
+    attractMetricLabel: "语音响应延迟",
+    attractHint: "触摸任意处开始体验",
     slvDown: "语音服务离线",
     asr: "识别", tts: "合成",
     ready: "就绪", notReady: "未就绪",
@@ -125,6 +131,11 @@ const I18N = {
     unsupported: "Not supported",
     unknown: "Unknown",
     open: "Open demo →",
+    attractSuffix: "All inference on-device",
+    attractSub: "No cloud · no API bill · data never leaves the device",
+    attractMetric: "<0.5s",
+    attractMetricLabel: "voice response latency",
+    attractHint: "Touch anywhere to start",
     slvDown: "Voice server offline",
     asr: "ASR", tts: "TTS",
     ready: "ready", notReady: "not ready",
@@ -251,6 +262,34 @@ function mountPanel() {
   });
 }
 
+/* ── kiosk attract loop ────────────────────────────────────────────────
+ * Armed only when /api/catalog reports kiosk:true (DEMO_KIOSK=1 on the
+ * backend). After 60 s idle it shows a fullscreen carousel — one slide
+ * per available demo capability plus a big latency selling point — and
+ * any touch/click/key returns to the portal. Non-kiosk deployments never
+ * arm the timer, so behavior there is unchanged. */
+function attractSlides() {
+  const slides = [];
+  for (const d of lastCatalog?.demos || []) {
+    if (d.kind === "portal" || d.state !== "available") continue;
+    slides.push({
+      headline: `${d.name?.[lang] || d.id} · ${t("attractSuffix")}`,
+      sub: d.description?.[lang] || "",
+    });
+  }
+  // Latency selling point (static copy — the edge performance headline).
+  slides.push({
+    metric: t("attractMetric"),
+    metricLabel: t("attractMetricLabel"),
+    headline: t("attractSub"),
+  });
+  return slides;
+}
+const attract = createAttractLoop({
+  getSlides: attractSlides,
+  getHint: () => t("attractHint"),
+});
+
 /* ── data loop ─────────────────────────────────────────────────────── */
 let lastCatalog = null;
 async function refreshAll() {
@@ -262,6 +301,7 @@ async function refreshAll() {
     renderStatus(status);
     lastCatalog = catalog;
     renderCards(catalog);
+    attract.setEnabled(!!catalog.kiosk);
   } catch (e) {
     slvPill.set("err", t("slvDown"));
   }

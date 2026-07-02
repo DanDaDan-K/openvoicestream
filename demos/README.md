@@ -64,8 +64,22 @@ with `supports_voice_cloning` (e.g. SparkTTS profiles on Jetson).
 | `SLV_URL` | `http://127.0.0.1:8621` | SLV server base URL / SLV 服务地址 |
 | `SLV_ADMIN_KEY` | *(empty)* | Forwarded as `X-Admin-Key` on admin calls; optional on loopback / 管理接口密钥，环回部署可省略 |
 | `DEMO_PROFILES_DIR` | `<repo>/configs/profiles` | Profile JSONs offered in the switch panel / 切换面板可选的 profile 目录 |
-| `DEMO_KIOSK` | `0` | Truthy = kiosk mode: hide debug details / 展会 kiosk 模式，隐藏调试信息 |
+| `DEMO_KIOSK` | `0` | Truthy = kiosk mode for trade shows: hides debug details **and** enables the fullscreen attract carousel on the portal / 展会 kiosk 模式：隐藏调试信息，并启用门户全屏轮播 attract 画面 |
 | `PORT` | `8700` | Gallery listen port (when run as `python main.py`) |
+
+### Kiosk attract carousel / 展会轮播画面
+
+With `DEMO_KIOSK=1`, the gallery portal enters a fullscreen "attract" carousel
+after **60 s** of no interaction: one slide per available demo capability
+(big headline, e.g. "实时字幕 · 全程本机推理") plus a latency selling-point
+slide, rotating every **8 s**. Any touch/click/key exits back to the portal.
+The timings are frontend constants — override per browser session with URL
+params for testing: `http://<device>:8700/?kiosk_idle_s=5&kiosk_slide_s=3`.
+
+`DEMO_KIOSK=1` 时，门户空闲 **60 秒**后进入全屏轮播 attract 画面：每张可用
+demo 能力一屏大字标语（如「实时字幕 · 全程本机推理」）+ 一屏延迟卖点大数字，
+每 **8 秒**切换一屏；触摸/点击/按键即退出回门户。时长为前端常量，测试时可用
+URL 参数覆盖：`?kiosk_idle_s=5&kiosk_slide_s=3`。非 kiosk 部署完全不受影响。
 
 ## Layout / 目录
 

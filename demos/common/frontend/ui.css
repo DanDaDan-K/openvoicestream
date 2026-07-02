@@ -247,3 +247,81 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .muted { color: var(--muted); }
 .mono { font-family: var(--font-mono); }
 .hidden { display: none !important; }
+
+/* ── kiosk attract overlay (gallery kiosk mode) ─────────────────── */
+/* Fullscreen carousel shown after idle in kiosk mode. Black canvas,
+ * hero/metric type tokens; green stays reserved for the one metric
+ * number per slide. Pure CSS transitions — no JS animation. */
+
+.attract-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--bg);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.attract-overlay .attract-slide {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2.5vh;
+  padding: 8vh 8vw 16vh;
+  text-align: center;
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.8s ease, transform 0.8s ease;
+  pointer-events: none;
+}
+.attract-overlay .attract-slide.active {
+  opacity: 1;
+  transform: translateY(0);
+}
+.attract-overlay .attract-headline {
+  font-size: var(--fs-hero);
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1.15;
+  max-width: 18em;
+}
+.attract-overlay .attract-metric {
+  font-family: var(--font-mono);
+  font-size: var(--fs-metric);
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+.attract-overlay .attract-metric-label {
+  color: var(--muted);
+  font-size: var(--fs-title);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.attract-overlay .attract-sub {
+  color: var(--muted);
+  font-size: var(--fs-title);
+  max-width: 32em;
+}
+.attract-overlay .attract-hint {
+  position: absolute;
+  bottom: 6vh;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: var(--fg);
+  font-size: var(--fs-title);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  animation: attract-hint-pulse 2.2s ease-in-out infinite;
+}
+@keyframes attract-hint-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+/* Freeze the page behind the carousel so nothing competes visually. */
+body.attract-active { overflow: hidden; }
