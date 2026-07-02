@@ -42,6 +42,21 @@ SLV_URL=http://127.0.0.1:8629 SLV_ADMIN_KEY=test-key \
   uv run uvicorn gallery.backend.main:app --port 8700
 ```
 
+## SLV server prerequisites / 服务端前置条件
+
+The demos talk to a running SLV server. For the **full** experience the SLV
+container needs (真机验证得出的完整配置，orin-nx 2026-07-02)：
+
+| SLV env | Needed by | Notes |
+|---|---|---|
+| `OVS_ADMIN_KEY=<secret>` | model hot-switch panel | Without it, admin routes 403 for any non-loopback caller — and with bridge networking even host-side callers are non-loopback from the container's view. Set it and give the same value to the gallery as `SLV_ADMIN_KEY`. |
+| `OVS_V2V_SERVER_LOOP=1` + `OVS_V2V_ENGINE=voxedge` | v2v-chat spoken replies | Default off = ASR-only pass-through; the chat card then shows a hint instead of answering. |
+| `EDGE_LLM_BASE_URL=http://172.17.0.1:8000/v1` | v2v-chat spoken replies | The code default `127.0.0.1:8000/v1` points at SLV itself inside the container. `172.17.0.1` (docker0) reaches an LLM service published on the host. |
+
+asr-caption / tts-playground / voice-clone only need the SLV service itself
+(no admin key, no server loop). voice-clone additionally requires a TTS engine
+with `supports_voice_cloning` (e.g. SparkTTS profiles on Jetson).
+
 ## Environment / 环境变量
 
 | Variable | Default | Description |
