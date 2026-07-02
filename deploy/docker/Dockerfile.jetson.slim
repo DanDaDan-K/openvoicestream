@@ -111,6 +111,7 @@ RUN pip3 install --no-cache-dir --no-compile --index-url ${PIP_INDEX} /tmp/wheel
 COPY --chmod=0755 \
     deploy/jetson-workers/qwen3_asr_worker \
     deploy/jetson-workers/qwen3_tts_worker \
+    deploy/jetson-workers/spark_tts_worker \
     deploy/jetson-workers/moss_tts_nano_worker \
     deploy/jetson-workers/moss_tts_nano_ort_worker.py \
     deploy/jetson-workers/libNvInfer_edgellm_plugin.so \
