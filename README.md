@@ -143,10 +143,27 @@ validated Paraformer RKNN ASR path (hybrid encoder + RKNN decoder) with Matcha
 TTS, or `rk3588-kokoro-rknn` for Qwen3 RKNN ASR with higher-quality multilingual
 Kokoro RKNN TTS.
 
+## Demo Gallery
+
+Browser-based demo portal served from the device itself: live device status, one
+card per capability (live captions, TTS playground, voice chat with barge-in,
+voice clone, speaker diarization), runtime ASR/TTS model hot-switching, and a
+kiosk mode for trade shows (`DEMO_KIOSK=1`).
+
+```bash
+docker compose -f demos/docker-compose.demos.yml --profile all up -d
+# open http://<device>:8700
+```
+
+See [`demos/README.md`](demos/README.md) for deployment and server
+prerequisites, and [`docs/DEMOS.md`](docs/DEMOS.md) for the full index of demo
+assets (gallery cards, API examples, agent examples, bench showpieces).
+
 ## Table of Contents
 
 - [Why This Matters](#why-this-matters)
 - [Quick Start](#quick-start)
+- [Demo Gallery](#demo-gallery)
 - [Key Features](#key-features)
 - [Architecture](#architecture)
 - [API Reference](#api-reference)
