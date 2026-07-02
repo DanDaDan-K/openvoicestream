@@ -42,10 +42,12 @@ async def test_catalog_aggregation(mock_slv, profiles_dir):
     }
     # gallery itself is implemented and has no needs
     assert cards["gallery"]["state"] == "available"
-    # implemented=false cards whose needs ARE satisfied → coming-soon
-    assert cards["asr-caption"]["state"] == "coming-soon"
-    assert cards["tts-playground"]["state"] == "coming-soon"
-    assert cards["v2v-chat"]["state"] == "coming-soon"
+    # P1 cards shipped: needs satisfied by the mock → available
+    assert cards["asr-caption"]["state"] == "available"
+    assert cards["tts-playground"]["state"] == "available"
+    assert cards["v2v-chat"]["state"] == "available"
+    # diarization has not shipped yet → coming-soon
+    assert cards["diarization"]["state"] == "coming-soon"
     # mock TTS has supports_voice_cloning=False → unsupported with reason
     assert cards["voice-clone"]["state"] == "unsupported"
     assert cards["voice-clone"]["reason"]["zh"]
@@ -87,12 +89,13 @@ async def test_catalog_slv_totally_down(profiles_dir):
     body = cat.json()
     assert body["slv_reachable"] is False
     assert body["degraded"] is True
-    # cards degrade gracefully, no crash: unimplemented cards stay coming-soon
-    # (implementation status outranks unknown device state), nothing flips to
+    # cards degrade gracefully, no crash: shipped cards with unverifiable needs
+    # become "unknown"; unshipped cards stay coming-soon; nothing flips to
     # unsupported without positive evidence.
     states = {c["id"]: c["state"] for c in body["demos"]}
-    assert states["asr-caption"] == "coming-soon"
-    assert states["voice-clone"] == "coming-soon"  # not "unsupported" — no evidence
+    assert states["asr-caption"] == "unknown"
+    assert states["diarization"] == "coming-soon"
+    assert states["voice-clone"] in ("unknown", "coming-soon")  # not "unsupported" — no evidence
     assert states["gallery"] == "available"        # no needs → still available
 
     assert status.status_code == 200

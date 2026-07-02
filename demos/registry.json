@@ -94,7 +94,7 @@
       "id": "voice-clone",
       "kind": "demo",
       "port": 8705,
-      "status": "coming-soon",
+      "status": "available",
       "needs": [
         "tts.voice_clone"
       ],

@@ -15,6 +15,13 @@ function el(tag, className, text) {
   return node;
 }
 
+function firstSentence(text, maxChars) {
+  const cut = text.search(/[。．.!?！？]\s|[。！？](?=\S)/);
+  let s = cut >= 0 ? text.slice(0, cut + 1) : text;
+  if (s.length > maxChars) s = s.slice(0, maxChars - 1) + "…";
+  return s;
+}
+
 /* ── status pill ─────────────────────────────────────────────────────────
  * states: "ok" | "warn" | "err" | "busy" | "idle" */
 export function createStatusPill(container, { state = "idle", text = "" } = {}) {
@@ -127,7 +134,9 @@ export function createModelSwitchPanel(container, opts = {}) {
 
   select.addEventListener("change", () => {
     const p = profiles.find((x) => x.name === select.value);
-    desc.textContent = p ? (p.description || "") : "";
+    // Profile descriptions are engineering notes — surface only the first
+    // sentence to demo visitors, never the full internals dump.
+    desc.textContent = p ? firstSentence(p.description || "", 160) : "";
   });
 
   let lastStatus = null;
