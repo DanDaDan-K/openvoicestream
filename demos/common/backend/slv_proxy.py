@@ -27,6 +27,8 @@ import httpx
 
 DEFAULT_SLV_URL = "http://127.0.0.1:8621"
 DEFAULT_TIMEOUT_S = 5.0
+# Engine reloads load TRT engines from disk — allow minutes, not seconds.
+RELOAD_TIMEOUT_S = float(os.environ.get("SLV_RELOAD_TIMEOUT_S") or 300.0)
 
 
 @dataclass
@@ -112,8 +114,13 @@ class SLVProxy:
     async def admin_get(self, path: str) -> httpx.Response:
         return await self._client.get(path, headers=self._admin_headers())
 
-    async def admin_post(self, path: str, json: Any = None) -> httpx.Response:
-        return await self._client.post(path, json=json, headers=self._admin_headers())
+    async def admin_post(
+        self, path: str, json: Any = None, timeout_s: float | None = None
+    ) -> httpx.Response:
+        kwargs: dict = {"json": json, "headers": self._admin_headers()}
+        if timeout_s is not None:
+            kwargs["timeout"] = httpx.Timeout(timeout_s, connect=10.0)
+        return await self._client.post(path, **kwargs)
 
     # ── aggregation ─────────────────────────────────────────────────────────
 
@@ -155,7 +162,9 @@ class SLVProxy:
         payload: dict = {"kind": kind, "profile": profile}
         if drain_timeout_s is not None:
             payload["drain_timeout_s"] = drain_timeout_s
-        return await self.admin_post("/admin/backend/reload", json=payload)
+        return await self.admin_post(
+            "/admin/backend/reload", json=payload, timeout_s=RELOAD_TIMEOUT_S
+        )
 
 
 def _err_str(exc: Exception) -> str:
