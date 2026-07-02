@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -13,6 +14,23 @@ if str(DEMOS_DIR) not in sys.path:
 from common.backend.slv_proxy import SLVProxy  # noqa: E402
 from gallery.backend.main import create_app  # noqa: E402
 from tests.mock_slv import create_mock_slv, default_state  # noqa: E402
+
+
+def load_demo_backend(demo: str):
+    """Import ``demos/<demo>/backend/main.py`` as a module.
+
+    Demo directories are hyphenated (``tts-playground``) so they can't be
+    imported as packages; load the backend module by file path instead.
+    """
+    name = f"{demo.replace('-', '_')}_backend_main"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = DEMOS_DIR / demo / "backend" / "main.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture()

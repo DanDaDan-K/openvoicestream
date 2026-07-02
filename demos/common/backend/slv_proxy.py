@@ -84,6 +84,26 @@ class SLVProxy:
         resp.raise_for_status()
         return resp.json()
 
+    async def get(self, path: str, params: Any = None) -> httpx.Response:
+        """Plain (non-admin) GET passthrough — caller inspects status/body."""
+        return await self._client.get(path, params=params)
+
+    def stream_post(self, path: str, json: Any = None):
+        """Streaming POST — returns httpx's async streaming context manager.
+
+        Usage::
+
+            cm = proxy.stream_post("/tts/stream", json=payload)
+            async with cm as resp:
+                async for chunk in resp.aiter_raw():
+                    ...
+
+        ``aiter_raw`` yields bytes exactly as they arrive from SLV, so a
+        proxying demo backend can forward chunk-by-chunk without buffering
+        (TTFA must survive the proxy hop).
+        """
+        return self._client.stream("POST", path, json=json)
+
     # ── admin proxy ─────────────────────────────────────────────────────────
 
     def _admin_headers(self) -> dict:
