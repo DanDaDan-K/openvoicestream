@@ -46,8 +46,8 @@ async def test_catalog_aggregation(mock_slv, profiles_dir):
     assert cards["asr-caption"]["state"] == "available"
     assert cards["tts-playground"]["state"] == "available"
     assert cards["v2v-chat"]["state"] == "available"
-    # diarization has not shipped yet → coming-soon
-    assert cards["diarization"]["state"] == "coming-soon"
+    # diarization shipped: needs (asr.streaming) satisfied by the mock
+    assert cards["diarization"]["state"] == "available"
     # mock TTS has supports_voice_cloning=False → unsupported with reason
     assert cards["voice-clone"]["state"] == "unsupported"
     assert cards["voice-clone"]["reason"]["zh"]
@@ -94,8 +94,8 @@ async def test_catalog_slv_totally_down(profiles_dir):
     # unsupported without positive evidence.
     states = {c["id"]: c["state"] for c in body["demos"]}
     assert states["asr-caption"] == "unknown"
-    assert states["diarization"] == "coming-soon"
-    assert states["voice-clone"] in ("unknown", "coming-soon")  # not "unsupported" — no evidence
+    assert states["diarization"] == "unknown"
+    assert states["voice-clone"] == "unknown"      # not "unsupported" — no evidence
     assert states["gallery"] == "available"        # no needs → still available
 
     assert status.status_code == 200
