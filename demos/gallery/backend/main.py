@@ -66,6 +66,14 @@ def _platform_tokens(probe: ProbeResult) -> set[str]:
         for kind in ("asr", "tts"):
             entry = probe.backend_status.get(kind) or {}
             sources.append(entry.get("backend_name"))
+            # Live SLV reports undotted backend names (e.g. ``matcha_trt``);
+            # the loaded profile name (``jetson-qwen3asr-matcha-nx``) is the
+            # reliable platform carrier, so derive a token from its prefix too.
+            profile_name = entry.get("profile_name")
+            if isinstance(profile_name, str) and "-" in profile_name:
+                prefix = profile_name.split("-", 1)[0].strip().lower()
+                if prefix:
+                    tokens.add(prefix)
     for name in sources:
         if isinstance(name, str) and "." in name:
             prefix = name.split(".", 1)[0].strip().lower()
