@@ -76,7 +76,7 @@
       "id": "diarization",
       "kind": "demo",
       "port": 8704,
-      "status": "coming-soon",
+      "status": "available",
       "needs": [
         "asr.streaming"
       ],

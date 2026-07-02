@@ -104,11 +104,20 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
-  # ── P2 demos (pending) ──────────────────────────────────────────────────
-  #
-  # diarization:
-  #   image: sensecraft-missionpack.seeed.cn/solution/slv-demo-diarization
-  #   profiles: ["all", "diarization"]
-  #   ports: ["8704:8704"]
-  #   environment:
-  #     SLV_URL: ${SLV_URL:-http://host.docker.internal:8621}
+  diarization:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    container_name: slv-demo-diarization
+    profiles: ["all", "diarization"]
+    working_dir: /app
+    command: uv run --frozen python diarization/backend/main.py
+    ports:
+      - "8704:8704"
+    environment:
+      PORT: "8704"
+      SLV_URL: ${SLV_URL:-http://host.docker.internal:8621}
+      UV_CACHE_DIR: /tmp/uv-cache
+    volumes:
+      - .:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
