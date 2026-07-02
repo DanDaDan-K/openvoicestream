@@ -93,12 +93,16 @@ const DEFAULT_STRINGS = {
   unreachable: "语音服务不可达",
   current: "当前",
   noProfiles: "没有可用的模型组合",
+  noHotReload: "该设备的引擎不支持运行时切换（更换模型需重启容器）",
 };
 
 export function createModelSwitchPanel(container, opts = {}) {
   const api = (opts.api || "/api").replace(/\/$/, "");
   const S = { ...DEFAULT_STRINGS, ...(opts.strings || {}) };
   const pollMs = opts.pollMs || 600;
+  // Hard device trait per kind (e.g. RK NPU engines): once SLV answers
+  // hot_reload_not_supported, stop offering the switch for that kind.
+  const noReload = { tts: false, asr: false };
 
   const root = el("div", "switch-panel");
   const kindRow = el("div", "switch-kind");
@@ -127,6 +131,9 @@ export function createModelSwitchPanel(container, opts = {}) {
     kind = newKind;
     btnTts.classList.toggle("active", kind === "tts");
     btnAsr.classList.toggle("active", kind === "asr");
+    switchBtn.disabled = noReload[kind] || !profiles.length;
+    result.className = noReload[kind] ? "switch-result warn" : "switch-result";
+    result.textContent = noReload[kind] ? S.noHotReload : "";
     renderCurrent();
   }
   btnTts.addEventListener("click", () => setKind("tts"));
@@ -165,7 +172,11 @@ export function createModelSwitchPanel(container, opts = {}) {
           opt.value = p.name;
           select.appendChild(opt);
         }
-        switchBtn.disabled = false;
+        switchBtn.disabled = noReload[kind];
+        if (noReload[kind]) {
+          result.className = "switch-result warn";
+          result.textContent = S.noHotReload;
+        }
         select.dispatchEvent(new Event("change"));
       }
       renderCurrent();
@@ -225,6 +236,13 @@ export function createModelSwitchPanel(container, opts = {}) {
     } else if (st === "rolled_back") {
       result.className = "switch-result warn";
       result.textContent = S.rolledBack;
+    } else if (outcome.body?.detail?.error === "hot_reload_not_supported") {
+      // Backend (e.g. RK NPU engines) cannot swap at runtime — a hard
+      // device trait, not a transient failure. Say so and stop inviting
+      // retries for this kind.
+      result.className = "switch-result warn";
+      result.textContent = S.noHotReload;
+      noReload[kind] = true;
     } else {
       result.className = "switch-result err";
       const detail = outcome.body?.detail?.error || outcome.body?.error || `HTTP ${outcome.status}`;

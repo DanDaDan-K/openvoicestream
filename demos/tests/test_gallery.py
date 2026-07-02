@@ -176,6 +176,20 @@ async def test_switch_rejects_unknown_profile(mock_slv, profiles_dir):
     assert state["received"] == []                # never reached SLV
 
 
+async def test_switch_rejects_other_platform_profile(mock_slv, profiles_dir):
+    """Mock SLV reports a jetson platform → rk3588-* profiles must be
+    rejected even though the JSON exists in the profiles dir."""
+    app, state = mock_slv
+    async with gallery_client(app, profiles_dir) as client:
+        resp = await client.post(
+            "/api/switch",
+            json={"kind": "tts", "profile": "rk3588-default"},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "profile_not_allowed"
+    assert state["received"] == []                # never reached SLV
+
+
 async def test_switch_rejects_bad_kind(mock_slv, profiles_dir):
     app, _ = mock_slv
     async with gallery_client(app, profiles_dir) as client:

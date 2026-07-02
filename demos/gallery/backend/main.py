@@ -275,7 +275,20 @@ def create_app(
 
     @app.post("/api/switch")
     async def api_switch(req: SwitchRequest):
-        allowed = _allowed_profile_names(profiles_dir)
+        # Allow only what /api/profiles offers: platform-filtered when the
+        # device platform is derivable, so a jetson-* profile can't be sent
+        # to an RK box (and vice versa) just by crafting the POST.
+        probe = await slv.probe()
+        listing = _list_profiles(profiles_dir, probe)
+        allowed: set[str] = set()
+        for p in listing.get("profiles", []):
+            allowed.add(p.get("name") or "")
+            file = p.get("file") or ""
+            if file.endswith(".json"):
+                allowed.add(file[: -len(".json")])
+        allowed.discard("")
+        if not listing.get("filtered"):
+            allowed |= _allowed_profile_names(profiles_dir)
         if req.profile not in allowed:
             raise HTTPException(
                 status_code=400,
