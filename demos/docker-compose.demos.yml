@@ -30,29 +30,61 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
-  # ── P1 demos (placeholders — enabled as each demo ships) ──────────────
-  #
-  # asr-caption:
-  #   image: sensecraft-missionpack.seeed.cn/solution/slv-demo-asr-caption
-  #   profiles: ["all", "asr-caption"]
-  #   ports: ["8701:8701"]
-  #   environment:
-  #     SLV_URL: ${SLV_URL:-http://host.docker.internal:8621}
-  #
-  # tts-playground:
-  #   image: sensecraft-missionpack.seeed.cn/solution/slv-demo-tts-playground
-  #   profiles: ["all", "tts-playground"]
-  #   ports: ["8702:8702"]
-  #   environment:
-  #     SLV_URL: ${SLV_URL:-http://host.docker.internal:8621}
-  #     SLV_ADMIN_KEY: ${SLV_ADMIN_KEY:-}   # /admin/tts/runtime overrides
-  #
-  # v2v-chat:
-  #   image: sensecraft-missionpack.seeed.cn/solution/slv-demo-v2v-chat
-  #   profiles: ["all", "v2v-chat"]
-  #   ports: ["8703:8703"]
-  #   environment:
-  #     SLV_URL: ${SLV_URL:-http://host.docker.internal:8621}
+  # ── P1 demos (uv source-mount like gallery; dedicated images land in P3) ──
+
+  asr-caption:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    container_name: slv-demo-asr-caption
+    profiles: ["all", "asr-caption"]
+    working_dir: /app
+    command: uv run --frozen python asr-caption/backend/main.py
+    ports:
+      - "8701:8701"
+    environment:
+      PORT: "8701"
+      SLV_URL: ${SLV_URL:-http://host.docker.internal:8621}
+      UV_CACHE_DIR: /tmp/uv-cache
+    volumes:
+      - .:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  tts-playground:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    container_name: slv-demo-tts-playground
+    profiles: ["all", "tts-playground"]
+    working_dir: /app
+    command: uv run --frozen python tts-playground/backend/main.py
+    ports:
+      - "8702:8702"
+    environment:
+      PORT: "8702"
+      SLV_URL: ${SLV_URL:-http://host.docker.internal:8621}
+      UV_CACHE_DIR: /tmp/uv-cache
+    volumes:
+      - .:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  v2v-chat:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    container_name: slv-demo-v2v-chat
+    profiles: ["all", "v2v-chat"]
+    working_dir: /app
+    command: uv run --frozen python v2v-chat/backend/main.py
+    ports:
+      - "8703:8703"
+    environment:
+      PORT: "8703"
+      SLV_URL: ${SLV_URL:-http://host.docker.internal:8621}
+      UV_CACHE_DIR: /tmp/uv-cache
+    volumes:
+      - .:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
   #
   # ── P2 demos ───────────────────────────────────────────────────────────
   #
