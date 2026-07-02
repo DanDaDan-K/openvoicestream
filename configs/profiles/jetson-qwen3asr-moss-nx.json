@@ -40,7 +40,8 @@
     "MOSS_MAX_SEQ_LEN": "1024",
     "OVS_TTS_SAMPLE_RATE": "48000",
     "OVS_TTS_CHANNELS": "1",
-    "OVS_TTS_SEED": "42"
+    "OVS_TTS_SEED": "42",
+    "LD_LIBRARY_PATH": "/host-libs:/opt/moss-runtime-libs:/usr/local/lib/python3.10/dist-packages/onnxruntime/capi:/usr/lib/aarch64-linux-gnu"
   },
   "moss_max_slots": 2,
   "moss_max_seq_len": 1024,

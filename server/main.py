@@ -3858,6 +3858,24 @@ async def v2v_stream(ws: WebSocket):
             stream = getattr(asr_manager, "stream", None)
             return bool(getattr(stream, "prefer_backend_endpoint_vad", False))
 
+        def _asr_manager_idle() -> bool:
+            """True only when the manager is terminally IDLE (no live turn).
+
+            The desync we heal lands SPECIFICALLY in IDLE: a cancel-timeout
+            worker restart or an exhausted rebuild ladder both end in IDLE while
+            our per-connection ``asr_active`` / ``asr_active_gen`` still point at
+            the now-dead generation — so a fresh speech-start gets swallowed as
+            barge-in-only, the generation never advances, and every finalize is
+            rejected until a full container restart.
+
+            We key off IDLE and NOT merely "not ACTIVE": FINALIZING /
+            CANCELLING / ERROR_REBUILD are transient states a HEALTHY turn
+            passes through, and treating those as a desync would misfire the
+            re-open / reconcile on a live utterance (backend-agnostic safety).
+            """
+            st = getattr(asr_manager, "state", None)
+            return str(getattr(st, "value", st)) == "idle"
+
         def _asr_backend_prefers_backend_endpoint_vad() -> bool:
             return bool(getattr(asr_be, "prefer_backend_endpoint_vad", False))
 
@@ -3967,6 +3985,14 @@ async def v2v_stream(ws: WebSocket):
                                 if (
                                     state["asr_active"]
                                     and _asr_stream_prefers_backend_endpoint_vad()
+                                    # Only keep accumulating if the manager
+                                    # hasn't terminally dropped to IDLE. If it
+                                    # self-dropped (worker restart / rebuild
+                                    # exhausted) while asr_active is still True,
+                                    # treating this as barge-in-only would never
+                                    # re-open the stream → generation frozen, ASR
+                                    # wedged. Fall through to on_speech_start.
+                                    and not _asr_manager_idle()
                                 ):
                                     # Backend-owned endpoint streams keep
                                     # accumulating audio across outer VAD
@@ -4395,6 +4421,24 @@ async def v2v_stream(ws: WebSocket):
                             state["asr_active_gen"],
                             endpoint_reason or "backend_endpoint",
                         )
+                        # Self-heal desync: the manager can fall to IDLE on its
+                        # own (cancel-timeout worker restart / rebuild ladder
+                        # exhausted) while we still hold asr_active at the dead
+                        # generation. Left alone, every finalize is rejected and
+                        # — for backends that treat a fresh speech-start as
+                        # barge-in-only while asr_active=True — the generation
+                        # never advances, wedging ASR until a full container
+                        # restart. Reconcile so the next speech-start opens a
+                        # fresh turn (self-heal without a restart). IDLE-only so
+                        # a preempt that left the manager ACTIVE on a NEW gen
+                        # (legit in-flight turn) is never torn down here.
+                        if _asr_manager_idle():
+                            state["asr_active"] = False
+                            state["asr_audio_samples_accepted"] = 0
+                            state["asr_turn_started_at"] = None
+                            state["endpoint_pending"] = None
+                            state["endpoint_pending_gen"] = None
+                            _clear_asr_prepare_state()
                         continue
 
                     # Optional, default-off final enrichments. No-op (and no
