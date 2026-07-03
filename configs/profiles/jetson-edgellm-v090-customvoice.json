@@ -34,6 +34,7 @@
     "EDGE_LLM_TTS_CODE2WAV_DIR": "/opt/edgellm-v090/engines/tts_code2wav_lean",
     "EDGE_LLM_TTS_TOKENIZER_DIR": "/opt/models/qwen3-tts-customvoice/tokenizer",
     "EDGE_LLM_TTS_STATEFUL_CODE2WAV": "0",
+    "EDGE_LLM_TTS_STREAMING_ONLY": "1",
     "EDGE_LLM_TTS_CHUNK_FRAMES": "13",
     "TTS_MAX_AUDIO_LENGTH": "1024",
     "OVS_TTS_MODEL_ID": "qwen3-tts-customvoice",
