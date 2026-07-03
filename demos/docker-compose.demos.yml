@@ -5,12 +5,20 @@
 #   docker compose -f demos/docker-compose.demos.yml --profile gallery up -d
 #
 # The gallery talks to the SLV server on the host (:8621) — override SLV_URL
-# when SLV runs elsewhere. Dedicated per-demo images land in P3; for now the
-# gallery runs from a bind-mounted source tree via uv.
+# when SLV runs elsewhere.
+#
+# Two run modes per service (default stays dev — do not change behavior):
+#   * dev (default): uv base image + bind-mounted source tree (`volumes: .:/app`).
+#   * production: prebuilt unified image (all six apps baked in, deps synced)
+#       image: sensecraft-missionpack.seeed.cn/solution/slv-demos:20260703
+#     and REMOVE the `- .:/app` source bind mount (keep `command:` as-is;
+#     the gallery still needs the read-only profiles mount).
 
 services:
   gallery:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    # production: image: sensecraft-missionpack.seeed.cn/solution/slv-demos:20260703
+    #             and drop `- .:/app` below (keep the /profiles mount)
     container_name: slv-demo-gallery
     profiles: ["all", "gallery"]
     working_dir: /app
@@ -34,6 +42,8 @@ services:
 
   asr-caption:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    # production: image: sensecraft-missionpack.seeed.cn/solution/slv-demos:20260703
+    #             and drop the `volumes:` source mount
     container_name: slv-demo-asr-caption
     profiles: ["all", "asr-caption"]
     working_dir: /app
@@ -52,6 +62,8 @@ services:
 
   tts-playground:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    # production: image: sensecraft-missionpack.seeed.cn/solution/slv-demos:20260703
+    #             and drop the `volumes:` source mount
     container_name: slv-demo-tts-playground
     profiles: ["all", "tts-playground"]
     working_dir: /app
@@ -70,6 +82,8 @@ services:
 
   v2v-chat:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    # production: image: sensecraft-missionpack.seeed.cn/solution/slv-demos:20260703
+    #             and drop the `volumes:` source mount
     container_name: slv-demo-v2v-chat
     profiles: ["all", "v2v-chat"]
     working_dir: /app
@@ -88,6 +102,8 @@ services:
   #
   voice-clone:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    # production: image: sensecraft-missionpack.seeed.cn/solution/slv-demos:20260703
+    #             and drop the `volumes:` source mount
     container_name: slv-demo-voice-clone
     profiles: ["all", "voice-clone"]
     working_dir: /app
@@ -106,6 +122,8 @@ services:
 
   diarization:
     image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    # production: image: sensecraft-missionpack.seeed.cn/solution/slv-demos:20260703
+    #             and drop the `volumes:` source mount
     container_name: slv-demo-diarization
     profiles: ["all", "diarization"]
     working_dir: /app
