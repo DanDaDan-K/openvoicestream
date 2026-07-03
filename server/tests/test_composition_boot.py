@@ -186,3 +186,43 @@ def test_no_leaves_selected_raises():
     with pytest.raises(lc.CompositionError) as exc:
         cb.apply_composition({"composition": {"device": "orin-nx"}})
     assert "no leaves" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# v0.9.0 composition (orin-nx, v090 asr n2 + v090 tts n2). The v080 cases
+# above stay green — the v090 leaves are NEW ids in configs/leaves/*-v090.yaml.
+# ---------------------------------------------------------------------------
+
+ASR_V090_N2 = "asr.qwen3_asr_v090.orin-nx.n2"
+TTS_V090_N2 = "tts.qwen3_tts_v090.orin-nx.n2"
+
+
+def test_v090_active_sets_env_and_omits_mel_keys():
+    os.environ["QWEN3_ARTIFACT_ROOT"] = "/opt/models/qwen3-edgellm"
+    pulls = cb.apply_composition({
+        "composition": {
+            "device": "orin-nx",
+            "asr": ASR_V090_N2,
+            "tts": TTS_V090_N2,
+        }
+    })
+
+    # v0.9.0 engine set: highperf-v090, int4 thinker.
+    assert os.environ["EDGE_LLM_ASR_ENGINE_DIR"] == (
+        "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v090/"
+        "asr_thinker_full_int4"
+    )
+    # v0.9.0 requires an ABSOLUTE plugin path (cwd-resolution fix).
+    assert os.environ["EDGELLM_PLUGIN_PATH"] == (
+        "/opt/edgellm-v090/libNvInfer_edgellm_plugin.so"
+    )
+    # Lean non-stateful code2wav on the v090 TTS path.
+    assert os.environ["EDGE_LLM_TTS_STATEFUL_CODE2WAV"] == "0"
+    # Mel front-end keys are retired on v090 (audio runner ingests wav
+    # directly; EDGELLM_REQUEST_AUDIO_WAV=1 is the new default) — the leaves
+    # must not emit them.
+    assert "EDGE_LLM_ASR_MEL_SETTINGS" not in os.environ
+    assert "EDGE_LLM_ASR_MEL_FILTERS" not in os.environ
+    assert pulls  # non-empty union pull
+    assert any("highperf-v090" in f for f in pulls)
+    assert not any("highperf-v080" in f for f in pulls)

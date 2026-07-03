@@ -513,3 +513,65 @@ def test_resolve_engines_injects_and_reconciles_engine_keys(tmp_path, monkeypatc
     c = _write_profile(tmp_path, "C", {"env": {"PLAIN": "1"}})
     profile_loader.apply_profile(str(c), resolve_engines=False)
     assert "ENGINE_B" not in os.environ
+
+
+# ---------------------------------------------------------------------------
+# v0.9.0 profile contract (configs/profiles/jetson-edgellm-v090-*.json).
+# Pure-JSON checks: the v090 profiles must carry the absolute plugin path,
+# must NOT carry the retired mel front-end keys, and the v080 profiles they
+# derive from must remain untouched (rollback path).
+# ---------------------------------------------------------------------------
+
+_PROFILES_DIR = Path(__file__).resolve().parents[2] / "configs" / "profiles"
+
+_V090_PROFILES = (
+    "jetson-edgellm-v090-qwen3ttsbase",
+    "jetson-edgellm-v090-moss",
+    "jetson-edgellm-v090-customvoice",
+)
+
+
+def _read_profile_json(name: str) -> dict:
+    return json.loads((_PROFILES_DIR / f"{name}.json").read_text())
+
+
+def test_v090_profiles_plugin_path_and_no_mel_keys():
+    for name in _V090_PROFILES:
+        data = _read_profile_json(name)
+        assert data["name"] == name
+        assert data["artifact_set"] == "edgellm-v090", name
+        env = data["env"]
+        # v0.9.0: EDGELLM_PLUGIN_PATH required, absolute (cwd-resolution fix).
+        assert env["EDGELLM_PLUGIN_PATH"] == (
+            "/opt/edgellm-v090/libNvInfer_edgellm_plugin.so"
+        ), name
+        # Retired in v0.9.0: audio runner ingests wav directly
+        # (EDGELLM_REQUEST_AUDIO_WAV=1 is the new default) — no mel config.
+        assert "EDGE_LLM_ASR_MEL_SETTINGS" not in env, name
+        assert "EDGE_LLM_ASR_MEL_FILTERS" not in env, name
+
+
+def test_v090_edgellm_tts_profiles_use_lean_nonstateful_code2wav():
+    for name in ("jetson-edgellm-v090-qwen3ttsbase",
+                 "jetson-edgellm-v090-customvoice"):
+        env = _read_profile_json(name)["env"]
+        # v0.9.0 code2wav is the lean NON-stateful build; the worker streams
+        # natively (no stateful-code2wav surgery).
+        assert env["EDGE_LLM_TTS_STATEFUL_CODE2WAV"] == "0", name
+        assert env["EDGE_LLM_TTS_WORKER_BIN"] == (
+            "/opt/edgellm-v090/bin/qwen3_tts_streaming_worker"
+        ), name
+        assert env["EDGE_LLM_TTS_CODE2WAV_DIR"].startswith(
+            "/opt/edgellm-v090/engines/"), name
+
+
+def test_v080_profiles_preserved_for_rollback():
+    # The v080 profiles the v090 ones derive from must stay in place and keep
+    # their v080 shape (mel keys still present, artifact_set unchanged).
+    for name in ("jetson-edgellm-v080-qwen3ttsbase",
+                 "jetson-edgellm-v080-moss",
+                 "jetson-edgellm-v080-customvoice"):
+        data = _read_profile_json(name)
+        assert data["artifact_set"] == "edgellm-v080", name
+        assert "EDGE_LLM_ASR_MEL_SETTINGS" in data["env"], name
+        assert "EDGE_LLM_ASR_MEL_FILTERS" in data["env"], name
