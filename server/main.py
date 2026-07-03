@@ -2970,6 +2970,25 @@ async def _asr_stream_backend(
                     )
                     _seg.clear()
                     await ws.send_json(payload)
+                    # Re-arm exactly like the frontend-VAD endpoint path above.
+                    # Backends with sticky endpoint results (RK chunk-confirm's
+                    # get_partial() keeps returning is_final=True with the
+                    # composed text after _finalize_utterance) otherwise re-emit
+                    # the same final every poll — a "final storm" that feeds one
+                    # stale embedding per ~400ms into the online diarizer.
+                    try:
+                        _old_close = getattr(stream, "close", None)
+                        if _old_close is not None:
+                            _old_close()
+                    except Exception:
+                        logger.exception("ASR backend endpoint: stream close raised")
+                    stream = asr_be.create_stream(language=language)
+                    try:
+                        vad_session.reset()
+                    except Exception:
+                        logger.debug(
+                            "VAD reset after backend endpoint raised", exc_info=True
+                        )
                 else:
                     await ws.send_json({
                         "type": "partial",
