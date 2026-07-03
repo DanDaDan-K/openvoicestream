@@ -12,6 +12,66 @@ the numbers can be reproduced.
 For the broader cross-device matrix (RTF, TTFA, CER/WER across Jetson / Rockchip
 / Raspberry Pi), see the [Performance section of the README](README.md#performance).
 
+> The voice stack has since moved to **TensorRT-Edge-LLM v0.9.0** (see the
+> v0.9.0 section directly below). The v0.8.0 numbers further down are retained
+> as the prior baseline for comparison.
+
+---
+
+## v0.9.0 upgrade — six-model on-device verification (Orin NX, 2026-07-04)
+
+The **voice stack (ASR + TTS)** was upgraded from TensorRT-Edge-LLM v0.8.0 to
+**v0.9.0**. The **LLM service** (Qwen3.5-4B GDN) deliberately **stays on v0.8.0**:
+a v0.8.0-vs-v0.9.0 decode bench showed parity within ≲2% with no gain, and the
+v0.9.0 `experimental/server` + GDN combination crashes. All six models were
+re-verified on a real Jetson Orin NX; ASR/TTS quality is held to the v0.8.0
+golden set (no regression).
+
+**Pins:** fork `integration/v090-sparktts` (v0.9.0 tag `1ac0f2b` + our patches),
+submodule overlay `repin/v090-overlay`, voxedge wheel `0.0.3a0`. Spec:
+[`docs/specs/edgellm-v090-tts-re-port.md`](docs/specs/edgellm-v090-tts-re-port.md).
+
+### SparkTTS-0.5B — the headline: W4A16 becomes the all-round pick
+
+On v0.9.0 the W4A16 INT4-AWQ engine is now faster **and** lighter with **zero
+quality loss**, so it is the default recommendation over bf16. Both engines ship.
+
+| Metric | v0.8.0 baseline | **v0.9.0** |
+|---|---|---|
+| RTF (W4A16) | 0.74 | **0.50** |
+| TTFA (W4A16) | 0.64–0.71 s (bf16) · 0.92 s (earlier baseline) | **0.41–0.46 s** |
+| Quality (ZH CER / EN WER) | 0 | **0** (zero loss) |
+| Engines available | bf16, W4A16 | bf16 **and** W4A16 (W4A16 preferred) |
+
+Device: Jetson Orin NX · Date: 2026-07-04 · Path: `integration/v090-sparktts`.
+
+### The other five models (Orin NX, 2026-07-04)
+
+| Model | v0.9.0 result |
+|---|---|
+| **Qwen3-ASR 0.6B int4** | Streaming + offline transcription **CER 0** — no regression vs the v0.8.0 golden set. |
+| **Qwen3-TTS CustomVoice int4** | 9-row language conditioning, cancel, and EN frame counts all correct. **RTF 0.61.** N=1 by design (session ceiling `min(asr 2, tts 1) = 1`, same as v0.8.0). |
+| **Qwen3-TTS Base** | Voice-clone works — the Base embedding controls timbre (CAM++ cross-reference cos **0.366** vs same-reference **0.66–0.70**). |
+| **MOSS-TTS-Nano** | TTFA **95–157 ms** (on par with the prior baseline). |
+| **Qwen3.5-4B GDN (LLM)** | Stays on v0.8.0; decode ~35 tok/s. |
+
+### N=2 concurrency on v0.9.0
+
+The CustomVoice profile is **N=1 by design**. N=2 shared-engine was re-verified
+on **Base** and **SparkTTS**: **~1284 MB VRAM saved**, PCM **byte-identical** to
+solo, and **0 CUDA errors over a 50-shot burst**. Note: v0.9.0 has a larger
+init-time transient, so a production N=2 needs the **lean** engines
+(`code2wav optCodeLen=48` + `max_position_embeddings=4096`).
+
+### v0.9.0 key mechanism changes
+
+- **CuTe-DSL dependency.** TTS runs with `ENABLE_CUTE_DSL=OFF` on our in-house
+  tiled FP16 GEMM kernel (no cuBLAS, production-proven); GDN rebuilds sm_87 via
+  cutlass-dsl 4.5.2 on-device.
+- **Mel front-end retired** → WAV-ingest (`EDGELLM_REQUEST_AUDIO_WAV=1`).
+- **Native streaming API** (`streamingChunkFrames` / `onChunkReady`).
+- `EDGELLM_PLUGIN_PATH` must be an **absolute** path.
+
 ---
 
 ## v0.8.0 N>1 concurrency (verified 2026-06-21)
