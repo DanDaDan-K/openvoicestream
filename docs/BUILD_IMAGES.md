@@ -29,7 +29,7 @@ Slim images bake **no** models/engines — they pull artifacts from Hugging Face
 `COPY deploy/wheels/voxedge-*.whl`):
 ```bash
 cd voxedge && uv build --wheel
-cp dist/voxedge-0.0.1a0-py3-none-any.whl ../seeed-local-voice/deploy/wheels/
+cp dist/voxedge-0.0.2a0-py3-none-any.whl ../seeed-local-voice/deploy/wheels/
 ```
 
 **Build** (run on the matching arm64 device, in the `seeed-local-voice/` build
