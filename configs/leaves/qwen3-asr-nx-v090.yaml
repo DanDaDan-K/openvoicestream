@@ -62,8 +62,11 @@ leaves:
       EDGE_LLM_ASR_AUDIO_ENC_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v090/asr_audio_encoder
       # v0.9.0: plugin must be an absolute path (cwd-relative resolution fix).
       EDGELLM_PLUGIN_PATH: /opt/edgellm-v090/libNvInfer_edgellm_plugin.so
-      # NOTE: no EDGE_LLM_ASR_MEL_SETTINGS/_FILTERS — retired in v0.9.0
-      # (audio runner takes wav directly; EDGELLM_REQUEST_AUDIO_WAV=1 default).
+      # v0.9.0 WAV-ingest mode: the worker extracts mel internally from a temp
+      # WAV, so the host-side mel front-end (EDGE_LLM_ASR_MEL_SETTINGS/_FILTERS)
+      # is retired. This flag is what the voxedge ASR preload guard
+      # (_require_streaming_worker_assets) reads to skip the mel-asset check.
+      EDGELLM_REQUEST_AUDIO_WAV: "1"
     resources:
       # DELTA over idle baseline; v080 fp16 measurement (1666 MB) kept as the
       # conservative bound for the smaller int4 thinker. Re-measure at P5.
@@ -86,6 +89,8 @@ leaves:
       EDGE_LLM_ASR_ENGINE_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v090/asr_thinker_full_int4
       EDGE_LLM_ASR_AUDIO_ENC_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v090/asr_audio_encoder
       EDGELLM_PLUGIN_PATH: /opt/edgellm-v090/libNvInfer_edgellm_plugin.so
+      # v0.9.0 WAV-ingest mode (see n1) — voxedge preload guard reads this.
+      EDGELLM_REQUEST_AUDIO_WAV: "1"
     resources:
       # DELTA over idle baseline; v080 fp16 N=2 measurement (1925 MB) kept as
       # the conservative bound for the int4 thinker. Re-measure at P5.

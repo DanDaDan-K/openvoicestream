@@ -218,9 +218,10 @@ def test_v090_active_sets_env_and_omits_mel_keys():
     )
     # Lean non-stateful code2wav on the v090 TTS path.
     assert os.environ["EDGE_LLM_TTS_STATEFUL_CODE2WAV"] == "0"
-    # Mel front-end keys are retired on v090 (audio runner ingests wav
-    # directly; EDGELLM_REQUEST_AUDIO_WAV=1 is the new default) — the leaves
-    # must not emit them.
+    # v0.9.0 WAV-ingest: the leaf emits EDGELLM_REQUEST_AUDIO_WAV=1 (read by the
+    # voxedge ASR preload guard to skip the mel-asset check); the host-side mel
+    # front-end keys are retired on the v090 path and must not be emitted.
+    assert os.environ["EDGELLM_REQUEST_AUDIO_WAV"] == "1"
     assert "EDGE_LLM_ASR_MEL_SETTINGS" not in os.environ
     assert "EDGE_LLM_ASR_MEL_FILTERS" not in os.environ
     assert pulls  # non-empty union pull

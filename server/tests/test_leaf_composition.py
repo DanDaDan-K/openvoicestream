@@ -651,8 +651,10 @@ def test_v090_asr_env_points_at_highperf_v090(registry):
     )
     # v0.9.0: plugin path is required and must be absolute (cwd-resolution fix).
     assert env["EDGELLM_PLUGIN_PATH"] == _V090_PLUGIN
-    # v0.9.0 audio runner ingests wav directly (EDGELLM_REQUEST_AUDIO_WAV=1 is
-    # the new default) — mel front-end env keys are retired on the v090 path.
+    # v0.9.0 WAV-ingest mode: the leaf sets EDGELLM_REQUEST_AUDIO_WAV=1 (which
+    # the voxedge ASR preload guard reads to skip the mel-asset check), and the
+    # host-side mel front-end env keys are retired on the v090 path.
+    assert env["EDGELLM_REQUEST_AUDIO_WAV"] == "1"
     assert "EDGE_LLM_ASR_MEL_SETTINGS" not in env
     assert "EDGE_LLM_ASR_MEL_FILTERS" not in env
 
