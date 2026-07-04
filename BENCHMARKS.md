@@ -28,7 +28,7 @@ re-verified on a real Jetson Orin NX; ASR/TTS quality is held to the v0.8.0
 golden set (no regression).
 
 **Pins:** fork `integration/v090-sparktts` (v0.9.0 tag `1ac0f2b` + our patches),
-submodule overlay `repin/v090-overlay`, voxedge wheel `0.0.3a0`. Spec:
+submodule overlay `repin/v090-overlay`, voxedge wheel `0.0.4a0`. Spec:
 [`docs/specs/edgellm-v090-tts-re-port.md`](docs/specs/edgellm-v090-tts-re-port.md).
 
 ### SparkTTS-0.5B — the headline: W4A16 becomes the all-round pick

@@ -428,7 +428,7 @@ crashes.
   to absorb the larger init transient.
 
 Pins: fork `integration/v090-sparktts` (v0.9.0 tag `1ac0f2b` + patches), submodule
-overlay `repin/v090-overlay`, voxedge wheel `0.0.3a0`. v0.9.0 also retires the mel
+overlay `repin/v090-overlay`, voxedge wheel `0.0.4a0`. v0.9.0 also retires the mel
 front-end (WAV-ingest, `EDGELLM_REQUEST_AUDIO_WAV=1`), adds a native streaming API,
 and requires an absolute `EDGELLM_PLUGIN_PATH`. See [BENCHMARKS.md](BENCHMARKS.md)
 and the re-port spec
@@ -659,7 +659,7 @@ anyone can self-serve a reproduction or a release.
   re-verified on Base/SparkTTS (~1284 MB VRAM saved, PCM byte-identical, 0 CUDA
   errors / 50 shots).
 - Pins: fork `integration/v090-sparktts` (tag `1ac0f2b` + patches), submodule
-  overlay `repin/v090-overlay`, voxedge wheel `0.0.3a0`. v0.9.0 retires the mel
+  overlay `repin/v090-overlay`, voxedge wheel `0.0.4a0`. v0.9.0 retires the mel
   front-end (WAV-ingest), adds a native streaming API, and needs an absolute
   `EDGELLM_PLUGIN_PATH`. See [BENCHMARKS.md](BENCHMARKS.md) and
   [`docs/specs/edgellm-v090-tts-re-port.md`](docs/specs/edgellm-v090-tts-re-port.md).

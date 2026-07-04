@@ -13,9 +13,11 @@
 # plus ENV EDGELLM_PLUGIN_PATH=/opt/edgellm-v090/libNvInfer_edgellm_plugin.so
 # (v0.9.0 resolves the plugin relative to CWD when the env is unset/relative).
 #
-# This overlay only stages the v090 profiles so OVS_PROFILE can select them.
-# Build context: this directory with the three profile JSONs copied in flat
-# (same convention as the moss-nx overlay).
+# This overlay stages the v090 profiles (so OVS_PROFILE can select them) and
+# force-reinstalls the v090 voxedge wheel (WAV-ingest ASR + streaming-only TTS
+# fixes) on top of whatever the base baked. Build context: this directory with
+# the three profile JSONs + the wheel copied in flat (same convention as the
+# moss-nx overlay).
 #
 # TODO(P5): pin BASE to the published v090 prefix tag before building.
 ARG BASE=sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:TODO-v090-prefix-tag-set-at-P5
@@ -24,6 +26,14 @@ FROM ${BASE}
 # Belt-and-braces: re-assert the v090 plugin path even if the base pre-dates
 # the env bake (operator env still wins over profile env at runtime).
 ENV EDGELLM_PLUGIN_PATH=/opt/edgellm-v090/libNvInfer_edgellm_plugin.so
+
+# v090 voxedge (0.0.4a0): WAV-ingest ASR (skips retired mel assets) + non-
+# streaming /tts routed via stream (lean worker has no output_file mode).
+# --force-reinstall because the base may bake the same version number with
+# pre-fix code; --no-deps to avoid perturbing the pinned runtime stack.
+COPY voxedge-0.0.4a0-py3-none-any.whl /tmp/voxedge-0.0.4a0-py3-none-any.whl
+RUN pip3 install --force-reinstall --no-deps /tmp/voxedge-0.0.4a0-py3-none-any.whl \
+    && rm -f /tmp/voxedge-0.0.4a0-py3-none-any.whl
 
 COPY jetson-edgellm-v090-qwen3ttsbase.json /opt/speech/configs/profiles/jetson-edgellm-v090-qwen3ttsbase.json
 COPY jetson-edgellm-v090-moss.json /opt/speech/configs/profiles/jetson-edgellm-v090-moss.json
