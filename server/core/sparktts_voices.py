@@ -166,6 +166,128 @@ def register_from_profile_files(
     return {"voice_id": vid, "json": jpath, "npz": npath, "registry_count": n}
 
 
+def register_embedding_voice(
+    voice_id: str,
+    embedding_bytes: bytes,
+    sample_rate: int = 24000,
+    ref_text: Optional[str] = None,
+    source_meta: Optional[dict] = None,
+) -> dict:
+    """Persist an *embedding-profile* clone voice (float32[1024] speaker vector).
+
+    Unlike :func:`register_from_profile_files` (SparkTTS ``global_ids`` profiles,
+    consumed by the voxedge ``VoiceRegistry``), this writes a lightweight profile
+    the *server* resolves at synth time: ``<id>.json`` carries
+    ``profile_type: "speaker_embedding"`` and ``<id>.npz`` stores the raw
+    embedding under the key ``speaker_embedding``. The Qwen3 BASE backend has no
+    voice registry — the server loads the npz on demand and forwards the raw
+    ``speaker_embedding`` bytes to the backend (see ``load_embedding_voice`` and
+    ``_request_voice_kwargs`` in server/main.py).
+
+    Do NOT route these through ``register_from_profile_files``: it requires 32
+    ``global_ids`` and would reject an embedding-only profile.
+    """
+    import io
+    import numpy as np  # lazy
+
+    if not voice_id:
+        raise ValueError("voice_id is required")
+    emb = np.frombuffer(embedding_bytes, dtype=np.float32)
+    if emb.size == 0 or emb.nbytes % 4 != 0:
+        raise ValueError("embedding must be a non-empty float32 byte vector")
+    embedding_dim = int(emb.size)
+
+    d = voices_dir()
+    os.makedirs(d, exist_ok=True)
+    safe = _safe_id(voice_id)
+    jpath = os.path.join(d, safe + ".json")
+    npath = os.path.join(d, safe + ".npz")
+
+    buf = io.BytesIO()
+    np.savez(buf, speaker_embedding=emb.astype(np.float32, copy=False))
+    npz_bytes = buf.getvalue()
+
+    j = {
+        "voice_id": voice_id,
+        "npz_file": os.path.basename(npath),
+        "profile_type": "speaker_embedding",
+        "embedding_dim": embedding_dim,
+        "embedding_dtype": "float32",
+        "sample_rate": sample_rate,
+        "ref_text": ref_text,
+        "source_meta": source_meta,
+    }
+
+    with _write_lock:
+        with open(npath, "wb") as f:
+            f.write(npz_bytes)
+        tmp = jpath + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(j, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, jpath)
+
+    # Best-effort registry reload — the SparkTTS VoiceRegistry ignores embedding
+    # profiles (no global_ids), so this is a no-op there, but keeps other
+    # registries in sync when present.
+    n = _reload_live_registry()
+    logger.info(
+        "Registered embedding clone voice %r (dim=%d, registry→%s)",
+        voice_id, embedding_dim, n,
+    )
+    return {
+        "voice_id": voice_id,
+        "json": jpath,
+        "npz": npath,
+        "profile_type": "speaker_embedding",
+        "embedding_dim": embedding_dim,
+        "registry_count": n,
+    }
+
+
+def load_embedding_voice(voice_id: str) -> Optional[bytes]:
+    """Return raw float32 speaker-embedding bytes for an embedding-profile voice.
+
+    Returns ``None`` when the id is unknown or the on-disk profile is not an
+    embedding-profile (e.g. a SparkTTS ``global_ids`` clone) — callers then treat
+    ``voice_id`` as an opaque backend-routed selector instead.
+    """
+    import io
+    import numpy as np  # lazy
+
+    if not voice_id:
+        return None
+    d = voices_dir()
+    safe = _safe_id(voice_id)
+    jpath = os.path.join(d, safe + ".json")
+    if not os.path.isfile(jpath):
+        return None
+    try:
+        with open(jpath, "r", encoding="utf-8") as f:
+            j = json.load(f)
+    except Exception:
+        return None
+    if j.get("profile_type") != "speaker_embedding":
+        return None
+    npz_name = j.get("npz_file") or (safe + ".npz")
+    npath = os.path.join(d, npz_name)
+    if not os.path.isfile(npath):
+        return None
+    try:
+        with open(npath, "rb") as f:
+            npz_bytes = f.read()
+        with np.load(io.BytesIO(npz_bytes)) as npz:
+            key = "speaker_embedding" if "speaker_embedding" in npz else (
+                "d_vector" if "d_vector" in npz else None
+            )
+            if key is None:
+                return None
+            emb = npz[key].reshape(-1).astype(np.float32, copy=False)
+    except Exception:
+        logger.warning("failed loading embedding voice %r", voice_id, exc_info=True)
+        return None
+    return emb.tobytes()
+
+
 def enroll_from_audio(
     wav_bytes: bytes,
     voice_id: str,

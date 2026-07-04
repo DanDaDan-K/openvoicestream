@@ -316,8 +316,45 @@ def _request_voice_kwargs(req: TTSRequest, *, backend=None) -> dict:
     # don't recognise it ignore the extra kwarg.
     voice = getattr(req, "voice", None)
     if voice:
-        out["voice"] = voice
+        # Server-side embedding-profile resolution: if `voice` names an
+        # embedding-profile enrolled via /tts/voices/enroll (CPU-ONNX path),
+        # load its raw float32 speaker vector and forward it as
+        # `speaker_embedding` — the Qwen3 BASE backend has no voice registry but
+        # already consumes raw embeddings. SparkTTS `global_ids` clones and any
+        # other opaque selector fall through as a plain `voice` passthrough.
+        from server.core import sparktts_voices
+        emb = sparktts_voices.load_embedding_voice(voice)
+        if emb is not None:
+            if backend is not None and getattr(backend, "supports_voice_cloning", True) is False:
+                from server.core.tts_backend import TTSCapability
+                if not backend.has_capability(TTSCapability.VOICE_CLONE):
+                    raise _VoiceCloneUnsupportedError(backend)
+            out["speaker_embedding"] = emb
+            out.pop("voice", None)
+        else:
+            out["voice"] = voice
     return out
+
+
+def _peek_tts_backend():
+    """Return the live TTS backend for metadata/CPU-only ops (no slot acquire).
+
+    Prefers the BackendManager's current backend (``get_backend_unsafe`` — safe
+    for readiness/metadata queries per its contract), falling back to the legacy
+    ``tts_service`` backend. Used by /tts/voices/enroll to reach the CPU-ONNX
+    ``extract_speaker_embedding`` without holding a synthesis slot. Returns
+    ``None`` when no backend is ready.
+    """
+    mgr = _try_tts_manager()
+    if mgr is not None:
+        try:
+            return mgr.get_backend_unsafe()
+        except Exception:
+            pass
+    from server.core import tts_service
+    if tts_service.is_ready():
+        return tts_service.get_backend()
+    return None
 
 
 def _get_asr_backend():
@@ -1403,6 +1440,7 @@ async def tts_capabilities(_: None = Depends(_require_api_key)):
         "model_id": backend.model_id,
         "capabilities": caps,
         "supports_voice_cloning": getattr(backend, "supports_voice_cloning", "voice_clone" in caps),
+        "supports_voice_enrollment": bool(getattr(backend, "supports_voice_enrollment", False)),
         "sample_rate": tts_service.get_sample_rate(),
         "speakers": available_speakers(backend.model_id),
     }
@@ -1551,13 +1589,55 @@ async def tts_voices_enroll(
     ref_text: str | None = Form(None),
     _: None = Depends(_require_api_key),
 ):
-    """Enroll a clone voice from reference audio by running the analysis chain in-process.
+    """Enroll a clone voice from reference audio.
 
-    Only works on a host with the SparkTTS PyTorch stack (spec §3.2). On a Jetson this
-    returns 501 with guidance to use POST /tts/voices/profile with a host-generated pair.
+    Two paths, tried in order:
+
+      1. **CPU-ONNX (torch-less, preferred on Jetson TRT)** — when the active TTS
+         backend exposes a usable ``extract_speaker_embedding`` (its
+         ``supports_voice_enrollment`` is true because a speaker-encoder ONNX is
+         present). Produces a float32[1024] embedding on ONNX Runtime and persists
+         it as an *embedding-profile* the server resolves at synth time.
+      2. **PyTorch SparkTTS analysis chain** — falls back to the in-process
+         wav2vec2 + BiCodec enroller (host deployments with the torch stack).
+
+    Returns 501 only when neither path is available, with guidance to POST a
+    host-generated ``.json + .npz`` to /tts/voices/profile.
     """
     from server.core import sparktts_voices
     audio = await file.read()
+
+    # Path 1: CPU-ONNX extractor on the active backend (no torch required).
+    backend = _peek_tts_backend()
+    if backend is not None and getattr(backend, "supports_voice_enrollment", False):
+        try:
+            embedding = backend.extract_speaker_embedding(audio)
+        except NotImplementedError:
+            embedding = None
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except Exception as exc:  # extractor blew up — surface, don't silently torch-fall
+            logger.warning("ONNX speaker embedding extraction failed", exc_info=True)
+            return JSONResponse(
+                {"error": f"speaker embedding extraction failed: {exc}"},
+                status_code=500,
+            )
+        if embedding:
+            try:
+                res = sparktts_voices.register_embedding_voice(
+                    voice_id,
+                    embedding,
+                    sample_rate=getattr(backend, "sample_rate", 24000),
+                    ref_text=ref_text,
+                    source_meta={"method": "onnx_speaker_encoder",
+                                 "backend": getattr(backend, "name", None)},
+                )
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            res["method"] = "onnx_speaker_encoder"
+            return res
+
+    # Path 2: in-process PyTorch SparkTTS enrollment (host deployments).
     try:
         res = sparktts_voices.enroll_from_audio(audio, voice_id, ref_text=ref_text)
     except sparktts_voices.EnrollmentUnavailable as exc:
@@ -1567,6 +1647,7 @@ async def tts_voices_enroll(
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    res["method"] = "sparktts_pytorch"
     return res
 
 

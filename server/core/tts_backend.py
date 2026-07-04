@@ -40,6 +40,13 @@ class TTSBackend(ABC):
     # this to True. BackendManager.reload() refuses with HTTP 400 otherwise.
     supports_hot_reload: bool = False
 
+    # Honest device-side voice-enrollment signal. True only when the backend can
+    # extract a speaker embedding from a reference WAV *on this host* (its
+    # ``extract_speaker_embedding`` is usable — e.g. a CPU-ONNX speaker encoder
+    # is present). Distinct from ``VOICE_CLONE`` capability, which only means the
+    # backend can *consume* a raw embedding at synth time. Backends override.
+    supports_voice_enrollment: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:
