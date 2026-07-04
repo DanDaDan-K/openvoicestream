@@ -683,6 +683,10 @@ def test_v090_tts_env_lean_nonstateful_worker(registry):
     )
     # Lean non-stateful code2wav path (v080 stateful surgery retired).
     assert env["EDGE_LLM_TTS_STATEFUL_CODE2WAV"] == "0"
+    # v0.9.0 lean worker is streaming-native (no output_file mode) → the leaf
+    # must also flag STREAMING_ONLY so non-streaming /tts aggregates chunks,
+    # matching the profile. (Without it, composition-mode /tts hits KeyError.)
+    assert env["EDGE_LLM_TTS_STREAMING_ONLY"] == "1"
     assert env["EDGE_LLM_TTS_CODE2WAV_DIR"] == (
         "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v090/"
         "tts_code2wav_lean"

@@ -57,6 +57,9 @@ leaves:
       EDGE_LLM_TTS_TOKENIZER_DIR: ${QWEN3_ARTIFACT_ROOT}/tts/tokenizer
       # v0.9.0 lean code2wav — non-stateful path.
       EDGE_LLM_TTS_STATEFUL_CODE2WAV: "0"
+      # v0.9.0 lean worker is streaming-native (no output_file mode) — the
+      # non-streaming /tts path must aggregate streaming chunks into a WAV.
+      EDGE_LLM_TTS_STREAMING_ONLY: "1"
       EDGE_LLM_TTS_CHUNK_FRAMES: "13"
 
   # --- N=1: single worker slot ---

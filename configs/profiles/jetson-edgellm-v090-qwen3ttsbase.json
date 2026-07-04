@@ -45,6 +45,22 @@
     "OVS_TTS_SEED": "42"
   },
   "tts_worker_concurrency": 1,
+  "profile_owned_env": [
+    "EDGELLM_REQUEST_AUDIO_WAV",
+    "EDGE_LLM_TTS_WORKER",
+    "EDGE_LLM_TTS_WORKER_BIN",
+    "EDGELLM_PLUGIN_PATH",
+    "EDGE_LLM_TTS_TALKER_DIR",
+    "EDGE_LLM_TTS_CP_DIR",
+    "EDGE_LLM_TTS_CODE2WAV_DIR",
+    "EDGE_LLM_TTS_SPK_ENCODER_DIR",
+    "EDGE_LLM_TTS_TOKENIZER_DIR",
+    "EDGE_LLM_TTS_BASE_SPK_EMBED_PATH",
+    "EDGE_LLM_TTS_STATEFUL_CODE2WAV",
+    "EDGE_LLM_TTS_STREAMING_ONLY",
+    "EDGE_LLM_TTS_CHUNK_FRAMES",
+    "OVS_TTS_WORKER_CONCURRENCY"
+  ],
   "required_engines": [
     {
       "model_id": "qwen3-tts-0.6b-base",
