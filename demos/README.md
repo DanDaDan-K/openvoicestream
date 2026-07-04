@@ -52,10 +52,12 @@ container needs (真机验证得出的完整配置，orin-nx 2026-07-02)：
 | `OVS_ADMIN_KEY=<secret>` | model hot-switch panel | Without it, admin routes 403 for any non-loopback caller — and with bridge networking even host-side callers are non-loopback from the container's view. Set it and give the same value to the gallery as `SLV_ADMIN_KEY`. |
 | `OVS_V2V_SERVER_LOOP=1` + `OVS_V2V_ENGINE=voxedge` | v2v-chat spoken replies | Default off = ASR-only pass-through; the chat card then shows a hint instead of answering. |
 | `EDGE_LLM_BASE_URL=http://172.17.0.1:8000/v1` | v2v-chat spoken replies | The code default `127.0.0.1:8000/v1` points at SLV itself inside the container. `172.17.0.1` (docker0) reaches an LLM service published on the host. |
+| `QWEN3_SPEAKER_ENCODER=/path/speaker_encoder.onnx` | voice-clone live enroll | Enables the torch-less CPU-ONNX enrollment path (`/tts/voices/enroll`). Without it, `supports_voice_enrollment` is false and enroll falls back to torch → 501 on Jetson. Also requires a TTS profile that consumes external embeddings (the **Base** profile `jetson-edgellm-v090-qwen3ttsbase`, not CustomVoice's named speakers). |
+| `DIAR_CAMPPLUS_ENGINE_FILE=/path/campplus_fp16.plan` (Jetson) + `OVS_DIARIZE=1` | diarization speaker colouring | Configures the CAM++ speaker-embedding backend so `/asr/stream?diarize=true` finals carry a `speaker` field. On Rockchip the CAM++ ONNX auto-downloads (sherpa CPU); on Jetson point this at a TRT `.plan`. Without it the card renders captions but no colouring. |
 
-asr-caption / tts-playground / voice-clone only need the SLV service itself
-(no admin key, no server loop). voice-clone additionally requires a TTS engine
-with `supports_voice_cloning` (e.g. SparkTTS profiles on Jetson).
+**Two voice-cloning capability signals** (`/tts/capabilities`): `supports_voice_cloning` = can synthesize with an *already-enrolled* voice; `supports_voice_enrollment` = can enroll on-device from a 10s recording (needs the ONNX speaker encoder above). The voice-clone card's "record → clone" flow needs the latter. asr-caption / tts-playground only need the SLV service itself.
+
+Verified end-to-end on a v0.9.0 Base-profile SLV (orin-nx 2026-07-04): enroll → `method: onnx_speaker_encoder` → clone TTFA 65 ms → exact ASR readback. Deployment recipe is a thin overlay (`FROM <v090 image>` + force-reinstall the voxedge wheel + the Base profile + the two engines above); note the Base tokenizer dir also needs `processed_chat_template.json`, not just `tokenizer.json`.
 
 ## Environment / 环境变量
 
