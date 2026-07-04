@@ -610,3 +610,116 @@ def test_single_npu_leaf_no_exclusivity_error(registry):
     # One NPU leaf alone never trips the exclusivity check.
     plan = lc.validate_composition("rk3576", [SENSEVOICE_RKNN_3576], registry)
     assert set(plan.leaf_ids) == {SENSEVOICE_RKNN_3576}
+
+
+# ---------------------------------------------------------------------------
+# v0.9.0 leaves (edgellm-v090 engine set). The v080 leaves above are kept
+# untouched for rollback — these cases only cover the NEW *-v090.yaml files.
+# ---------------------------------------------------------------------------
+
+ASR_V090_N1 = "asr.qwen3_asr_v090.orin-nx.n1"
+ASR_V090_N2 = "asr.qwen3_asr_v090.orin-nx.n2"
+TTS_V090_N1 = "tts.qwen3_tts_v090.orin-nx.n1"
+TTS_V090_N2 = "tts.qwen3_tts_v090.orin-nx.n2"
+TTS_V090_SHARED = "tts.qwen3_tts_v090.shared"
+TTS_BASE_V090_N1 = "tts.qwen3_tts_base_v090.orin-nx.n1"
+TTS_BASE_V090_N2 = "tts.qwen3_tts_base_v090.orin-nx.n2"
+TTS_BASE_V090_FILES = "tts.qwen3_tts_base_v090.model_files"
+
+_V090_PLUGIN = "/opt/edgellm-v090/libNvInfer_edgellm_plugin.so"
+
+
+def test_registry_loads_v090_leaves(registry):
+    for lid in (ASR_V090_N1, ASR_V090_N2, TTS_V090_N1, TTS_V090_N2,
+                TTS_V090_SHARED, TTS_BASE_V090_N1, TTS_BASE_V090_N2,
+                TTS_BASE_V090_FILES):
+        assert lid in registry.leaves, lid
+
+
+def test_v090_asr_env_points_at_highperf_v090(registry):
+    env = lc.resolve_env(
+        [ASR_V090_N2], registry,
+        overrides={"QWEN3_ARTIFACT_ROOT": "/opt/models/qwen3-edgellm"},
+    )
+    assert env["EDGE_LLM_ASR_ENGINE_DIR"] == (
+        "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v090/"
+        "asr_thinker_full_int4"
+    )
+    assert env["EDGE_LLM_ASR_AUDIO_ENC_DIR"] == (
+        "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v090/"
+        "asr_audio_encoder"
+    )
+    # v0.9.0: plugin path is required and must be absolute (cwd-resolution fix).
+    assert env["EDGELLM_PLUGIN_PATH"] == _V090_PLUGIN
+    # v0.9.0 WAV-ingest mode: the leaf sets EDGELLM_REQUEST_AUDIO_WAV=1 (which
+    # the voxedge ASR preload guard reads to skip the mel-asset check), and the
+    # host-side mel front-end env keys are retired on the v090 path.
+    assert env["EDGELLM_REQUEST_AUDIO_WAV"] == "1"
+    assert "EDGE_LLM_ASR_MEL_SETTINGS" not in env
+    assert "EDGE_LLM_ASR_MEL_FILTERS" not in env
+
+
+def test_v090_asr_precision_pinned_int4(registry):
+    # models.yaml qwen3-asr jetson default stays fp16 (v080 leaves); the v090
+    # thinker is the int4 build so the leaf pins precision explicitly.
+    leaf = registry.get_leaf(ASR_V090_N2)
+    assert leaf.precision == "int4"
+    assert registry.resolve_precision(leaf, "orin-nx") == "int4"
+
+
+def test_v090_tts_single_b2_talker_serves_n1_and_n2(registry):
+    # v0.9.0: ONE talker engine (b2 batch lane) serves both concurrency leaves
+    # (batched decode inside one runtime) → identical pull sets, like ASR.
+    assert (lc.resolve_pull([TTS_V090_N1], registry)
+            == lc.resolve_pull([TTS_V090_N2], registry))
+    files = lc.resolve_pull([TTS_V090_N1], registry)
+    assert "engines/orin-nx/highperf-v090/tts_talker_int4_b2" in files
+
+
+def test_v090_tts_env_lean_nonstateful_worker(registry):
+    env = lc.resolve_env(
+        [TTS_V090_N2], registry,
+        overrides={"QWEN3_ARTIFACT_ROOT": "/opt/models/qwen3-edgellm"},
+    )
+    # Lean non-stateful code2wav path (v080 stateful surgery retired).
+    assert env["EDGE_LLM_TTS_STATEFUL_CODE2WAV"] == "0"
+    # v0.9.0 lean worker is streaming-native (no output_file mode) → the leaf
+    # must also flag STREAMING_ONLY so non-streaming /tts aggregates chunks,
+    # matching the profile. (Without it, composition-mode /tts hits KeyError.)
+    assert env["EDGE_LLM_TTS_STREAMING_ONLY"] == "1"
+    assert env["EDGE_LLM_TTS_CODE2WAV_DIR"] == (
+        "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v090/"
+        "tts_code2wav_lean"
+    )
+    assert env["EDGE_LLM_TTS_TALKER_DIR"].endswith("tts_talker_int4_b2")
+    assert env["EDGELLM_PLUGIN_PATH"] == _V090_PLUGIN
+    assert env["OVS_TTS_WORKER_CONCURRENCY"] == "2"
+    # The v0.7-style explicit_kv path is gone on v090 leaves.
+    assert "EDGE_LLM_TTS_TALKER_ENGINE" not in env
+    assert "EDGE_LLM_TTS_TALKER_BACKEND" not in env
+
+
+def test_v090_base_pull_includes_engines_and_model_files(registry):
+    files = lc.resolve_pull([TTS_BASE_V090_N1], registry)
+    # Engines from the unified highperf-v090 tree (incl. NEW spk encoder)...
+    for f in (
+        "engines/orin-nx/highperf-v090/tts_base_talker",
+        "engines/orin-nx/highperf-v090/tts_base_code_predictor",
+        "engines/orin-nx/highperf-v090/tts_base_code2wav_lean",
+        "engines/orin-nx/highperf-v090/tts_base_spk_encoder",
+    ):
+        assert f in files, f
+    # ...plus the version-independent model-side files via the sub-leaf.
+    assert "models/qwen3-tts-base/tokenizer/tokenizer.json" in files
+    assert "models/qwen3-tts-base/ref_embedding.b64.txt" in files
+    env = lc.resolve_env([TTS_BASE_V090_N1], registry)
+    assert env["EDGE_LLM_TTS_STATEFUL_CODE2WAV"] == "0"
+    assert env["EDGELLM_PLUGIN_PATH"] == _V090_PLUGIN
+    assert env["EDGE_LLM_TTS_SPK_ENCODER_DIR"].endswith("tts_base_spk_encoder")
+
+
+def test_v090_compositions_validate_on_nx(registry):
+    for tts in (TTS_V090_N2, TTS_BASE_V090_N2):
+        plan = lc.validate_composition("orin-nx", [ASR_V090_N2, tts], registry)
+        assert set(plan.leaf_ids) == {ASR_V090_N2, tts}
+        assert plan.peak_unified_mb <= plan.headroom_mb

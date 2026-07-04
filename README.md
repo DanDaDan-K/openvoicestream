@@ -167,7 +167,8 @@ Kokoro RKNN TTS.
 - **Reusable edge voice library** — the backends ship as the standalone, pip-installable [`voxedge`](https://github.com/suharvest/voxedge) package (`pip install --pre voxedge`); this repo is the product server + deploy on top of it.
 - **Stable backend contract** — clients keep the same `/asr/stream`, `/tts`, `/tts/stream`, and `/health` calls when profiles change.
 - **Measured low latency** — 58 ms EOS-to-first-audio on Jetson Orin NX with Paraformer + Matcha; 157 ms with Qwen3 ASR/TTS voice clone.
-- **Concurrent N=2 on v0.8.0** — verified 2-session ASR streaming (zh/en, no cross-talk) and N=2 Qwen3-TTS Base (int4 talker, ~4 GB RAM; or shared-engine with only +1.6 GB for the 2nd slot). See [BENCHMARKS.md](BENCHMARKS.md).
+- **TensorRT-Edge-LLM v0.9.0 voice stack** — six models re-verified on Orin NX; **SparkTTS W4A16 is the standout** (RTF 0.50, TTFA 0.41–0.46 s, zero quality loss). The LLM service stays on v0.8.0 by design. See [BENCHMARKS.md](BENCHMARKS.md).
+- **Concurrent N=2** — verified 2-session ASR streaming (zh/en, no cross-talk) and N=2 Qwen3-TTS Base (int4 talker, ~4 GB RAM; or shared-engine with only +1.6 GB for the 2nd slot; re-verified on v0.9.0). See [BENCHMARKS.md](BENCHMARKS.md).
 - **Multilingual options** — Chinese+English, English-only, and 52-language Qwen3 paths are exposed through the same service.
 - **Container-first deploy** — prebuilt images, target-specific compose files, host checks, model downloads, and verification scripts are included.
 - **LLM-ready agent layer** — `agent/` streams ASR results into an OpenAI-compatible or EdgeLLM backend, then streams LLM tokens directly back to TTS.
@@ -402,6 +403,37 @@ solo output) and zero CUDA/race errors. N=2 is the validated ceiling.
 Full tables, gates, and reproduction artifacts are in [BENCHMARKS.md](BENCHMARKS.md);
 the deployment runbook is [docs/deploy-v080-n1n2.md](docs/deploy-v080-n1n2.md).
 
+### v0.9.0 Upgrade — voice stack on TensorRT-Edge-LLM 0.9.0 (verified 2026-07-04)
+
+The **voice stack (ASR + TTS)** now runs on **TensorRT-Edge-LLM v0.9.0**
+(re-verified across six models on a real Orin NX). The **LLM service**
+(Qwen3.5-4B GDN) deliberately **stays on v0.8.0** — its decode parity vs v0.9.0
+is within ≲2% with no gain, and the v0.9.0 `experimental/server` + GDN combo
+crashes.
+
+- **SparkTTS-0.5B — headline win.** On v0.9.0 the **W4A16** INT4-AWQ engine
+  becomes the all-round pick: **RTF 0.50** (v0.8.0 baseline 0.74), **TTFA
+  0.41–0.46 s** (v0.8.0 bf16 0.64–0.71 s; earlier baseline 0.92 s), with **zero
+  quality loss** (ZH CER 0 / EN WER 0). Both bf16 and W4A16 engines ship.
+- **Qwen3-ASR 0.6B int4** — streaming + offline transcription **CER 0**, no
+  regression vs the v0.8.0 golden set.
+- **Qwen3-TTS CustomVoice int4** — 9-row language conditioning, cancel, and EN
+  frame counts correct; **RTF 0.61**. N=1 by design (`min(asr 2, tts 1) = 1`).
+- **Qwen3-TTS Base** — voice-clone works; the Base embedding controls timbre
+  (CAM++ cross-reference cos 0.366 vs same-reference 0.66–0.70).
+- **MOSS-TTS-Nano** — TTFA **95–157 ms** (on par with the prior baseline).
+- **N=2 shared-engine** re-verified on Base and SparkTTS: ~1284 MB VRAM saved,
+  PCM byte-identical, 0 CUDA errors over 50 shots. A production N=2 on v0.9.0
+  needs the lean engines (`code2wav optCodeLen=48` + `max_position_embeddings=4096`)
+  to absorb the larger init transient.
+
+Pins: fork `integration/v090-sparktts` (v0.9.0 tag `1ac0f2b` + patches), submodule
+overlay `repin/v090-overlay`, voxedge wheel `0.0.4a0`. v0.9.0 also retires the mel
+front-end (WAV-ingest, `EDGELLM_REQUEST_AUDIO_WAV=1`), adds a native streaming API,
+and requires an absolute `EDGELLM_PLUGIN_PATH`. See [BENCHMARKS.md](BENCHMARKS.md)
+and the re-port spec
+[`docs/specs/edgellm-v090-tts-re-port.md`](docs/specs/edgellm-v090-tts-re-port.md).
+
 ### TTS Model Comparison
 
 The current release uses Matcha/Vocos for the bilingual path, Kokoro for
@@ -415,7 +447,7 @@ research models are kept as historical context.
 |-------|--------------|------------------:|----------------:|-------|
 | **Matcha-TTS + Vocos** | Default bilingual TTS | 0.018 on Orin NX, 0.075 on RK3588, 0.078 on RPi5 | 2.6-7.5 ms | Fastest practical TTS path; no voice clone. |
 | **Qwen3-TTS** | Multilingual voice clone | 0.417 on Orin NX, 0.470 on Orin Nano | 4.4-7.3 ms | Higher quality/features, much heavier than Matcha. x-vector clone, or `customvoice` variant (9 instruction-controlled presets). |
-| **SparkTTS** | Controllable + voice clone (Jetson) | 0.74 gen on Orin NX | ~0.25 s clone / ~0.9 s controllable | Qwen2.5-0.5B + BiCodec single-codebook. **50 controllable timbres** (gender × 5 pitch × 5 speed, no reference audio) **and** zero-shot voice clone (cos ~0.90). W4A16 INT4-AWQ engine 645 MB (−58%), bf16/fp16 mixed-precision (Qwen2.5 fp16-overflow fix). ZH CER 0 / EN WER ≤0.02; N=2 byte-identical. |
+| **SparkTTS** | Controllable + voice clone (Jetson) | **0.50 (v0.9.0 W4A16)**, 0.74 on v0.8.0 | **0.41–0.46 s (v0.9.0 W4A16)**, ~0.25 s clone / ~0.9 s controllable on v0.8.0 | Qwen2.5-0.5B + BiCodec single-codebook. **50 controllable timbres** (gender × 5 pitch × 5 speed, no reference audio) **and** zero-shot voice clone (cos ~0.90). On **v0.9.0 W4A16 is the all-round pick** — faster and lighter with zero quality loss; bf16 also ships. W4A16 INT4-AWQ engine 645 MB (−58%), bf16/fp16 mixed-precision (Qwen2.5 fp16-overflow fix). ZH CER 0 / EN WER ≤0.02; N=2 byte-identical. |
 | **MOSS-TTS-Nano** | Multilingual TTS-only (Jetson) | — | ~157 ms TTFA on Orin NX | 0.1B model, 48kHz stereo via C++ TRT (19× faster than ORT CPU fallback). No voice clone. |
 | **Kokoro v1.0** | English-only TTS | Not in this benchmark run | Historical ~130 ms TTFT | Kept for English-only deployments. On RK3588 a hybrid CPU+NPU RKNN path serves multilingual TTS (`rk3588-kokoro-rknn`). |
 | CosyVoice3 | Research only | Not shipped | Historical ~800 ms TTFT | Higher quality, too heavy for this release. |
@@ -612,6 +644,25 @@ anyone can self-serve a reproduction or a release.
 > recipes/artifacts/docs/agents surface above.
 
 ## Changelog
+
+### 2026-07 — TensorRT-Edge-LLM v0.9.0 voice-stack upgrade
+
+- **Voice stack (ASR + TTS) upgraded to v0.9.0**, re-verified across six models
+  on a real Orin NX (2026-07-04). The **LLM service (Qwen3.5-4B GDN) stays on
+  v0.8.0** — v0.9.0 decode parity is within ≲2% with no gain, and the v0.9.0
+  `experimental/server` + GDN combo crashes.
+- **SparkTTS W4A16 is the headline win** — on v0.9.0 it becomes the all-round
+  pick: **RTF 0.50** (was 0.74) and **TTFA 0.41–0.46 s** (was 0.64–0.71 s bf16 /
+  0.92 s earlier) with **zero quality loss**. bf16 and W4A16 engines both ship.
+- Qwen3-ASR int4 CER 0 (no regression); CustomVoice int4 RTF 0.61 (N=1 by
+  design); Base voice-clone works; MOSS-TTS-Nano TTFA 95–157 ms. N=2 shared-engine
+  re-verified on Base/SparkTTS (~1284 MB VRAM saved, PCM byte-identical, 0 CUDA
+  errors / 50 shots).
+- Pins: fork `integration/v090-sparktts` (tag `1ac0f2b` + patches), submodule
+  overlay `repin/v090-overlay`, voxedge wheel `0.0.4a0`. v0.9.0 retires the mel
+  front-end (WAV-ingest), adds a native streaming API, and needs an absolute
+  `EDGELLM_PLUGIN_PATH`. See [BENCHMARKS.md](BENCHMARKS.md) and
+  [`docs/specs/edgellm-v090-tts-re-port.md`](docs/specs/edgellm-v090-tts-re-port.md).
 
 ### 2026-06 — v0.8.0 N>1 concurrency verified
 
