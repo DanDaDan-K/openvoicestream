@@ -124,10 +124,22 @@ docker compose -f deploy/docker-compose.rk.yml up -d
 
 在目标设备上运行时，`deploy/install.sh --pull --verify` 会自动检测 Jetson/RK/RPi。Jetson 默认保持在轻量级的 `zh_en` 路径（Paraformer + Matcha），因为它是最快的复现路径。需要双语 ASR 搭配富有表现力的英文 TTS 时使用 `jetson-paraformer-kokoro`，仅需 TTS 时使用 `jetson-kokoro-trt`，需要轻量级多语言纯 TTS（48kHz 立体声）时使用 `jetson-moss-tts-nano-trt`，需要 Qwen3 TensorRT-EdgeLLM 路线时使用 `jetson-multilang-*` profile。在 Rockchip 上，使用 `rk3588-paraformer-matcha` 或 `rk3576-paraformer-matcha` 走当前已验证的 Paraformer RKNN ASR 路径（hybrid encoder + RKNN decoder）搭配 Matcha TTS，或使用 `rk3588-kokoro-rknn` 走 Qwen3 RKNN ASR 搭配更高质量的多语言 Kokoro RKNN TTS。
 
+## Demo Gallery
+
+设备本机提供的浏览器演示门户：实时设备状态、每个能力一张演示卡（实时字幕、语音合成体验、带打断的语音对话、声音克隆、说话人分离）、运行时 ASR/TTS 模型热切换，以及面向展会的 kiosk 模式（`DEMO_KIOSK=1`）。
+
+```bash
+docker compose -f demos/docker-compose.demos.yml --profile all up -d
+# 打开 http://<device>:8700
+```
+
+部署与服务端前置条件见 [`demos/README.md`](demos/README.md)；全部演示资产（gallery 卡片、API 示例、agent 示例、bench 演示脚本）的总索引见 [`docs/DEMOS.md`](docs/DEMOS.md)。
+
 ## Table of Contents
 
 - [Why This Matters](#why-this-matters)
 - [Quick Start](#quick-start)
+- [Demo Gallery](#demo-gallery)
 - [Key Features](#key-features)
 - [Architecture](#architecture)
 - [API Reference](#api-reference)
