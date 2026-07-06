@@ -114,6 +114,38 @@ def _list_profiles(profiles_dir: Path, probe: ProbeResult) -> dict:
     return {"profiles": profiles, "filtered": bool(tokens), "platforms": sorted(tokens)}
 
 
+async def _fetch_loadable_names(slv: SLVProxy, kind: str) -> Optional[set[str]]:
+    """Ask SLV which profiles it can actually load for ``kind``.
+
+    Returns the set of loadable profile names on success, or ``None`` when the
+    SLV doesn't expose ``/admin/backend/loadable`` (older image), is
+    unreachable, rejects admin auth, or returns a malformed body — in every
+    such case the caller must fall back to the unfiltered listing.
+    """
+    try:
+        resp = await slv.admin_get("/admin/backend/loadable")
+    except Exception:  # noqa: BLE001 — SLV down / transport error → graceful fallback
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    section = data.get(kind)
+    if not isinstance(section, dict):
+        return None
+    loadable = section.get("loadable")
+    if not isinstance(loadable, list):
+        return None
+    return {str(n) for n in loadable}
+
+
+def _profile_stem(entry: dict) -> str:
+    file = entry.get("file") or ""
+    return file[: -len(".json")] if file.endswith(".json") else ""
+
+
 def _allowed_profile_names(profiles_dir: Path) -> set[str]:
     """Names accepted by /api/switch: every profile JSON in the directory,
     by logical name and by filename stem (SLV resolves both)."""
@@ -286,10 +318,24 @@ def create_app(
         }
 
     @app.get("/api/profiles")
-    async def api_profiles() -> dict:
+    async def api_profiles(kind: Optional[str] = None) -> dict:
         probe = await slv.probe()
         result = _list_profiles(profiles_dir, probe)
         result["slv_reachable"] = probe.reachable
+        result["loadable_filtered"] = False
+        # When a kind is requested, narrow the listing to profiles the SLV can
+        # actually load for that kind (real artifact pre-flight). If the SLV
+        # can't answer (old image / down / no admin key), keep the existing
+        # platform-filtered listing untouched.
+        if kind in ("tts", "asr"):
+            loadable = await _fetch_loadable_names(slv, kind)
+            if loadable is not None:
+                result["profiles"] = [
+                    p for p in result.get("profiles", [])
+                    if (p.get("name") or "") in loadable
+                    or (_profile_stem(p) and _profile_stem(p) in loadable)
+                ]
+                result["loadable_filtered"] = True
         return result
 
     @app.post("/api/switch")
