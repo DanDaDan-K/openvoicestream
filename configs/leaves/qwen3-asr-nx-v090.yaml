@@ -72,7 +72,7 @@ leaves:
       # conservative bound for the smaller int4 thinker. Re-measure at P5.
       peak_unified_mb: 1666
 
-  # --- N=2: SAME engine files as n1 (shared engine, higher session ceiling) ---
+  # --- N=2: BATCH-2 thinker (asr-b2) + SHARED audio encoder (batch-agnostic) ---
   asr.qwen3_asr_v090.orin-nx.n2:
     capability: asr
     backend: jetson.trt_edge_llm

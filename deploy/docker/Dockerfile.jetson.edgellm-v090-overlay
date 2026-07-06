@@ -38,3 +38,4 @@ RUN pip3 install --force-reinstall --no-deps /tmp/voxedge-0.0.4a0-py3-none-any.w
 COPY jetson-edgellm-v090-qwen3ttsbase.json /opt/speech/configs/profiles/jetson-edgellm-v090-qwen3ttsbase.json
 COPY jetson-edgellm-v090-moss.json /opt/speech/configs/profiles/jetson-edgellm-v090-moss.json
 COPY jetson-edgellm-v090-customvoice.json /opt/speech/configs/profiles/jetson-edgellm-v090-customvoice.json
+COPY jetson-edgellm-v090-n2.json /opt/speech/configs/profiles/jetson-edgellm-v090-n2.json
