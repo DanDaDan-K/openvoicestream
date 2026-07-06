@@ -72,7 +72,7 @@ leaves:
       # conservative bound for the smaller int4 thinker. Re-measure at P5.
       peak_unified_mb: 1666
 
-  # --- N=2: SAME engine files as n1 (shared engine, higher session ceiling) ---
+  # --- N=2: BATCH-2 thinker (asr-b2) + SHARED audio encoder (batch-agnostic) ---
   asr.qwen3_asr_v090.orin-nx.n2:
     capability: asr
     backend: jetson.trt_edge_llm
@@ -83,15 +83,19 @@ leaves:
     artifacts:
       repo: harvestsu/qwen3-edgellm-jetson-artifacts
       files:
-        - engines/orin-nx/highperf-v090/asr_thinker_full_int4
+        # N=2 needs the BATCH-2 thinker (asr-b2): maxSessionBatchSize() reads the
+        # engine max batch (=2) so SessionLaneManager opens 2 lanes. The batch-1
+        # engine caps at 1 lane. Audio encoder is time-step / batch-agnostic and
+        # is SHARED with n1.
+        - engines/orin-nx/highperf-v090/asr_thinker_full_int4_b2
         - engines/orin-nx/highperf-v090/asr_audio_encoder
     runtime_env:
-      EDGE_LLM_ASR_ENGINE_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v090/asr_thinker_full_int4
+      EDGE_LLM_ASR_ENGINE_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v090/asr_thinker_full_int4_b2
       EDGE_LLM_ASR_AUDIO_ENC_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v090/asr_audio_encoder
       EDGELLM_PLUGIN_PATH: /opt/edgellm-v090/libNvInfer_edgellm_plugin.so
       # v0.9.0 WAV-ingest mode (see n1) — voxedge preload guard reads this.
       EDGELLM_REQUEST_AUDIO_WAV: "1"
     resources:
-      # DELTA over idle baseline; v080 fp16 N=2 measurement (1925 MB) kept as
-      # the conservative bound for the int4 thinker. Re-measure at P5.
-      peak_unified_mb: 1925
+      # DELTA over idle baseline; v090 asr-b2 N=2 measured ~1971 MB on orin-nx
+      # (B1, consistent with the v080 fp16 N=2 1925 MB bound).
+      peak_unified_mb: 1971
