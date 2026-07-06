@@ -88,10 +88,18 @@ def _list_profiles(profiles_dir: Path, probe: ProbeResult) -> dict:
                 "error": f"profiles dir not found: {profiles_dir}"}
 
     tokens = _platform_tokens(probe)
+    # Optional operator allowlist: DEMO_SWITCH_PROFILES="a,b,c" restricts the
+    # switch panel to exactly these profile stems (e.g. only the profiles whose
+    # engines are actually loadable on this SLV). When unset, fall back to the
+    # device-platform filter. Matches by filename stem or logical name.
+    allow = {s.strip() for s in (os.environ.get("DEMO_SWITCH_PROFILES") or "").split(",") if s.strip()}
     profiles = []
     for path in sorted(profiles_dir.glob("*.json")):
         prefix = path.stem.split("-", 1)[0].lower()
-        if tokens and not any(prefix == t or prefix.startswith(t) for t in tokens):
+        if allow:
+            if path.stem not in allow:
+                continue
+        elif tokens and not any(prefix == t or prefix.startswith(t) for t in tokens):
             continue
         entry = {"name": path.stem, "file": path.name}
         try:
@@ -242,11 +250,22 @@ def create_app(
     @app.get("/api/status")
     async def api_status() -> dict:
         probe = await slv.probe()
+        slv_dict = probe.to_dict()
+        # Presentation label: the SLV doesn't expose an ASR model_id (only the
+        # engine name). If the operator sets DEMO_ASR_MODEL_ID, surface it so the
+        # ASR status pill shows the model instead of the raw engine. (The proper
+        # fix is server-side /asr/capabilities model_id; this is the demo-layer
+        # fallback until images ship that.)
+        asr_label = (os.environ.get("DEMO_ASR_MODEL_ID") or "").strip()
+        if asr_label:
+            ac = slv_dict.get("asr_capabilities")
+            if isinstance(ac, dict) and not ac.get("model_id"):
+                ac["model_id"] = asr_label
         return {
             "kiosk": kiosk_mode,
             "slv_url": slv.base_url,
             "degraded": bool(probe.errors),
-            "slv": probe.to_dict(),
+            "slv": slv_dict,
         }
 
     @app.get("/api/catalog")
