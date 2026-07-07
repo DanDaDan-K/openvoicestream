@@ -17,7 +17,7 @@ CUDA 12.6 / TensorRT 10.3). All engines, workers, and the plugin are **baked in*
 
 | Piece | Version / detail |
 |---|---|
-| ASR | Qwen3-ASR 0.6B int4 (streaming; batch-1 for N=1 + batch-2 `asr-b2` for N=2) |
+| ASR | Qwen3-ASR 0.6B int4 (streaming; batch-2 `asr-b2` serves both N=1 and N=2) |
 | TTS | Qwen3-TTS-12Hz-0.6B CustomVoice int4 (native streaming, lean code2wav) |
 | Runtime | TensorRT-Edge-LLM v0.9.0 (`integration/v090-sparktts`), voxedge `0.0.4a0` |
 | Concurrency | N=1 (`-customvoice` profile) or N=2 (`-n2` profile, shared-engine TTS + `asr-b2`) |

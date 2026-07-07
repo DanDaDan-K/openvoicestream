@@ -9,7 +9,7 @@
 # highperf-v080/ = v0.8.0 paths — engines are NOT cross-version compatible).
 #
 # Full highperf-v090 engine tree (P3 build provenance, md5 first-8):
-#   asr_thinker_full_int4       ASR thinker llm.engine        59e221b5
+#   asr_thinker_full_int4_b2    ASR thinker llm.engine (b2)   75f20e77
 #   asr_audio_encoder           ASR audio encoder             9446e727
 #   tts_talker_int4_b2          CustomVoice talker (int4,b2)  0c9645da
 #   tts_code_predictor          CustomVoice code_predictor    49083fb2
