@@ -9,7 +9,7 @@
 # highperf-v080/ = v0.8.0 paths — engines are NOT cross-version compatible).
 #
 # Full highperf-v090 engine tree (P3 build provenance, md5 first-8):
-#   asr_thinker_full_int4       ASR thinker llm.engine        59e221b5
+#   asr_thinker_full_int4_b2    ASR thinker llm.engine (b2)   75f20e77
 #   asr_audio_encoder           ASR audio encoder             9446e727
 #   tts_talker_int4_b2          CustomVoice talker (int4,b2)  0c9645da
 #   tts_code_predictor          CustomVoice code_predictor    49083fb2
@@ -55,10 +55,13 @@ leaves:
       repo: harvestsu/qwen3-edgellm-jetson-artifacts
       files:
         # v0.9.0 engine set under highperf-v090/ (see header for md5 map).
-        - engines/orin-nx/highperf-v090/asr_thinker_full_int4
+        # N=1 shares the BATCH-2 thinker (asr-b2) with N=2 — a batch-2 engine
+        # serves batch-1 requests fine, so the ~874 MB batch-1 engine is dropped
+        # (one engine for both concurrency leaves; the image ships only asr-b2).
+        - engines/orin-nx/highperf-v090/asr_thinker_full_int4_b2
         - engines/orin-nx/highperf-v090/asr_audio_encoder
     runtime_env:
-      EDGE_LLM_ASR_ENGINE_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v090/asr_thinker_full_int4
+      EDGE_LLM_ASR_ENGINE_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v090/asr_thinker_full_int4_b2
       EDGE_LLM_ASR_AUDIO_ENC_DIR: ${QWEN3_ARTIFACT_ROOT}/engines/orin-nx/highperf-v090/asr_audio_encoder
       # v0.9.0: plugin must be an absolute path (cwd-relative resolution fix).
       EDGELLM_PLUGIN_PATH: /opt/edgellm-v090/libNvInfer_edgellm_plugin.so
