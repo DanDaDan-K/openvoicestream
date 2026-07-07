@@ -482,7 +482,7 @@ def test_resolve_engines_injects_and_reconciles_engine_keys(tmp_path, monkeypatc
     monkeypatch.delenv("ENGINE_A", raising=False)
     monkeypatch.delenv("ENGINE_B", raising=False)
 
-    def fake_resolve_all(profile):
+    def fake_resolve_all(profile, kind=None):
         injected = {}
         for e in profile.get("required_engines", []):
             os.environ[e["env_var"]] = e["path"]

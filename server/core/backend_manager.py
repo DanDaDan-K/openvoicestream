@@ -428,7 +428,9 @@ class BackendManager(Generic[T]):
                     )
 
                 if profile_ref is not None:
-                    profile_loader.apply_profile(profile_ref, resolve_engines=True)
+                    profile_loader.apply_profile(
+                        profile_ref, resolve_engines=True, kind=self.name
+                    )
 
                 new_backend = self._factory()
                 self._preloader(new_backend)
@@ -492,7 +494,7 @@ class BackendManager(Generic[T]):
                         # reload's injected engine keys cleared via the unified
                         # _APPLIED_KEYS reconciliation (avoids env pollution).
                         profile_loader.apply_profile(
-                            old_profile_ref, resolve_engines=True
+                            old_profile_ref, resolve_engines=True, kind=self.name
                         )
                     restored = self._factory()
                     self._preloader(restored)

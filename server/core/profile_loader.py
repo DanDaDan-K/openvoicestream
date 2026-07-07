@@ -195,6 +195,7 @@ def apply_profile(
     *,
     overrides: Mapping[str, str] | None = None,
     resolve_engines: bool = False,
+    kind: str | None = None,
 ) -> dict:
     """Load a profile and reconcile process env against it.
 
@@ -300,7 +301,7 @@ def apply_profile(
             # (cf. backend_manager rollback env-pollution class of bug).
             try:
                 from server.core.engine_resolver import resolve_all
-                injected = resolve_all(profile)
+                injected = resolve_all(profile, kind=kind)
                 _APPLIED_KEYS.update(
                     k for k in injected if k not in _OPERATOR_KEYS
                 )

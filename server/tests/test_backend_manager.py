@@ -550,7 +550,7 @@ def test_reload_rollback_uses_original_profile_ref(monkeypatch):
     # MagicMock would also do this, but we want clean per-test state).
     apply_calls: list = []
 
-    def apply_mock(ref, *, overrides=None, resolve_engines=False):
+    def apply_mock(ref, *, overrides=None, resolve_engines=False, kind=None):
         apply_calls.append({"ref": ref, "resolve_engines": resolve_engines})
 
     monkeypatch.setattr(bm_mod.profile_loader, "apply_profile", apply_mock)
@@ -633,7 +633,7 @@ def test_first_reload_after_custom_path_startup_rollback_uses_path(monkeypatch):
 
     apply_calls: list = []
 
-    def apply_mock(ref, *, overrides=None, resolve_engines=False):
+    def apply_mock(ref, *, overrides=None, resolve_engines=False, kind=None):
         apply_calls.append({"ref": ref, "resolve_engines": resolve_engines})
 
     monkeypatch.setattr(bm_mod.profile_loader, "apply_profile", apply_mock)
