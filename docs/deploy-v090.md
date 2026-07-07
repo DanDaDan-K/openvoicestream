@@ -5,9 +5,13 @@ CUDA 12.6 / TensorRT 10.3). All engines, workers, and the plugin are **baked in*
 (`/opt/edgellm-v090`) — no host engine mount, no runtime download. Two profiles:
 **N=1** (single session, lowest RAM) and **N=2** (two concurrent sessions).
 
-- **Image**: `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:v0.9.0-n1n2-baked-20260706`
-- **Digest**: `sha256:6b9c0cb1893fa3d340d75522fae0ac271a90a6dde34f9786482f734f238c776a`
-- **Size**: 7.74 GB (3.18 GB unique over the shared v090 runtime base)
+- **Image**: `sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:v0.9.0-n1n2-baked-20260707`
+- **Digest**: `sha256:4d54b37a57d4c48d1b00648bf677063ee83174c5bc3da9e846755d38e5228059`
+- **Size**: ~2.5 GB pull. Dominated by the baked TensorRT engines; the base
+  runtime (~353 MB) host-mounts the CUDA/TRT libs so they are not in the image.
+  A single ASR thinker engine (`asr-b2`, batch-2) serves both N=1 and N=2 — the
+  redundant batch-1 engine is dropped (~670 MB saved vs the 20260706 build,
+  which is retained for rollback).
 
 ## What's in it
 
@@ -34,7 +38,7 @@ docker run -d --name seeed-voice-v090 \
   -p 8621:8000 \
   -e OVS_PROFILE=jetson-edgellm-v090-customvoice \
   -e EDGE_LLM_BASE_URL=http://172.17.0.1:8000/v1 \
-  sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:v0.9.0-n1n2-baked-20260706
+  sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:v0.9.0-n1n2-baked-20260707
 ```
 
 ## N=2 — two concurrent sessions
@@ -50,7 +54,7 @@ docker run -d --name seeed-voice-v090-n2 \
   -p 8621:8000 \
   -e OVS_PROFILE=jetson-edgellm-v090-n2 \
   -e EDGE_LLM_BASE_URL=http://172.17.0.1:8000/v1 \
-  sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:v0.9.0-n1n2-baked-20260706
+  sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:v0.9.0-n1n2-baked-20260707
 ```
 
 The `-n2` profile carries the session-gate env itself (profile_owned_env), so no
