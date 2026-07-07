@@ -219,6 +219,11 @@
     <div class="metrics" id="metrics"></div>
 
     <section class="panel">
+      <h2 data-i18n="switchTitle"></h2>
+      <div id="switch-panel"></div>
+    </section>
+
+    <section class="panel">
       <h2 data-i18n="statsTitle"></h2>
       <div class="spk-stats" id="spk-stats">
         <div class="spk-stats-empty" id="spk-stats-empty" data-i18n="statsEmpty"></div>
@@ -244,7 +249,7 @@
 <footer class="footer" data-i18n="footer"></footer>
 
 <script type="module">
-import { createStatusPill, createMetricCard } from "/common/ui.js";
+import { createStatusPill, createMetricCard, createModelSwitchPanel } from "/common/ui.js";
 import { ASRStreamClient } from "/common/slv-client.js";
 import { MicCapture } from "/common/mic-capture.js";
 
@@ -262,6 +267,7 @@ const I18N = {
     captionsTitle: "分色字幕",
     captionsEmpty: "字幕会实时出现在这里，每个说话人一种颜色",
     metricSpeakers: "说话人数", metricPartial: "本句首响",
+    switchTitle: "模型切换",
     statsTitle: "说话人统计",
     statsEmpty: "谁说了多少，实时统计在这里",
     summaryNote: "已按整段回放重新校准说话人标签。",
@@ -293,6 +299,7 @@ const I18N = {
     captionsTitle: "Colored captions",
     captionsEmpty: "Captions appear here in real time, one color per speaker",
     metricSpeakers: "Speakers", metricPartial: "First partial",
+    switchTitle: "Switch model",
     statsTitle: "Speaker stats",
     statsEmpty: "Who talked how much shows up here, live",
     summaryNote: "Speaker labels recalibrated from the full-session summary.",
@@ -784,6 +791,9 @@ speakersCard.setLabel(t("metricSpeakers"));
 partialCard.setLabel(t("metricPartial"));
 renderStats();
 render();
+
+// Inline model switch — diarization runs on the ASR path, so pin to ["asr"].
+createModelSwitchPanel($("switch-panel"), { kinds: ["asr"] });
 </script>
 </body>
 </html>

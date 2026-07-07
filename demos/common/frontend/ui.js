@@ -71,6 +71,11 @@ export function createMetricCard(container, { label = "", unit = "s", digits = 2
  *
  * opts:
  *   api            base path of the demo backend API (default "/api")
+ *   kinds          array of switchable kinds, e.g. ["asr"] / ["tts"] /
+ *                  ["asr","tts"] (default both). A single kind hides the
+ *                  ASR/TTS toggle row and pins the panel to that kind — used
+ *                  by demos that only exercise one side (asr-caption → ["asr"],
+ *                  tts-playground → ["tts"]). The gallery passes both (tabs).
  *   strings        i18n overrides, see DEFAULT_STRINGS below
  *   pollMs         status poll interval during a switch (default 600)
  *   onSwitched(kind, result)  optional callback after a settled switch
@@ -101,6 +106,12 @@ export function createModelSwitchPanel(container, opts = {}) {
   const api = (opts.api || "/api").replace(/\/$/, "");
   const S = { ...DEFAULT_STRINGS, ...(opts.strings || {}) };
   const pollMs = opts.pollMs || 600;
+  // Which kinds this demo exposes. A single kind pins the panel to it and
+  // hides the toggle row; both keeps the ASR/TTS tabs (gallery default).
+  const kinds = Array.isArray(opts.kinds) && opts.kinds.length
+    ? opts.kinds.filter((k) => k === "tts" || k === "asr")
+    : ["tts", "asr"];
+  const singleKind = kinds.length === 1;
   // Hard device trait per kind (e.g. RK NPU engines): once SLV answers
   // hot_reload_not_supported, stop offering the switch for that kind.
   const noReload = { tts: false, asr: false };
@@ -110,6 +121,8 @@ export function createModelSwitchPanel(container, opts = {}) {
   const btnTts = el("button", "active", S.kindTts);
   const btnAsr = el("button", "", S.kindAsr);
   kindRow.append(btnTts, btnAsr);
+  // Single-kind demos never switch kinds — drop the toggle row entirely.
+  if (singleKind) kindRow.style.display = "none";
 
   const currentLine = el("div", "muted switch-current", "");
   const select = document.createElement("select");
@@ -124,7 +137,9 @@ export function createModelSwitchPanel(container, opts = {}) {
   root.append(kindRow, currentLine, select, desc, switchBtn, progress, result);
   container.appendChild(root);
 
-  let kind = "tts";
+  // Default to TTS when available (preserves the gallery's initial tab),
+  // otherwise the sole pinned kind.
+  let kind = kinds.includes("tts") ? "tts" : kinds[0];
   let profiles = [];
   let loadableFiltered = false;
   let pollTimer = null;

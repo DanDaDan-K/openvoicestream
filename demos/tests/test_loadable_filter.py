@@ -33,9 +33,10 @@ async def test_filters_by_kind_when_loadable_present(mock_slv, profiles_dir):
     assert [p["name"] for p in tts["profiles"]] == ["jetson-qwen3asr-moss-nx"]
 
     assert asr["loadable_filtered"] is True
-    assert {p["name"] for p in asr["profiles"]} == {
-        "jetson-qwen3asr-moss-nx", "jetson-kokoro-trt"
-    }
+    # kokoro-trt is TTS-only (asr_backend=None) so the model-dedup layer drops
+    # it from the ASR list even though the SLV vacuously reports it asr-loadable
+    # — a TTS profile is not a meaningful ASR choice.
+    assert {p["name"] for p in asr["profiles"]} == {"jetson-qwen3asr-moss-nx"}
 
 
 async def test_empty_loadable_for_kind_yields_empty_filtered(mock_slv, profiles_dir):

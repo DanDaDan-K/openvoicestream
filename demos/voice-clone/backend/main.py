@@ -74,8 +74,10 @@ if str(_DEMOS_DIR) not in sys.path:
     sys.path.insert(0, str(_DEMOS_DIR))
 
 from common.backend.slv_proxy import SLVProxy  # noqa: E402
+from common.backend.switch_api import register_switch_routes  # noqa: E402
 
 _TRUTHY = {"1", "true", "yes", "on"}
+_DEFAULT_PROFILES_DIR = _DEMOS_DIR.parent / "configs" / "profiles"
 
 # Server-side enroll contract: "reference wav (3-15s, single speaker)".
 # 44-byte WAV header + 1 s of 16 kHz mono int16 is a generous lower bound for
@@ -254,6 +256,13 @@ def create_app(proxy: SLVProxy | None = None, kiosk: bool | None = None) -> Fast
     # CloneStreamProxyRequest still applies: this demo always synthesizes with
     # an enrolled voice, so `voice` stays required on the alias too.
     app.post("/tts/stream")(_clone_stream)
+
+    # Shared model-switch API (/api/status, /api/profiles, /api/switch). This
+    # demo's frontend panel is pinned to ["tts"]. Registered BEFORE the mount.
+    profiles_dir = Path(os.environ.get("DEMO_PROFILES_DIR") or _DEFAULT_PROFILES_DIR)
+    register_switch_routes(
+        app, slv, profiles_dir, asr_label=os.environ.get("DEMO_ASR_MODEL_ID")
+    )
 
     # Static frontend (mounted last so /api/* wins).
     common_frontend = _DEMOS_DIR / "common" / "frontend"
