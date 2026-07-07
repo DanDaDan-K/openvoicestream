@@ -18,6 +18,7 @@ class _FakeMgr:
 
     def __init__(self, kind: str, bad: set[str] | None = None):
         self._kind = kind
+        self.name = kind  # real BackendManager exposes .name = "tts"/"asr"
         self._bad = bad or set()
 
     def _load_profile_kind(self, ref: str) -> dict:
@@ -50,9 +51,8 @@ def loadable_env(monkeypatch, tmp_path):
     monkeypatch.setattr(bm, "tts_manager", lambda: tts)
     monkeypatch.setattr(bm, "asr_manager", lambda: asr)
 
-    def fake_missing(preview: dict) -> list[dict]:
+    def fake_missing(preview: dict, kind: str | None = None) -> list[dict]:
         name = preview.get("name")
-        kind = preview.get("kind")
         if name == "p-missing":
             return [{"env_var": "SOME_ENGINE", "path": "/nope"}]
         if kind == "asr" and name == "p-bad":

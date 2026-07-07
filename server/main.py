@@ -5240,7 +5240,7 @@ async def admin_backend_loadable(_: None = Depends(_admin_dep())):
         for name in names:
             try:
                 preview = mgr._load_profile_kind(name)
-                missing = _pl.find_missing_artifacts(preview)
+                missing = _pl.find_missing_artifacts(preview, kind=mgr.name)
             except Exception as exc:  # noqa: BLE001 — one bad profile ≠ dead endpoint
                 invalid.append({"name": name, "error": str(exc)})
                 continue

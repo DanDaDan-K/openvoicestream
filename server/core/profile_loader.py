@@ -395,9 +395,33 @@ def _expand_with_profile_env(value: str, profile_env: Mapping[str, object]) -> s
         return value
 
 
-def expected_artifact_paths(profile: dict) -> dict[str, str]:
+# Kind attribution for path-like env keys, so a *kind-scoped* reload (swap
+# only TTS, or only ASR) validates just that modality's engines and ignores
+# the other half of a bundled profile. Keys matching neither marker set are
+# treated as shared and always validated.
+_ASR_KEY_MARKERS = ("ASR", "PARAFORMER", "SENSEVOICE")
+_TTS_KEY_MARKERS = ("TTS", "MATCHA", "KOKORO", "VOCOS", "SPARK", "SPEAKER_ENCODER")
+
+
+def _key_kind(key: str) -> str | None:
+    """Classify a path-like env key as 'asr' / 'tts' / None (shared)."""
+    ku = key.upper()
+    is_asr = any(m in ku for m in _ASR_KEY_MARKERS)
+    is_tts = any(m in ku for m in _TTS_KEY_MARKERS)
+    if is_asr and not is_tts:
+        return "asr"
+    if is_tts and not is_asr:
+        return "tts"
+    return None
+
+
+def expected_artifact_paths(profile: dict, kind: str | None = None) -> dict[str, str]:
     """Return ``{env_key: expanded_absolute_path}`` for env entries that
     look like filesystem artifacts.
+
+    When ``kind`` is 'tts' or 'asr', keys that belong exclusively to the
+    *other* modality are skipped — a kind-scoped reload only needs its own
+    engines present, not the paired backend's (see :func:`_key_kind`).
 
     Variable expansion uses the profile's own env block layered on top of
     ``os.environ`` (see :func:`_expand_with_profile_env`), so profiles that
@@ -418,19 +442,24 @@ def expected_artifact_paths(profile: dict) -> dict[str, str]:
             continue
         if not any(k.endswith(s) for s in _PATH_LIKE_SUFFIXES):
             continue
+        if kind is not None:
+            kk = _key_kind(k)
+            if kk is not None and kk != kind:
+                continue
         expanded = _expand_with_profile_env(v, env_block)
         if expanded.startswith("/"):
             result[k] = expanded
     return result
 
 
-def find_missing_artifacts(profile: dict) -> list[dict]:
+def find_missing_artifacts(profile: dict, kind: str | None = None) -> list[dict]:
     """Return missing-path records for the given profile.
 
     Empty list means all expected absolute paths exist on disk. Record
-    shape: ``{"env_var": <key>, "path": <expanded>}``.
+    shape: ``{"env_var": <key>, "path": <expanded>}``. Pass ``kind`` to scope
+    the check to one modality (a TTS-only reload skips ASR engine paths).
     """
-    paths = expected_artifact_paths(profile)
+    paths = expected_artifact_paths(profile, kind=kind)
     missing: list[dict] = []
     for k, p in paths.items():
         if not os.path.exists(p):

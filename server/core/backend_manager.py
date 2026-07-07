@@ -385,7 +385,9 @@ class BackendManager(Generic[T]):
                 # this, a missing engine path forces a failed preload + rollback
                 # dance (see commit fd19877 and memory:
                 # backend_manager_rollback_env_pollution).
-                missing = profile_loader.find_missing_artifacts(new_profile_preview)
+                missing = profile_loader.find_missing_artifacts(
+                    new_profile_preview, kind=self.name
+                )
                 if missing:
                     raise HTTPException(
                         status_code=400,

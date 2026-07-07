@@ -694,11 +694,13 @@ async def test_reload_rejects_profile_with_missing_engine_paths():
     bad_path = "/nonexistent/seeed/test/dryrun/foo.engine"
 
     def loader(self, ref):
+        # TTS-kind engine key so the tts manager's kind-scoped pre-flight
+        # (find_missing_artifacts(..., kind="tts")) actually validates it.
         return {
             "name": ref,
             "tts_backend": "fake",
             "asr_backend": "fake",
-            "env": {"EDGE_LLM_ASR_ENGINE_DIR": bad_path},
+            "env": {"EDGE_LLM_TTS_TALKER_DIR": bad_path},
         }
 
     original = BackendManager._load_profile_kind
