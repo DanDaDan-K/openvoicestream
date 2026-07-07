@@ -882,7 +882,9 @@ class GraspPlugin(Plugin):
             if not ok:
                 err = str(res.get("error") or "")
                 stage = str(res.get("stage") or "")
-                if "no valid grasp" in err or res.get("found") is False:
+                if res.get("too_wide") or "too wide" in err:
+                    kind = "out_of_range"       # descending sweep
+                elif "no valid grasp" in err or res.get("found") is False:
                     kind = "not_found"          # double low beep
                 elif stage == "plausibility" or "implausible" in err or "too low" in err:
                     kind = "out_of_range"       # descending sweep
@@ -942,6 +944,8 @@ class GraspPlugin(Plugin):
     def _failure_phrase(kind: str, res: dict) -> str:
         err = str(res.get("error") or "")
         target = str(res.get("target") or "object")
+        if res.get("too_wide") or "too wide" in err:
+            return "The box is too big for me to grip."
         if kind == "not_found":
             return f"I couldn't find the {target}."
         if kind == "out_of_range":
