@@ -643,7 +643,7 @@ def test_v090_asr_env_points_at_highperf_v090(registry):
     )
     assert env["EDGE_LLM_ASR_ENGINE_DIR"] == (
         "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v090/"
-        "asr_thinker_full_int4"
+        "asr_thinker_full_int4_b2"
     )
     assert env["EDGE_LLM_ASR_AUDIO_ENC_DIR"] == (
         "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v090/"

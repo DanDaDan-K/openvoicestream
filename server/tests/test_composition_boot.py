@@ -207,10 +207,12 @@ def test_v090_active_sets_env_and_omits_mel_keys():
         }
     })
 
-    # v0.9.0 engine set: highperf-v090, int4 thinker.
+    # v0.9.0 engine set: highperf-v090, int4 thinker. N=2 (and now N=1) use the
+    # batch-2 thinker (asr-b2) — a batch-2 engine serves batch-1 too, so the
+    # redundant batch-1 engine is dropped.
     assert os.environ["EDGE_LLM_ASR_ENGINE_DIR"] == (
         "/opt/models/qwen3-edgellm/engines/orin-nx/highperf-v090/"
-        "asr_thinker_full_int4"
+        "asr_thinker_full_int4_b2"
     )
     # v0.9.0 requires an ABSOLUTE plugin path (cwd-resolution fix).
     assert os.environ["EDGELLM_PLUGIN_PATH"] == (
