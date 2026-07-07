@@ -153,9 +153,12 @@ export function createModelSwitchPanel(container, opts = {}) {
   let lastStatus = null;
   function renderCurrent() {
     const entry = lastStatus?.slv?.backend_status?.[kind];
-    currentLine.textContent = entry
-      ? `${S.current}: ${entry.profile_name || "?"} (${entry.backend_name || "?"}, ${entry.state || "?"})`
-      : "";
+    if (!entry) { currentLine.textContent = ""; return; }
+    // Prefer the friendly model name (the deduped list marks the loaded one);
+    // fall back to the raw backend name when the list hasn't loaded yet.
+    const cur = profiles.find((p) => p.current);
+    const model = cur?.label || entry.backend_name || "?";
+    currentLine.textContent = `${S.current}: ${model} (${entry.state || "?"})`;
   }
 
   async function refresh() {
@@ -178,8 +181,11 @@ export function createModelSwitchPanel(container, opts = {}) {
         switchBtn.disabled = true;
       } else {
         for (const p of profiles) {
-          const opt = el("option", "", p.name);
+          // Show the MODEL name (Qwen3-ASR / Matcha / …), not the bundle stem;
+          // value stays the representative profile the SLV reloads.
+          const opt = el("option", "", p.label || p.name);
           opt.value = p.name;
+          if (p.current) opt.selected = true;
           select.appendChild(opt);
         }
         switchBtn.disabled = noReload[kind];

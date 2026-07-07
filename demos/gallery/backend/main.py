@@ -82,6 +82,81 @@ def _platform_tokens(probe: ProbeResult) -> set[str]:
     return tokens
 
 
+# Friendly model names for the switch dropdown. The list shows ENGINES/MODELS,
+# not bundle-profile stems: several profiles share one ASR engine (e.g. every
+# trt_edge_llm profile = the same Qwen3-ASR) and must collapse to one entry.
+# ASR keys off the backend (no per-profile asr_model_id exists); TTS keys off
+# tts_model_id (customvoice vs base are the SAME backend but DIFFERENT models).
+_ASR_MODEL_LABELS = {
+    "jetson.trt_edge_llm": "Qwen3-ASR",
+    "jetson.paraformer_trt": "Paraformer",
+    "jetson.sensevoice_trt": "SenseVoice",
+    "rk.sensevoice": "SenseVoice",
+    "sherpa.sensevoice": "SenseVoice",
+}
+_TTS_MODEL_LABELS = {
+    "qwen3-tts-0.6b-base": "Qwen3-TTS",
+    "qwen3-tts-customvoice": "CustomVoice",
+    "matcha-icefall-zh-en": "Matcha",
+    "kokoro-multi-lang-v1_0": "Kokoro",
+    "moss-tts-nano-v1": "MOSS",
+}
+
+
+def _prettify_key(key: str) -> str:
+    """Fallback label for an unmapped engine/model id."""
+    tail = str(key).split(".")[-1]
+    return tail.replace("_", " ").replace("-", " ").strip().title() or str(key)
+
+
+def _model_identity(entry: dict, kind: str) -> Optional[tuple[str, str]]:
+    """(model_key, display_label) for a profile in ``kind``, or None when the
+    profile declares no backend for that kind (so it never pollutes the list)."""
+    if kind == "asr":
+        be = entry.get("asr_backend")
+        if not be:
+            return None
+        return be, _ASR_MODEL_LABELS.get(be, _prettify_key(be))
+    be = entry.get("tts_backend")
+    if not be:
+        return None
+    mid = entry.get("tts_model_id") or be
+    return mid, _TTS_MODEL_LABELS.get(mid, _prettify_key(mid))
+
+
+def _dedupe_by_model(profiles: list[dict], kind: str, current_profile: Optional[str]) -> list[dict]:
+    """Collapse bundle profiles to one entry per distinct model, labelled by
+    model name. ``name`` stays a representative profile stem to reload; ``label``
+    is what the dropdown shows; ``current`` marks the loaded model."""
+    cur_key = None
+    if current_profile:
+        cur_key_pair = _model_identity(
+            next((p for p in profiles if (p.get("name") == current_profile
+                  or _profile_stem(p) == current_profile)), {}),
+            kind,
+        )
+        cur_key = cur_key_pair[0] if cur_key_pair else None
+    out: list[dict] = []
+    seen: dict[str, dict] = {}
+    for p in profiles:
+        ident = _model_identity(p, kind)
+        if ident is None:
+            continue  # profile provides no backend for this kind
+        key, label = ident
+        if key in seen:
+            continue
+        entry = {
+            "name": _profile_stem(p) or p.get("name"),  # representative profile to reload
+            "label": label,
+            "model_key": key,
+            "description": p.get("description", ""),
+            "current": key == cur_key,
+        }
+        seen[key] = entry
+        out.append(entry)
+    return out
+
+
 def _list_profiles(profiles_dir: Path, probe: ProbeResult) -> dict:
     if not profiles_dir.is_dir():
         return {"profiles": [], "filtered": False, "platforms": [],
@@ -108,6 +183,7 @@ def _list_profiles(profiles_dir: Path, probe: ProbeResult) -> dict:
             entry["description"] = data.get("description", "")
             entry["asr_backend"] = data.get("asr_backend")
             entry["tts_backend"] = data.get("tts_backend")
+            entry["tts_model_id"] = data.get("tts_model_id")
         except Exception as exc:  # noqa: BLE001 — a broken profile shouldn't hide the rest
             entry["error"] = f"unreadable: {type(exc).__name__}"
         profiles.append(entry)
@@ -336,6 +412,11 @@ def create_app(
                     or (_profile_stem(p) and _profile_stem(p) in loadable)
                 ]
                 result["loadable_filtered"] = True
+            # Collapse bundle profiles into one entry per distinct model, shown
+            # by model name (Qwen3-ASR / Paraformer / Matcha / …) rather than
+            # bundle stem. Also drops profiles that don't provide this kind.
+            cur = (probe.backend_status.get(kind) or {}).get("profile_name")
+            result["profiles"] = _dedupe_by_model(result.get("profiles", []), kind, cur)
         return result
 
     @app.post("/api/switch")
