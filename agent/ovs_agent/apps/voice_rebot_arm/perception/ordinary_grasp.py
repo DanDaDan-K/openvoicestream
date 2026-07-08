@@ -232,10 +232,20 @@ def estimate_grasp(
     # All three hold → it is a standing bottle/cup: route straight to the
     # descriptor grasp and return, so the box guards never see it. Falls
     # through untouched when _descriptor_grasp declines (safety net).
+    #
+    # 2026-07-08 refinements (real machine):
+    #   * elongation bar 4.0 → 3.0 — weak/partial bottle frames (elong 3.5,
+    #     extent_major misread) were falling to side_face, which has none of
+    #     the rod fixes (pin/recenter/level approach) → too-high shallow
+    #     slippy grips. 3.0 still clears the noisy-box max (~1.9) by 1.6×.
+    #   * `or elongation >= 8.0` — a LYING banana presents a flat-ish top,
+    #     RANSAC finds a plane, and the `top is None` box-discriminator
+    #     wrongly vetoed it into the legacy 2D fallback (roll≈90°, grasp
+    #     below table level). Nothing box-like ever reads 8× elongated.
     if (
         desc is not None
-        and top is None
-        and float(desc.elongation) >= 4.0
+        and (top is None or float(desc.elongation) >= 8.0)
+        and float(desc.elongation) >= 3.0
         and float(desc.extent_minor) <= 0.07
     ):
         g = _descriptor_grasp(
@@ -1102,6 +1112,7 @@ def _pose_from_axes(
     recenter_depth_m: float = 0.0,
     up_cam: Optional[np.ndarray] = None,
     table_proj: float = 0.0,
+    standing: bool = False,
 ) -> Optional[GraspPose]:
     """Build a :class:`GraspPose` from a 3D grasp point + jaw-closing (open)
     axis, using the legacy camera-ray approach convention (approach = toward the
@@ -1124,17 +1135,21 @@ def _pose_from_axes(
     if approach is None:
         approach = np.array([0.0, 0.0, -1.0], dtype=np.float64)
 
-    # ── FORCE-HORIZONTAL APPROACH for rod routes (2026-07-07) ───────────
+    # ── FORCE-HORIZONTAL APPROACH for STANDING rod routes (2026-07-07) ──
     # The camera-ray approach (-position) inherits the eye-in-hand camera's
     # downward view tilt (~33° at the scan poses), so a STANDING rod got a
     # dive-from-above grasp whose recenter push drove the point toward the
     # table (observed pitch 0.57rad → grasped air in front of the bottle).
-    # A rod wants a LEVEL side grip: flatten the approach into the
+    # A standing rod wants a LEVEL side grip: flatten the approach into the
     # horizontal plane (project out its up-component). Confirmed on the
     # real arm: pitch 0.573 → 0.000 with this block. If the approach is
     # near-vertical the projection degenerates → _normalize returns None →
     # keep the camera-ray fallback.
-    if up_cam is not None and method in ("cylinder", "elongated"):
+    # `standing` gate added 2026-07-08: a LYING rod with a level approach
+    # needs a ~90° wrist roll to span its horizontal width — the lower
+    # finger swept below the table plane and the arm clamped/lifted the
+    # TABLE edge (joint4 overload). Lying rods keep the camera-ray descent.
+    if up_cam is not None and standing and method in ("cylinder", "elongated"):
         up = np.asarray(up_cam, dtype=np.float64)
         up = up / max(float(np.linalg.norm(up)), 1e-9)
         a_flat = approach - float(np.dot(approach, up)) * up
@@ -1227,6 +1242,19 @@ def _descriptor_grasp(
     minor = desc.axes[:, 2]
     pos = desc.centroid
 
+    # ── STANDING vs LYING rod (2026-07-08, real machine) ─────────────────
+    # Standing rods (major axis ∥ gravity) get the level side approach and
+    # the pinned grip height below — both proven on the standing bottle.
+    # LYING rods must NOT: a level approach forces a ~90° wrist roll (jaw
+    # plane vertical) which swept the lower finger BELOW the table and
+    # clamped the table edge instead of the banana (joint4 overload fault).
+    # Lying rods keep the route's original camera-ray top-down grasp.
+    _standing = False
+    if desc.up_cam is not None:
+        _up = np.asarray(desc.up_cam, dtype=np.float64)
+        _up = _up / max(float(np.linalg.norm(_up)), 1e-9)
+        _standing = abs(float(np.dot(desc.axes[:, 0], _up))) >= 0.7
+
     # ── PINNED GRIP HEIGHT: fixed fraction up from the base (2026-07-07) ──
     # The centroid's HEIGHT wobbles frame-to-frame (depends on how much of
     # the object the depth view caught), so the grip height jumped between
@@ -1235,9 +1263,14 @@ def _descriptor_grasp(
     # above its measured table footprint — the full-diameter mid-body on a
     # bottle. (0.40 was tried first and gripped the narrowing base taper —
     # too low; 0.55 verified holding on the real arm.) Horizontal position
-    # (where the object sits) is kept. Applies to every descriptor route;
-    # for short round objects the shift is a few mm and immaterial.
-    if desc.up_cam is not None and desc.extent_major > 0.0:
+    # (where the object sits) is kept. Gated 2026-07-08: standing rods and
+    # round-ish blobs only — for a LYING rod, extent_major is its LENGTH
+    # along the table, so 55% of it pinned the grasp far above the body.
+    # (For a round blob the major axis is arbitrary but extents are
+    # isotropic, so 55% ≈ the equator regardless — keep the pin.)
+    if desc.up_cam is not None and desc.extent_major > 0.0 and (
+        _standing or desc.elongation < 1.35
+    ):
         up = np.asarray(desc.up_cam, dtype=np.float64)
         up = up / max(float(np.linalg.norm(up)), 1e-9)
         cur_h = float(np.dot(pos, up))
@@ -1271,6 +1304,7 @@ def _descriptor_grasp(
             n_points=desc.n_points, rect_points=rect_points, K=K,
             method="cylinder", recenter_depth_m=0.7 * desc.extent_mid,
             up_cam=desc.up_cam, table_proj=desc.table_proj,
+            standing=_standing,
         )
 
     # ── ELONGATED / CURVED (banana): jaw closes ACROSS the minor cross-section
@@ -1299,6 +1333,7 @@ def _descriptor_grasp(
             n_points=desc.n_points, rect_points=rect_points, K=K,
             method="elongated", recenter_depth_m=0.7 * width,
             up_cam=desc.up_cam, table_proj=desc.table_proj,
+            standing=_standing,
         )
 
     # ── ROUND (orange): isotropic blob → physically symmetric, no preferred
@@ -1310,7 +1345,14 @@ def _descriptor_grasp(
     # gate is relaxed to 0.045. ``elongation<1.35`` already separates round from
     # the rods; this only distinguishes a round blob from a flat near-square
     # plate (lower planarity) for the method LABEL — both grasp the centroid.
-    if elong < 1.35 and planar > 0.045:
+    # planar gate 0.045 → 0.03 (2026-07-08, real machine): an actual orange
+    # read planar 0.036–0.040 (small fruit = shallower visible cap than the
+    # ~0.05 the 0.045 relaxation assumed) and fell through to NEAR-SQUARE,
+    # which gripped the sphere-cap artifact extent_minor=0.018 → a 1.8cm jaw
+    # on a 7cm orange. At 0.03 the orange routes ROUND and was grasped and
+    # held (jaw 0.065, adaptive 0.35). Flat plates read ≈0.01–0.02, so the
+    # round/plate separation survives.
+    if elong < 1.35 and planar > 0.03:
         width = max(desc.extent_mid, desc.extent_minor)
         # recenter 0.7 (was 0.5): kept consistent with the rod routes so a
         # sphere is also gripped past its equator, not tangent at the near
