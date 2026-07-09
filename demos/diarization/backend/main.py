@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -42,7 +43,16 @@ _HERE = Path(__file__).resolve().parent          # demos/diarization/backend
 _APP_DIR = _HERE.parent                           # demos/diarization
 _DEMOS_DIR = _APP_DIR.parent                      # demos/
 
+# Allow running as a plain script (`uv run python diarization/backend/main.py`):
+# the demos/ dir must be importable for common.backend.* .
+if str(_DEMOS_DIR) not in sys.path:
+    sys.path.insert(0, str(_DEMOS_DIR))
+
+from common.backend.slv_proxy import SLVProxy  # noqa: E402
+from common.backend.switch_api import register_switch_routes  # noqa: E402
+
 DEFAULT_SLV_URL = "http://127.0.0.1:8621"
+_DEFAULT_PROFILES_DIR = _DEMOS_DIR.parent / "configs" / "profiles"
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
 
@@ -64,17 +74,20 @@ def _ws_endpoint(slv_url: str) -> dict:
     }
 
 
-def create_app(slv_url: str | None = None) -> FastAPI:
+def create_app(slv_url: str | None = None, proxy: SLVProxy | None = None) -> FastAPI:
     slv_url = (slv_url or os.environ.get("SLV_URL") or DEFAULT_SLV_URL).rstrip("/")
+    # The model-switch panel proxies SLV admin routes through this backend; the
+    # WS diarization/caption path still hits SLV directly from the browser.
+    slv = proxy or SLVProxy(base_url=slv_url)
 
     @contextlib.asynccontextmanager
     async def _lifespan(_app: FastAPI):
-        # No pooled resources (the browser connects to SLV directly); kept
-        # for parity with the gallery app factory.
         yield
+        await slv.aclose()
 
     app = FastAPI(title="slv-demo-diarization", docs_url=None, redoc_url=None,
                   lifespan=_lifespan)
+    profiles_dir = Path(os.environ.get("DEMO_PROFILES_DIR") or _DEFAULT_PROFILES_DIR)
 
     @app.get("/healthz")
     async def healthz() -> dict:
@@ -91,6 +104,12 @@ def create_app(slv_url: str | None = None) -> FastAPI:
             # flag is all the browser needs.
             "asr_query": {"diarize": "true"},
         }
+
+    # Shared model-switch API (/api/status, /api/profiles, /api/switch). This
+    # demo's frontend panel is pinned to ["asr"]. Registered BEFORE the mount.
+    register_switch_routes(
+        app, slv, profiles_dir, asr_label=os.environ.get("DEMO_ASR_MODEL_ID")
+    )
 
     # Static frontend (mounted last so /api/* and /healthz win).
     common_frontend = _DEMOS_DIR / "common" / "frontend"

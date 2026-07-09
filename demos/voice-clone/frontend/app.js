@@ -23,7 +23,7 @@
  * the backend forwards it to SLV /tts/stream (VoiceProfile `voice` selector).
  */
 
-import { createStatusPill, createMetricCard } from "/common/ui.js";
+import { createStatusPill, createMetricCard, createModelSwitchPanel } from "/common/ui.js";
 import { TTSStreamPlayer } from "/common/slv-client.js";
 import { MicCapture } from "/common/mic-capture.js";
 
@@ -59,6 +59,7 @@ const I18N = {
     gateNotReadyMsg: "TTS 引擎尚未就绪，请稍候片刻再试。",
     gateDownTitle: "语音服务不可达",
     gateDownMsg: "连不上本机语音服务。请确认设备电源与网络后重试。",
+    switchTitle: "模型切换",
     voicesLabel: "已注册声音",
     voicesNone: "还没有注册的声音",
     voicesLoaded: (n) => `${n} 个已注册声音`,
@@ -104,6 +105,7 @@ const I18N = {
     gateNotReadyMsg: "The TTS engine isn't ready yet. Give it a moment and retry.",
     gateDownTitle: "Voice server unreachable",
     gateDownMsg: "Can't reach the on-device voice server. Check the device power/network and retry.",
+    switchTitle: "Switch model",
     voicesLabel: "Enrolled voices",
     voicesNone: "No enrolled voices yet",
     voicesLoaded: (n) => `${n} enrolled voice${n === 1 ? "" : "s"}`,
@@ -644,3 +646,6 @@ $("lang-btn").addEventListener("click", () => {
 
 applyStaticI18n();
 probeCapabilities();
+
+// Inline model switch — voice clone rides the TTS engine, so pin to ["tts"].
+createModelSwitchPanel($("switch-panel"), { kinds: ["tts"] });

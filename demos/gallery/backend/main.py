@@ -7,11 +7,16 @@ Endpoints:
     GET  /api/profiles  profiles from DEMO_PROFILES_DIR filtered by device platform
     POST /api/switch    validated proxy to SLV /admin/backend/reload
 
+``/api/status``, ``/api/profiles`` and ``/api/switch`` are the shared model-switch
+API (``common.backend.switch_api``) — the exact same routes every demo page now
+mounts. Only ``/api/catalog`` + card annotation is gallery-specific.
+
 Environment:
     SLV_URL            SLV server base URL (default http://127.0.0.1:8621)
     SLV_ADMIN_KEY      forwarded as X-Admin-Key on admin calls (optional)
     DEMO_PROFILES_DIR  directory of profile JSONs offered in the switch panel
                        (default: <repo>/configs/profiles when run from the repo)
+    DEMO_ASR_MODEL_ID  presentation label for the ASR status pill (optional)
     DEMO_KIOSK         truthy => kiosk mode (frontend hides debug details)
 
 Run locally:  uv run uvicorn gallery.backend.main:app --port 8700
@@ -23,15 +28,14 @@ import contextlib
 import json
 import os
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
-import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
 from common.backend.slv_proxy import SLVProxy, ProbeResult
+from common.backend.switch_api import register_switch_routes
 
 _HERE = Path(__file__).resolve().parent          # demos/gallery/backend
 _GALLERY_DIR = _HERE.parent                       # demos/gallery
@@ -44,83 +48,6 @@ _TRUTHY = {"1", "true", "yes", "on"}
 
 def _env_truthy(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in _TRUTHY
-
-
-# ── profile listing / platform filtering ────────────────────────────────────
-
-
-def _platform_tokens(probe: ProbeResult) -> set[str]:
-    """Derive platform tokens from SLV-reported backend names.
-
-    Backend names follow ``<platform>.<engine>`` (e.g. ``jetson.trt_edge_llm``);
-    the profile files follow ``<platform>-<combo>.json``. We keep this
-    deliberately simple: collect the dotted prefixes; a profile matches when
-    its filename prefix equals a token or starts with one (``rk`` matches
-    ``rk3576``). No tokens derivable => no filtering.
-    """
-    tokens: set[str] = set()
-    sources = []
-    if probe.health:
-        sources += [probe.health.get("asr_backend"), probe.health.get("tts_backend")]
-    if probe.backend_status:
-        for kind in ("asr", "tts"):
-            entry = probe.backend_status.get(kind) or {}
-            sources.append(entry.get("backend_name"))
-            # Live SLV reports undotted backend names (e.g. ``matcha_trt``);
-            # the loaded profile name (``jetson-qwen3asr-matcha-nx``) is the
-            # reliable platform carrier, so derive a token from its prefix too.
-            profile_name = entry.get("profile_name")
-            if isinstance(profile_name, str) and "-" in profile_name:
-                prefix = profile_name.split("-", 1)[0].strip().lower()
-                if prefix:
-                    tokens.add(prefix)
-    for name in sources:
-        if isinstance(name, str) and "." in name:
-            prefix = name.split(".", 1)[0].strip().lower()
-            if prefix:
-                tokens.add(prefix)
-    return tokens
-
-
-def _list_profiles(profiles_dir: Path, probe: ProbeResult) -> dict:
-    if not profiles_dir.is_dir():
-        return {"profiles": [], "filtered": False, "platforms": [],
-                "error": f"profiles dir not found: {profiles_dir}"}
-
-    tokens = _platform_tokens(probe)
-    profiles = []
-    for path in sorted(profiles_dir.glob("*.json")):
-        prefix = path.stem.split("-", 1)[0].lower()
-        if tokens and not any(prefix == t or prefix.startswith(t) for t in tokens):
-            continue
-        entry = {"name": path.stem, "file": path.name}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            entry["name"] = data.get("name", path.stem)
-            entry["description"] = data.get("description", "")
-            entry["asr_backend"] = data.get("asr_backend")
-            entry["tts_backend"] = data.get("tts_backend")
-        except Exception as exc:  # noqa: BLE001 — a broken profile shouldn't hide the rest
-            entry["error"] = f"unreadable: {type(exc).__name__}"
-        profiles.append(entry)
-    return {"profiles": profiles, "filtered": bool(tokens), "platforms": sorted(tokens)}
-
-
-def _allowed_profile_names(profiles_dir: Path) -> set[str]:
-    """Names accepted by /api/switch: every profile JSON in the directory,
-    by logical name and by filename stem (SLV resolves both)."""
-    allowed: set[str] = set()
-    if not profiles_dir.is_dir():
-        return allowed
-    for path in profiles_dir.glob("*.json"):
-        allowed.add(path.stem)
-        try:
-            name = json.loads(path.read_text(encoding="utf-8")).get("name")
-            if isinstance(name, str) and name:
-                allowed.add(name)
-        except Exception:  # noqa: BLE001
-            pass
-    return allowed
 
 
 # ── catalog ─────────────────────────────────────────────────────────────────
@@ -206,12 +133,6 @@ def _annotate_card(demo: dict, probe: ProbeResult) -> dict:
 # ── app factory ──────────────────────────────────────────────────────────────
 
 
-class SwitchRequest(BaseModel):
-    kind: Literal["tts", "asr"]
-    profile: str
-    drain_timeout_s: Optional[float] = None
-
-
 def create_app(
     proxy: SLVProxy | None = None,
     registry_path: Path | None = None,
@@ -239,16 +160,6 @@ def create_app(
     async def healthz() -> dict:
         return {"ok": True, "service": "slv-demo-gallery", "kiosk": kiosk_mode}
 
-    @app.get("/api/status")
-    async def api_status() -> dict:
-        probe = await slv.probe()
-        return {
-            "kiosk": kiosk_mode,
-            "slv_url": slv.base_url,
-            "degraded": bool(probe.errors),
-            "slv": probe.to_dict(),
-        }
-
     @app.get("/api/catalog")
     async def api_catalog() -> dict:
         try:
@@ -266,53 +177,14 @@ def create_app(
             "demos": [_annotate_card(d, probe) for d in demos],
         }
 
-    @app.get("/api/profiles")
-    async def api_profiles() -> dict:
-        probe = await slv.probe()
-        result = _list_profiles(profiles_dir, probe)
-        result["slv_reachable"] = probe.reachable
-        return result
-
-    @app.post("/api/switch")
-    async def api_switch(req: SwitchRequest):
-        # Allow only what /api/profiles offers: platform-filtered when the
-        # device platform is derivable, so a jetson-* profile can't be sent
-        # to an RK box (and vice versa) just by crafting the POST.
-        probe = await slv.probe()
-        listing = _list_profiles(profiles_dir, probe)
-        allowed: set[str] = set()
-        for p in listing.get("profiles", []):
-            allowed.add(p.get("name") or "")
-            file = p.get("file") or ""
-            if file.endswith(".json"):
-                allowed.add(file[: -len(".json")])
-        allowed.discard("")
-        if not listing.get("filtered"):
-            allowed |= _allowed_profile_names(profiles_dir)
-        if req.profile not in allowed:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "profile_not_allowed",
-                    "profile": req.profile,
-                    "hint": "profile must be one of GET /api/profiles",
-                },
-            )
-        try:
-            resp = await slv.reload_backend(
-                req.kind, req.profile, drain_timeout_s=req.drain_timeout_s
-            )
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail={"error": "slv_unreachable", "message": str(exc)},
-            ) from exc
-        # Pass SLV's verdict (reloaded / rolled_back / 4xx detail) through as-is.
-        try:
-            body = resp.json()
-        except ValueError:
-            body = {"error": "invalid_slv_response", "text": resp.text[:500]}
-        return JSONResponse(body, status_code=resp.status_code)
+    # Shared model-switch API: /api/status, /api/profiles, /api/switch. Same
+    # routes every demo page mounts — registered BEFORE the static mount so
+    # /api/* wins over the html=True catch-all.
+    register_switch_routes(
+        app, slv, profiles_dir,
+        asr_label=os.environ.get("DEMO_ASR_MODEL_ID"),
+        kiosk=kiosk_mode,
+    )
 
     # Static frontend (mounted last so /api/* wins).
     common_frontend = _DEMOS_DIR / "common" / "frontend"

@@ -166,6 +166,11 @@
     <div class="metrics" id="metrics"></div>
 
     <section class="panel">
+      <h2 data-i18n="switchTitle"></h2>
+      <div id="switch-panel"></div>
+    </section>
+
+    <section class="panel">
       <h2 data-i18n="langBadgeTitle"></h2>
       <div class="lang-badge-row" id="lang-badge-row"></div>
       <p class="muted" style="font-size: var(--fs-small); margin-bottom: 0;" data-i18n="langBadgeHint"></p>
@@ -189,7 +194,7 @@
 <footer class="footer" data-i18n="footer"></footer>
 
 <script type="module">
-import { createStatusPill, createMetricCard } from "/common/ui.js";
+import { createStatusPill, createMetricCard, createModelSwitchPanel } from "/common/ui.js";
 import { ASRStreamClient } from "/common/slv-client.js";
 import { MicCapture } from "/common/mic-capture.js";
 
@@ -203,6 +208,7 @@ const I18N = {
     hintIdle: "点击麦克风按钮，边说边出字。",
     hintStarting: "正在打开麦克风并连接语音服务…",
     hintRecording: "正在聆听 —— 直接说话，停顿后自动定格成句。",
+    switchTitle: "模型切换",
     captionsTitle: "字幕",
     captionsEmpty: "字幕会实时出现在这里",
     metricPartial: "本句首响", metricFinal: "定格延迟",
@@ -229,6 +235,7 @@ const I18N = {
     hintIdle: "Tap the mic button and watch words appear as you speak.",
     hintStarting: "Opening the microphone and connecting to the voice server…",
     hintRecording: "Listening — just talk; a pause settles the sentence.",
+    switchTitle: "Switch model",
     captionsTitle: "Captions",
     captionsEmpty: "Captions will appear here in real time",
     metricPartial: "First partial", metricFinal: "Final settle",
@@ -540,6 +547,10 @@ applyStaticI18n();
 partialCard.setLabel(t("metricPartial"));
 finalCard.setLabel(t("metricFinal"));
 render();
+
+// Inline model switch — this demo only exercises ASR, so pin the panel to it
+// (hides the ASR/TTS toggle). Talks to this backend's shared /api/switch.
+createModelSwitchPanel($("switch-panel"), { kinds: ["asr"] });
 </script>
 </body>
 </html>

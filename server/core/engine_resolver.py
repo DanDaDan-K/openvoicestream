@@ -636,13 +636,34 @@ def format_report_text(report: ProvisioningReport) -> str:
     return "\n".join(lines)
 
 
-def build_report(profile: dict, *, export_ok: bool = False) -> ProvisioningReport:
+# Kind attribution for required_engines entries, so a kind-scoped reload only
+# provisions its own modality's engines and never drags in the paired backend's
+# (a TTS-only reload must not fetch the profile's ASR engines and vice versa —
+# bundled profiles are just upper-layer "recommended pairings", the underlying
+# swap is per-kind). Kind attribution is defined ONCE in profile_loader and
+# imported here so the resolver and the artifact pre-flight can never disagree
+# on which engine family belongs to which modality.
+from server.core.profile_loader import _key_kind as _entry_kind  # noqa: E402
+
+
+def build_report(
+    profile: dict, *, export_ok: bool = False, kind: Optional[str] = None
+) -> ProvisioningReport:
     """Resolve every required engine in ONE pass, collecting all outcomes.
+
+    When ``kind`` is 'tts' or 'asr', only that modality's engines are resolved
+    (entries belonging exclusively to the other kind are skipped) — a kind-
+    scoped reload never provisions the paired backend's engines.
 
     Never crashes on the first failure. When ``export_ok`` is True, successfully
     resolved engines have their env_var exported (used by resolve_all)."""
     global _LAST_REPORT
     entries = profile.get("required_engines") or []
+    if kind is not None:
+        entries = [
+            e for e in entries
+            if _entry_kind(e.get("env_var", "")) in (None, kind)
+        ]
     host = detect_host_signature()
     force_rebuild = (_env(ENV_FORCE_REBUILD, "0") or "0") in ("1", "true", "yes")
 
@@ -672,7 +693,7 @@ def build_report(profile: dict, *, export_ok: bool = False) -> ProvisioningRepor
     return report
 
 
-def resolve_all(profile: dict) -> dict[str, Path]:
+def resolve_all(profile: dict, kind: Optional[str] = None) -> dict[str, Path]:
     """Resolve every engine declared by ``profile['required_engines']``.
 
     On success, returns a dict of ``env_var → engine_path`` and also injects
@@ -689,7 +710,7 @@ def resolve_all(profile: dict) -> dict[str, Path]:
 
     fd = _acquire_lock()
     try:
-        report = build_report(profile, export_ok=True)
+        report = build_report(profile, export_ok=True, kind=kind)
     finally:
         _release_lock(fd)
 

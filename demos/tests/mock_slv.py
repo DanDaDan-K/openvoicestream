@@ -37,6 +37,9 @@ def default_state() -> dict:
         "admin_key": None,
         "received": [],
         "reload_status": 200,
+        # Loadable pre-flight: None simulates an SLV image without the
+        # /admin/backend/loadable endpoint (→ 404). A dict is returned as-is.
+        "loadable": None,
         "reload_response": {
             "status": "reloaded",
             "kind": "tts",
@@ -116,6 +119,17 @@ def create_mock_slv(state: dict | None = None) -> tuple[FastAPI, dict]:
             or _check_admin(request)
             or JSONResponse(state["backend_status"])
         )
+
+    @app.get("/admin/backend/loadable")
+    async def backend_loadable(request: Request) -> Any:
+        failed = _maybe_fail("loadable") or _check_admin(request)
+        if failed:
+            return failed
+        loadable = state.get("loadable")
+        if loadable is None:
+            # Old SLV image without this endpoint.
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        return JSONResponse(loadable)
 
     @app.post("/admin/backend/reload")
     async def backend_reload(request: Request) -> Any:
