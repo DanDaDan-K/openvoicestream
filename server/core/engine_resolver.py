@@ -640,20 +640,10 @@ def format_report_text(report: ProvisioningReport) -> str:
 # provisions its own modality's engines and never drags in the paired backend's
 # (a TTS-only reload must not fetch the profile's ASR engines and vice versa —
 # bundled profiles are just upper-layer "recommended pairings", the underlying
-# swap is per-kind). Markers mirror profile_loader._key_kind.
-_ASR_ENGINE_MARKERS = ("ASR", "PARAFORMER", "SENSEVOICE")
-_TTS_ENGINE_MARKERS = ("TTS", "MATCHA", "KOKORO", "VOCOS", "SPARK", "SPEAKER_ENCODER")
-
-
-def _entry_kind(env_var: str) -> Optional[str]:
-    ku = (env_var or "").upper()
-    is_asr = any(m in ku for m in _ASR_ENGINE_MARKERS)
-    is_tts = any(m in ku for m in _TTS_ENGINE_MARKERS)
-    if is_asr and not is_tts:
-        return "asr"
-    if is_tts and not is_asr:
-        return "tts"
-    return None
+# swap is per-kind). Kind attribution is defined ONCE in profile_loader and
+# imported here so the resolver and the artifact pre-flight can never disagree
+# on which engine family belongs to which modality.
+from server.core.profile_loader import _key_kind as _entry_kind  # noqa: E402
 
 
 def build_report(

@@ -515,6 +515,37 @@ def test_resolve_engines_injects_and_reconciles_engine_keys(tmp_path, monkeypatc
     assert "ENGINE_B" not in os.environ
 
 
+def test_kind_scoped_reload_leaves_other_modality_env_untouched(tmp_path, monkeypatch):
+    """A kind='asr' reload must touch ONLY ASR env keys — the live TTS backend's
+    env (OVS_TTS_MODEL_ID / MATCHA_* / MOSS_*) stays exactly as its own reload
+    left it, so its model_id can't drift and rollback can't clobber it."""
+    import os
+    for k in ("EDGE_LLM_ASR_ENGINE_DIR", "OVS_TTS_MODEL_ID",
+              "MATCHA_MODEL_BASE", "MOSS_ENGINE_DIR"):
+        monkeypatch.delenv(k, raising=False)
+
+    # Full load of a matcha-TTS bundle establishes the TTS env.
+    full = _write_profile(tmp_path, "full", {
+        "env": {"EDGE_LLM_ASR_ENGINE_DIR": "/asr/old", "MATCHA_MODEL_BASE": "/tts/matcha"},
+        "tts_model_id": "matcha-icefall-zh-en",
+    })
+    profile_loader.apply_profile(str(full))            # kind=None → full apply
+    assert os.environ["OVS_TTS_MODEL_ID"] == "matcha-icefall-zh-en"
+    assert os.environ["MATCHA_MODEL_BASE"] == "/tts/matcha"
+
+    # kind='asr' reload to a paraformer+MOSS bundle.
+    asr_bundle = _write_profile(tmp_path, "asrbundle", {
+        "env": {"EDGE_LLM_ASR_ENGINE_DIR": "/asr/new", "MOSS_ENGINE_DIR": "/tts/moss"},
+        "tts_model_id": "moss-tts-nano-v1",
+    })
+    profile_loader.apply_profile(str(asr_bundle), kind="asr")
+
+    assert os.environ["EDGE_LLM_ASR_ENGINE_DIR"] == "/asr/new"       # ASR updated
+    assert os.environ["MATCHA_MODEL_BASE"] == "/tts/matcha"          # TTS left intact
+    assert os.environ["OVS_TTS_MODEL_ID"] == "matcha-icefall-zh-en"  # NOT drifted to moss
+    assert "MOSS_ENGINE_DIR" not in os.environ                       # bundle's TTS not applied
+
+
 # ---------------------------------------------------------------------------
 # v0.9.0 profile contract (configs/profiles/jetson-edgellm-v090-*.json).
 # Pure-JSON checks: the v090 profiles must carry the absolute plugin path,

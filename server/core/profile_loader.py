@@ -245,6 +245,20 @@ def apply_profile(
             for k, v in overrides.items():
                 merged[k] = str(v)
 
+        # Kind-scoped reload (swap only ASR or only TTS): touch ONLY this
+        # modality's own env keys. Shared keys (roots/labels used by both
+        # backends) and the OTHER kind's keys are left exactly as the last
+        # full / other-kind reload set them. Without this, switching ASR to a
+        # bundle would stomp OVS_TTS_MODEL_ID / *_TTS_* / MOSS_* etc., and the
+        # live TTS backend (whose model_id is read from env) would drift; a
+        # failed kind reload's rollback could likewise clobber a concurrently
+        # reloaded other kind.
+        def _in_scope(k: str) -> bool:
+            return kind is None or _key_kind(k) == kind
+
+        if kind is not None:
+            merged = {k: v for k, v in merged.items() if _in_scope(k)}
+
         new_keys = set(merged.keys())
 
         # Profile-owned operator keys: a profile may declare operator-prefixed
@@ -259,11 +273,13 @@ def apply_profile(
         eff_operator = _OPERATOR_KEYS - owned
 
         # 1. Clear stale keys (in previous profile but not in this one),
-        #    skipping operator-owned keys.
+        #    skipping operator-owned keys AND (for a kind-scoped reload) any key
+        #    outside this modality's scope — those belong to the other backend.
         stale = _APPLIED_KEYS - new_keys
         for k in stale:
-            if k not in eff_operator:
-                os.environ.pop(k, None)
+            if k in eff_operator or not _in_scope(k):
+                continue
+            os.environ.pop(k, None)
 
         # 2. Write new values, unconditionally overwriting unless operator-owned.
         for k, v in merged.items():
@@ -285,8 +301,14 @@ def apply_profile(
                 continue
             os.environ[k] = v
 
-        # 3. Update bookkeeping.
-        _APPLIED_KEYS.clear()
+        # 3. Update bookkeeping. For a kind-scoped reload only replace this
+        #    modality's tracked keys; the other kind's stay recorded so a later
+        #    full reload can still reconcile them.
+        if kind is None:
+            _APPLIED_KEYS.clear()
+        else:
+            for k in [k for k in _APPLIED_KEYS if _in_scope(k)]:
+                _APPLIED_KEYS.discard(k)
         _APPLIED_KEYS.update(k for k in new_keys if k not in eff_operator)
         _CURRENT_PROFILE = profile
 
@@ -399,9 +421,15 @@ def _expand_with_profile_env(value: str, profile_env: Mapping[str, object]) -> s
 # Kind attribution for path-like env keys, so a *kind-scoped* reload (swap
 # only TTS, or only ASR) validates just that modality's engines and ignores
 # the other half of a bundled profile. Keys matching neither marker set are
-# treated as shared and always validated.
+# treated as shared and always validated. This is the SINGLE source of truth
+# for kind attribution — engine_resolver imports _key_kind from here so the two
+# kind-scoping call sites can never drift (a missed engine family, e.g. MOSS,
+# would otherwise leak the other modality's engines into a kind-scoped reload).
+# Every TTS/ASR engine family MUST have a marker here.
 _ASR_KEY_MARKERS = ("ASR", "PARAFORMER", "SENSEVOICE")
-_TTS_KEY_MARKERS = ("TTS", "MATCHA", "KOKORO", "VOCOS", "SPARK", "SPEAKER_ENCODER")
+_TTS_KEY_MARKERS = (
+    "TTS", "MATCHA", "KOKORO", "VOCOS", "SPARK", "MOSS", "SPEAKER_ENCODER",
+)
 
 
 def _key_kind(key: str) -> str | None:

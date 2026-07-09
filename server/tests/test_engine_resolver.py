@@ -157,6 +157,11 @@ def test_entry_kind_classification():
     assert _entry_kind("MATCHA_SPLIT_ESTIMATOR_ENGINE") == "tts"
     assert _entry_kind("VOCOS_ENGINE") == "tts"
     assert _entry_kind("EDGE_LLM_TTS_TALKER_DIR") == "tts"
+    # MOSS is a TTS engine family — must be scoped out of ASR reloads (else a
+    # kind=asr reload of a MOSS bundle provisions/validates the MOSS TTS engines).
+    assert _entry_kind("MOSS_ENGINE_DIR") == "tts"
+    assert _entry_kind("MOSS_CODEC_ONNX_DIR") == "tts"
+    assert _entry_kind("MOSS_RESOLVED_PREFILL") == "tts"
     # Shared / ambiguous → None (validated for every kind)
     assert _entry_kind("QWEN3_ARTIFACT_ROOT") is None
     assert _entry_kind("MODEL_DIR") is None
