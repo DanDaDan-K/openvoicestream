@@ -370,8 +370,19 @@ metadata:
     # published yoloe-26s-seg-embin export). Slots beyond len(yolo_classes) are
     # inert zero pad rows; a detection landing on one is dropped by the guard.
     embin_pad_slots: ${REBOT_EMBIN_PAD_SLOTS:-16}
-    # CPU EP: production voice stack leaves <300MB GPU free → TRT/CUDA OOMs.
-    onnx_providers: ["CPUExecutionProvider"]
+    # GPU inference (2026-07-14): TensorRT EP with engine cache at /trt-cache
+    # (sm87; ~6min first build, ~6s reload). The TRT session pins ~0.8-1.6GB
+    # unified RAM; yolo_onnx demotes to CPU below REBOT_GPU_MIN_AVAIL_MB
+    # (default 1200MB, boot-dip retries via REBOT_GPU_GATE_RETRIES) at
+    # session-create and rebuilds on CPU if a GPU predict fails mid-run.
+    # Device-verified 2026-07-14: capture 4-6s → 0.6-1.6s, grasp ~22.6s → ~11s.
+    # ROLLBACK: onnx_providers: ["CPUExecutionProvider"] + docker restart.
+    onnx_providers:
+      - ["TensorrtExecutionProvider", {"trt_engine_cache_enable": "True",
+         "trt_engine_cache_path": "/trt-cache",
+         "trt_timing_cache_enable": "True",
+         "trt_max_workspace_size": "536870912"}]
+      - "CPUExecutionProvider"
     # Detection confidence floor. A tall/vertical cardboard box detects at
     # ~0.16-0.20 (real-machine 2026-06-12) and a standing water/juice bottle
     # at only 0.11-0.19 with the multi-class export (real-machine 2026-07-07)
@@ -538,8 +549,10 @@ metadata:
     ggcnn_refiner: ${REBOT_GGCNN:-true}
     # Servo-lite correction: one re-detection from the pregrasp pose shifts
     # the grasp x/y by the measured drift (≤3cm) — cancels calibration
-    # residue + far-view parallax in the final approach.
-    servo_correct: false
+    # residue + far-view parallax in the final approach. ON since 2026-07-10
+    # (chronic lateral aim offset); a >30mm guard discards the re-detection
+    # when the pregrasp is inside the camera's close-range blind zone.
+    servo_correct: true
     # Base-frame sanity box [x_min,x_max, y_min,y_max, z_min,z_max] for the
     # computed grasp point. GARBAGE-ONLY bounds: catch depth-noise artefacts
     # (under the table, behind the base, >0.85m fantasy points) and NOTHING

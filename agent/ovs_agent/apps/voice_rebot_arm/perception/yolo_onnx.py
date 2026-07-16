@@ -377,9 +377,55 @@ class YoloOnnxSegmenter:
         # of module import so the package loads on hosts without the wheel.
         import onnxruntime as ort  # noqa: PLC0415
 
-        self._session = ort.InferenceSession(
-            self.model_path, providers=list(self.providers)
-        )
+        providers = list(self.providers)
+        _LOG.info("yolo_onnx: session create requested providers=%r", providers)
+        # Memory gate (2026-07-14): a GPU EP session pins ~0.8-1.6GB that this
+        # box cannot always spare (voice stack pressure; see the
+        # onnx_providers note in config.yaml). Below the floor, run this
+        # session on CPU rather than risk an OOM that could hit the voice
+        # stack. Floor tunable via REBOT_GPU_MIN_AVAIL_MB.
+        if any((p[0] if isinstance(p, (list, tuple)) else p) != "CPUExecutionProvider"
+               for p in providers):
+            import os as _os
+            try:
+                import time as _time
+
+                def _avail_mb() -> int:
+                    with open("/proc/meminfo") as f:
+                        for line in f:
+                            if line.startswith("MemAvailable"):
+                                return int(line.split()[1]) // 1024
+                    return 0
+
+                floor_mb = int(_os.environ.get("REBOT_GPU_MIN_AVAIL_MB", "1200"))
+                avail_mb = _avail_mb()
+                # The boot prime races the voice stack's own warmup, which
+                # transiently depresses MemAvailable; wait out the dip
+                # (bounded) before deciding.
+                for _ in range(int(_os.environ.get("REBOT_GPU_GATE_RETRIES", "4"))):
+                    if not avail_mb or avail_mb >= floor_mb:
+                        break
+                    _time.sleep(4.0)
+                    avail_mb = _avail_mb()
+                if avail_mb and avail_mb < floor_mb:
+                    _LOG.warning(
+                        "yolo_onnx: MemAvailable %dMB < %dMB floor — CPU "
+                        "providers this session", avail_mb, floor_mb)
+                    providers = ["CPUExecutionProvider"]
+            except Exception:
+                _LOG.debug("yolo_onnx: memory gate failed", exc_info=True)
+        try:
+            self._session = ort.InferenceSession(
+                self.model_path, providers=providers
+            )
+        except Exception:
+            if providers == ["CPUExecutionProvider"]:
+                raise
+            _LOG.warning(
+                "yolo_onnx: GPU session creation failed — CPU fallback",
+                exc_info=True)
+            self._session = ort.InferenceSession(
+                self.model_path, providers=["CPUExecutionProvider"])
         inputs = self._session.get_inputs()
         in_names = [i.name for i in inputs]
         self._input_name = in_names[0]
@@ -440,7 +486,18 @@ class YoloOnnxSegmenter:
             # as text PE rows. Fed on EVERY predict (the engine has no baked
             # vocab). Shape/dtype already validated at construction.
             feeds[self.EMBED_INPUT_NAME] = self._class_embeddings
-        outs = self._session.run(None, feeds)
+        try:
+            outs = self._session.run(None, feeds)
+        except Exception:
+            # GPU runtime failure mid-session (OOM under pressure): rebuild
+            # on CPU and keep the grasp alive; later predicts stay on CPU.
+            _LOG.warning(
+                "yolo_onnx: session.run failed — rebuilding session on CPU",
+                exc_info=True)
+            import onnxruntime as ort  # noqa: PLC0415
+            self._session = ort.InferenceSession(
+                self.model_path, providers=["CPUExecutionProvider"])
+            outs = self._session.run(None, feeds)
         return [
             self._postprocess(
                 outs, conf, (h0, w0), ratio, dw, dh, net, only_names

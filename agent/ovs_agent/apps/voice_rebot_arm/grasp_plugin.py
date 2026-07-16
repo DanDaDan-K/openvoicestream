@@ -201,6 +201,7 @@ class GraspPlugin(Plugin):
                     logger.debug("GraspPlugin: prime warm_up failed", exc_info=True)
                 # Pull frames until one is real — a cold camera returns None
                 # for the first second or two.
+                c = d = None
                 for _ in range(10):
                     try:
                         c, d = cam.get_frame()
@@ -208,6 +209,16 @@ class GraspPlugin(Plugin):
                         break
                     if c is not None and d is not None:
                         break
+                # Force the ORT session now — TRT engine load (~6s) and the
+                # memory-gate decision belong at boot, not inside the first
+                # grasp (2026-07-14).
+                if c is not None and self._segmenter is not None:
+                    try:
+                        self._segmenter.predict(c, conf=0.9)
+                        logger.info("GraspPlugin: prime inference session ready")
+                    except Exception:
+                        logger.debug("GraspPlugin: prime predict failed",
+                                     exc_info=True)
             logger.info(
                 "GraspPlugin: perception primed in %.1fs (first grasp will "
                 "skip model load + camera cold-start)",
@@ -1069,7 +1080,12 @@ class GraspPlugin(Plugin):
             providers = self.cfg.get("onnx_providers")
             kwargs: dict[str, Any] = {}
             if providers:
-                kwargs["providers"] = tuple(providers)
+                # yaml expresses ORT (name, options) provider tuples as
+                # [name, {options}] lists — convert; strings pass through.
+                kwargs["providers"] = tuple(
+                    tuple(p) if isinstance(p, (list, tuple)) else p
+                    for p in providers
+                )
             # Optional detector input size (Item D): default unset → segmenter's
             # 640 default (unchanged). A larger size needs a matching re-exported
             # engine; pass an int (square) or [w, h].
