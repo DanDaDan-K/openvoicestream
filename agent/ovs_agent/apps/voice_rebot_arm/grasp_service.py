@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import os as _os
+_DEF_SPILL_SAFE = '["cup", "water bottle"]'
 import logging
 import math
 import threading
@@ -42,7 +43,7 @@ class GraspCancelled(Exception):
 
 # SDK mechanical max jaw opening (m) and the clearance added over the detected
 # object width so the open jaw clears the object before the approach.
-_GRIPPER_MAX_M = 0.09
+_GRIPPER_MAX_M = 0.100
 _OPEN_MARGIN_M = 0.012
 
 
@@ -339,7 +340,8 @@ def _relax_orientation(arm: Any, pre6d, grasp6d):
     return None
 
 
-def _level_side_to_reachable(arm: Any, pre6d, grasp6d, pregrasp_offset_m: float):
+def _level_side_to_reachable(arm: Any, pre6d, grasp6d, pregrasp_offset_m: float,
+                             max_extra_pitch: Optional[float] = None):
     """Most-LEVEL reachable side approach.
 
     Side grasps approach the vertical face LEVEL (head ~horizontal) so the jaw
@@ -359,6 +361,8 @@ def _level_side_to_reachable(arm: Any, pre6d, grasp6d, pregrasp_offset_m: float)
 
     x, y, z, r, p0, yaw = (float(v) for v in grasp6d)
     for dp in (0.08, 0.16, 0.24, 0.32, 0.40, 0.48):
+        if max_extra_pitch is not None and dp > max_extra_pitch:
+            break          # spill-safe class: stay (nearly) level or give up
         p = p0 + dp
         g = [x, y, z, r, p, yaw]
         try:
@@ -621,6 +625,24 @@ def run_grasp_once(
     if T_hand_eye is None:
         return {**base, "stage": "transform", "error": "no hand-eye calibration"}
 
+    # Final-failure cleanup: an unsuccessful attempt can leave the gripper
+    # open with a visible gap (real machine 2026-07-13 — the closed-on-air
+    # retry re-opens it via _open_gripper_safe and a subsequent non-retriable
+    # detect failure returns straight away, so nothing ever closes it back
+    # up). Cosmetic/operational only — close the jaw so the arm is not left
+    # gaping after a miss. NOT applied on cancel: cancellation keeps the
+    # existing open safe-park (fingers may be near the jaw when the user
+    # cancels; closing then is the wrong safety call).
+    def _close_on_failure(res: dict) -> dict:
+        if res.get("success") or res.get("cancelled"):
+            return res
+        try:
+            with _motion_lock(actuator):
+                arm.close_gripper()
+        except Exception:
+            logger.debug("grasp: close-on-failure cleanup failed", exc_info=True)
+        return res
+
     attempts = 1 + max(0, int(retries))
     last: dict[str, Any] = {**base, "error": "no attempt ran"}
     for attempt in range(1, attempts + 1):
@@ -657,7 +679,7 @@ def run_grasp_once(
         res["attempt"] = attempt
         retriable = bool(res.pop("_retriable", False))
         if res.get("success") or res.get("cancelled") or not retriable:
-            return res
+            return _close_on_failure(res)
         last = res
         if attempt < attempts:
             logger.info(
@@ -665,7 +687,7 @@ def run_grasp_once(
                 "fresh detection",
                 attempt, attempts, res.get("stage"), res.get("error"),
             )
-    return last
+    return _close_on_failure(last)
 
 
 def _grasp_attempt(
@@ -1042,6 +1064,8 @@ def _grasp_attempt(
             result["grasp_pose"] = [float(v) for v in grasp6d]
             result["pregrasp_pose"] = [float(v) for v in pre6d]
             gx, gy, gz = (float(v) for v in grasp6d[:3])
+            logger.info("FINDBG best.position=(%.4f %.4f %.4f) -> committed z=%.4f",
+                        *[float(v) for v in best.position], gz)
             jaw = float(best.jaw_width_m)
             result["grasp_method"] = getattr(best, "method", "legacy")
             if getattr(best, "ggcnn_agree", None) is not None:
@@ -1064,9 +1088,14 @@ def _grasp_attempt(
             # face below it — a genuinely near-table grip. A high grasp (gz large)
             # or a full visible face passes.
             _side_clearance = 0.5 * float(getattr(best, "object_length_m", 0.0) or 0.0)
+            # Table-aware (2026-07-13): the 0.045 bar assumed table at base
+            # z=0 (its own comment admits the misfire). Measure clearance
+            # from the REAL table height so short objects (cup) floored to
+            # 0.040 by the side z-floor are not auto-rejected in [0.040,0.045).
+            _table_z = float(_os.environ.get("REBOT_TABLE_Z", "0.0"))
             if (
                 result["grasp_method"] == "side_face"
-                and gz < 0.045
+                and (gz - _table_z) < 0.045
                 and _side_clearance < 0.045
             ):
                 return {
@@ -1083,9 +1112,23 @@ def _grasp_attempt(
             # Close-up re-observation trigger: far target (side-on view from
             # the home-height camera) or an estimate already wider than the
             # jaw can open (silhouette inflation). One round only.
+            #
+            # SKIP for a first-pass "round" classification (real machine
+            # 2026-07-13, orange): the reobserve move for a non-top_face
+            # object goes CLOSE + steep-down (obs_pitch=0.45, ~26°) to bring
+            # a hidden top face into view. A round object has no top face to
+            # reveal — that tilt instead foreshortens the sphere's visible
+            # cap, and the PCA on that thin slice is unstable (elongation
+            # read 1.18 clean at range, then climbed to 37 after the
+            # close-up tilt on the SAME stationary orange). The first-pass
+            # descriptor is already the reliable read for round bodies
+            # (distance doesn't hide anything a closer angle would reveal),
+            # so trust it and skip the move — also removes a full
+            # move+settle+recapture round trip from the 20s+ grasp latency.
             if (
                 reobserve
                 and not reobserved
+                and getattr(best, "method", "") != "round"
                 and (gx > 0.50 or jaw > 0.085
                      or getattr(best, "ggcnn_agree", None) is False)
             ):
@@ -1130,10 +1173,10 @@ def _grasp_attempt(
             break
 
         # Width gate AFTER the best available measurement: an object measured
-        # wider than the jaw can physically open (soft limit ≈0.088m) cannot
+        # wider than the jaw can physically open (soft limit ≈0.095m) cannot
         # be gripped — executing just slams the jaw at full open. Retriable:
         # a fresh frame / next attempt may measure saner.
-        if not (0.010 <= jaw <= 0.088):
+        if not (0.010 <= jaw <= 0.095):
             return {
                 **result,
                 "stage": "plausibility",
@@ -1205,8 +1248,23 @@ def _grasp_attempt(
                 # SIDE grasps approach LEVEL (head horizontal into the vertical
                 # face). If the level standoff is out of reach, tilt the head
                 # down to the most-level REACHABLE pitch rather than failing.
+                # Spill-safe classes (cup, water bottle): contents pour
+                # out of a tilted grasp, so cap the reachability tilt at
+                # REBOT_SPILL_MAX_TILT (default 0.10 rad -> <=~8deg total
+                # head-down). Unreachable within the cap -> retriable
+                # decline; reposition the object closer instead.
+                import json as _json
+                _spill_raw = _os.environ.get("REBOT_SPILL_SAFE_CLASSES", None) or _DEF_SPILL_SAFE
+                try:
+                    _spill = {str(s).lower() for s in _json.loads(_spill_raw)}
+                except Exception:
+                    _spill = {"cup", "water bottle"}
+                _max_tilt = None
+                if str(result.get("grasp_class", "")).lower() in _spill:
+                    _max_tilt = float(_os.environ.get("REBOT_SPILL_MAX_TILT", "0.10"))
                 relaxed = _level_side_to_reachable(
-                    arm, pre6d, grasp6d, pregrasp_offset_m
+                    arm, pre6d, grasp6d, pregrasp_offset_m,
+                    max_extra_pitch=_max_tilt,
                 )
             if relaxed is not None:
                 pre6d, grasp6d = relaxed
@@ -1243,7 +1301,10 @@ def _grasp_attempt(
             t_cap.start()
             if not _wait_motion_cancellable(arm, 0.4, cancel_event):
                 _check_cancel(cancel_event, arm, safe_open_m)
-            t_cap.join(timeout=3.0)
+            # 2026-07-14: was 3.0 — a capture takes 4.5-6s on CPU, so the
+            # overlap almost never landed and the servo stage re-captured
+            # from scratch (~6s duplicate). Wait it out instead.
+            t_cap.join(timeout=8.0)
             servo_pre = cap_box
         else:
             if not _wait_motion_cancellable(arm, move_duration, cancel_event):
@@ -1258,6 +1319,10 @@ def _grasp_attempt(
             _mark("servo")
             _check_cancel(cancel_event, arm, safe_open_m)
             b3, _K3, _nd3 = servo_pre.get("out") or _capture_and_detect()
+            logger.info(
+                "SERVODBG redetect=%s num_det=%s",
+                "MISS" if (b3 is None or b3.position is None) else "hit", _nd3,
+            )
             if b3 is not None and b3.position is not None:
                 try:
                     with _motion_lock(actuator):
@@ -1284,8 +1349,13 @@ def _grasp_attempt(
                             "grasp: servo re-detection drifted %.0fmm (>30mm) — "
                             "ignored as implausible", drift * 1000,
                         )
+                    else:
+                        logger.info(
+                            "SERVODBG drift %.1fmm (<=4mm, no shift needed)",
+                            drift * 1000,
+                        )
                 except Exception:
-                    logger.debug("servo correction failed (continuing)", exc_info=True)
+                    logger.info("servo correction failed (continuing)", exc_info=True)
 
         _mark("grasp_move")
         _check_cancel(cancel_event, arm, safe_open_m)
@@ -1312,6 +1382,23 @@ def _grasp_attempt(
                     "error": "grasp-pose IK failed", "_retriable": True}
         if not _wait_motion_cancellable(arm, grasp_dur, cancel_event):
             _check_cancel(cancel_event, arm, safe_open_m)  # safe-park + raise
+
+        # Executed-vs-commanded pose at the moment of close: separates
+        # perception error (arm ON target but box isn't there) from
+        # trajectory/IK execution error (arm parked off-target).
+        try:
+            with _motion_lock(actuator):
+                _tcp_g = np.asarray(arm.get_tcp_pose(), dtype=np.float64)
+            logger.info(
+                "EXECDBG grasp_move settled: actual=(%.4f %.4f %.4f) "
+                "commanded=(%.4f %.4f %.4f) delta=(%+.1f %+.1f %+.1f)mm",
+                _tcp_g[0, 3], _tcp_g[1, 3], _tcp_g[2, 3], xg, yg, zg,
+                (_tcp_g[0, 3] - xg) * 1000.0,
+                (_tcp_g[1, 3] - yg) * 1000.0,
+                (_tcp_g[2, 3] - zg) * 1000.0,
+            )
+        except Exception:
+            logger.debug("EXECDBG read failed", exc_info=True)
 
         _mark("grasp")
         _check_cancel(cancel_event, arm, safe_open_m)
@@ -1585,6 +1672,20 @@ def run_put_down_once(
         if home_ok:
             if not _wait_motion_cancellable(arm, move_duration, cancel_event):
                 _check_cancel(cancel_event, arm, safe_open_m)
+
+        # ── 6. rest state: claws CLOSED ─────────────────────────────────
+        # The gripper's single-turn encoder only power-cycles safely with
+        # the jaw at the closed stop, so the put-down flow — the natural
+        # end of every carry — leaves the claw closed. Close only AFTER the
+        # retreat + home (closing earlier would re-grab the object).
+        # Best-effort: a failure here must not fail the successful put-down.
+        stage = "rest_close"
+        try:
+            with _motion_lock(actuator):
+                arm.grasp(force=0.3)
+        except Exception:
+            logger.warning("put_down: rest-close failed (non-fatal)",
+                           exc_info=True)
 
         result["success"] = True
         result["stage"] = "done"
