@@ -43,7 +43,7 @@ sequences:
       Open the gripper / release. Triggers: "open gripper", "release",
       "let go".
     frames:
-      - joints: {gripper: 0.09}
+      - joints: {gripper: 0.100}
         delay: 1.0
 
   # Grasp at 0.2 N·m (no arm motion — pose fields omitted on purpose).
@@ -94,3 +94,65 @@ sequences:
         delay: 1.5
       - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
         delay: 2.0
+
+  # DOF test: move UP then back home
+  test_z_up:
+    description: Test Z axis - move up
+    frames:
+      - joints: {x: 0.27, y: 0.00, z: 0.32, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+
+  # DOF test: move forward/back (x axis)
+  test_x_fwd:
+    description: Test X axis - move forward and back
+    frames:
+      - joints: {x: 0.33, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+
+  # DOF test: move left/right (y axis)
+  test_y_side:
+    description: Test Y axis - move left and right
+    frames:
+      - joints: {x: 0.27, y:  0.12, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+      - joints: {x: 0.27, y: -0.12, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+      - joints: {x: 0.27, y:  0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+
+  # DOF test: roll rotation
+  test_roll:
+    description: Test roll rotation
+    frames:
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll:  0.4, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: -0.4, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll:  0.0, pitch: 0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+
+  # DOF test: pitch rotation
+  test_pitch:
+    description: Test pitch rotation
+    frames:
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch:  0.4, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: -0.4, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch:  0.0, yaw: 0.0, gripper: 0.0}
+        delay: 1.5
+
+  # DOF test: yaw rotation
+  test_yaw:
+    description: Test yaw rotation
+    frames:
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw:  0.4, gripper: 0.0}
+        delay: 1.5
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw: -0.4, gripper: 0.0}
+        delay: 1.5
+      - joints: {x: 0.27, y: 0.00, z: 0.24, roll: 0.0, pitch: 0.0, yaw:  0.0, gripper: 0.0}
+        delay: 1.5

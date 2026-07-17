@@ -1,24 +1,17 @@
 /* V2VStreamClient — browser client for `WS /v2v/stream` (native ES module).
  *
- * Wire contract: docs/api/v2v-stream.md (authoritative). Summary:
- *   client → server : one leading {"type":"config", ...} JSON frame, then
+ * Wire contract: docs/api/realtime-v2.md (authoritative). Summary:
+ *   client → server : `session.update` after `session.created`, then
  *                     binary int16 LE PCM (mic) frames interleaved with JSON
- *                     control frames — {"type":"text"}, {"type":"tts_flush"},
- *                     {"type":"asr_eos"}, {"type":"abort"} (barge-in).
- *   server → client : JSON events — asr_partial / asr_endpoint / asr_final /
- *                     vad_event (speech_start|speech_end) / tts_started /
- *                     tts_sentence_done / tts_done / error — plus binary TTS
- *                     audio. The FIRST binary frame of the session carries a
- *                     4-byte LE uint32 sample-rate header; every later binary
- *                     frame is raw int16 LE PCM at that fixed rate (the header
- *                     is never re-emitted, not even across utterances).
+ *                     canonical input-buffer / response control events.
+ *   server → client : canonical session / input-buffer / transcription /
+ *                     response events plus pure binary PCM. Audio format is
+ *                     declared by session.updated; V2 has no binary header.
  *
  * Playback: received PCM is scheduled gap-free on a Web Audio context (same
  * scheduling approach as slv-client.js TTSStreamPlayer). `interrupt()` sends
- * {"type":"abort"} AND silences/clears everything scheduled locally, so
- * barge-in feels instant even with client-side buffering. The server also
- * cancels TTS on its own when VAD sees speech_start — the client mirrors that
- * by letting callers stopPlayback() on the vad_event.
+ * `response.cancel`, reports the actually played duration with
+ * `conversation.item.truncate`, and silences local scheduled audio.
  *
  * Unknown JSON frame types are ignored (forwarded to onEvent), as the
  * protocol doc instructs.
@@ -50,7 +43,7 @@ export class V2VStreamClient {
    *   onTtsDone(msg)           {"type":"tts_done"}
    *   onError(msg)             {"type":"error","error"}
    *   onEvent(msg)             any other / unknown JSON frame
-   *   onSampleRate(rate)       4-byte header parsed (once per connection)
+   *   onSampleRate(rate)       negotiated session output rate
    *   onAudioChunk(int16)      every non-empty PCM payload, pre-scheduling
    *   onPlaybackStart()        local playback transitioned silent → audible
    *   onPlaybackEnd()          scheduled audio fully played OR stopped/cleared
@@ -59,8 +52,7 @@ export class V2VStreamClient {
   constructor(opts = {}) {
     this.opts = opts;
     this.ws = null;
-    this.sampleRate = 0;          // TTS output rate from the one-time header
-    this._pre = new Uint8Array(0);      // bytes accumulated before the header
+    this.sampleRate = 0;          // TTS output rate from session.updated
     this._leftover = new Uint8Array(0); // odd trailing byte between chunks
     // playback state
     this.ctx = opts.audioContext || null;
@@ -68,6 +60,12 @@ export class V2VStreamClient {
     this._playhead = 0;           // ctx.currentTime-based scheduling cursor
     this._playing = false;
     this._endTimer = null;
+    this._connectResolve = null;
+    this._connectReject = null;
+    this._activeResponseId = null;
+    this._activeOutputItemId = null;
+    this._responsePlaybackStartedAt = null;
+    this.capabilities = {};
   }
 
   get _wsUrl() {
@@ -85,32 +83,50 @@ export class V2VStreamClient {
     return this._playing;
   }
 
-  /** Documented config keys only (docs/api/v2v-stream.md). */
+  /** Canonical Realtime V2 session.update. */
   _configFrame() {
     const o = this.opts;
-    const cfg = { type: "config" };
-    if (o.asrLanguage != null) cfg.asr_language = o.asrLanguage;
-    if (o.ttsLanguage != null) cfg.tts_language = o.ttsLanguage;
-    if (o.ttsSpeakerId != null) cfg.tts_speaker_id = o.ttsSpeakerId;
-    if (o.ttsSpeed != null) cfg.tts_speed = o.ttsSpeed;
-    cfg.sample_rate = o.sampleRate || 16000;
-    if (o.vad != null) cfg.vad = o.vad;
-    if (o.vadSilenceMs != null) cfg.vad_silence_ms = o.vadSilenceMs;
-    if (o.multiUtterance != null) cfg.multi_utterance = !!o.multiUtterance;
-    return cfg;
+    const input = {
+      format: { type: "audio/pcm", rate: o.sampleRate || 16000,
+                channels: 1, endianness: "little" },
+      turn_detection: {
+        type: o.vad === "none" ? "none" : "server_vad",
+        backend: o.vad || "silero",
+        silence_duration_ms: o.vadSilenceMs || 400,
+        create_response: false,
+        interrupt_response: true,
+      },
+    };
+    if (o.asrLanguage != null) input.transcription = { language: o.asrLanguage };
+    const output = {
+      format: { type: "audio/pcm", rate: o.sampleRate || 16000,
+                channels: 1, endianness: "little" },
+    };
+    if (o.ttsLanguage != null) output.language = o.ttsLanguage;
+    if (o.ttsSpeakerId != null) output.speaker_id = o.ttsSpeakerId;
+    if (o.ttsSpeed != null) output.speed = o.ttsSpeed;
+    return { type: "session.update", session: {
+      type: "realtime", output_modalities: ["audio"], audio: { input, output },
+    }};
   }
 
   /** Open the WS and send the leading config frame. */
   connect() {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this._wsUrl);
+      const ws = new WebSocket(this._wsUrl, "seeed.realtime.v2");
       ws.binaryType = "arraybuffer";
       ws.onopen = () => {
-        ws.send(JSON.stringify(this._configFrame()));
-        resolve(this);
+        if (ws.protocol !== "seeed.realtime.v2") {
+          reject(new Error("server did not accept seeed.realtime.v2"));
+          ws.close(1002, "subprotocol required");
+        }
       };
       ws.onerror = (e) => reject(e);
       ws.onclose = (ev) => {
+        if (this._connectReject) {
+          this._connectReject(new Error(`WebSocket closed during handshake (${ev.code})`));
+          this._connectResolve = this._connectReject = null;
+        }
         this.ws = null;
         if (this.opts.onClose) this.opts.onClose(ev);
       };
@@ -119,6 +135,8 @@ export class V2VStreamClient {
         else this._onBinary(ev.data);
       };
       this.ws = ws;
+      this._connectResolve = resolve;
+      this._connectReject = reject;
     });
   }
 
@@ -130,7 +148,7 @@ export class V2VStreamClient {
     this.ws.send(pcm instanceof Int16Array ? pcm.buffer : pcm);
   }
 
-  /** Optional text-direct input: incremental text chunk feeding TTS. */
+  /** Migration-only incremental TTS input; prefer speak() for exact speech. */
   sendText(text) {
     if (!this.connected) return;
     this.ws.send(JSON.stringify({ type: "text", text }));
@@ -142,18 +160,63 @@ export class V2VStreamClient {
     this.ws.send(JSON.stringify({ type: "tts_flush" }));
   }
 
+  /** Deterministic, history-free speech. */
+  speak(text, conversation = "none") {
+    if (!this.connected || !text) return;
+    this.ws.send(JSON.stringify({
+      type: "x_v2v.response.speak", speech: { text, conversation },
+    }));
+  }
+
+  /** Replace provider-visible tools and instructions for subsequent turns. */
+  updateTools(tools, instructions = null, llmParams = null) {
+    if (!this.connected) return;
+    const session = { tools: tools || [] };
+    if (instructions != null) session.instructions = instructions;
+    if (llmParams != null) session.x_v2v = { llm_params: llmParams };
+    this.ws.send(JSON.stringify({ type: "session.update", session }));
+  }
+
+  sendToolResult(callId, output) {
+    if (!this.connected) return;
+    this.ws.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "function_call_output", call_id: callId,
+        output: typeof output === "string" ? output : JSON.stringify(output),
+      },
+    }));
+  }
+
+  resetConversation() {
+    if (this.connected) {
+      this.ws.send(JSON.stringify({ type: "x_v2v.conversation.reset" }));
+    }
+  }
+
   /** Manually finalize ASR (overrides VAD). */
   asrEos() {
     if (!this.connected) return;
-    this.ws.send(JSON.stringify({ type: "asr_eos" }));
+    this.ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
   }
 
-  /** Barge-in: {"type":"abort"} cancels the in-flight synth + queued
-   *  sentences server-side; locally we stop and clear everything scheduled
-   *  so the interruption is instant despite client buffering. */
+  /** Cancel, truncate provider history to heard audio, and stop locally. */
   interrupt() {
     if (this.connected) {
-      this.ws.send(JSON.stringify({ type: "abort" }));
+      this.ws.send(JSON.stringify({
+        type: "response.cancel", response_id: this._activeResponseId,
+      }));
+      if (this._activeOutputItemId && this.capabilities.conversation_truncate !== false) {
+        const now = this.ctx?.currentTime || 0;
+        const playedMs = this._responsePlaybackStartedAt == null ? 0
+          : Math.max(0, Math.round((now - this._responsePlaybackStartedAt) * 1000));
+        this.ws.send(JSON.stringify({
+          type: "conversation.item.truncate",
+          item_id: this._activeOutputItemId,
+          content_index: 0,
+          audio_end_ms: playedMs,
+        }));
+      }
     }
     this.stopPlayback();
   }
@@ -165,13 +228,59 @@ export class V2VStreamClient {
     try { msg = JSON.parse(data); } catch { return; }
     const cb = this.opts;
     switch (msg.type) {
-      case "asr_partial": cb.onAsrPartial && cb.onAsrPartial(msg); break;
-      case "asr_endpoint": cb.onAsrEndpoint && cb.onAsrEndpoint(msg); break;
-      case "asr_final": cb.onAsrFinal && cb.onAsrFinal(msg); break;
-      case "vad_event": cb.onVadEvent && cb.onVadEvent(msg.event, msg); break;
-      case "tts_started": cb.onTtsStarted && cb.onTtsStarted(msg); break;
-      case "tts_sentence_done": cb.onTtsSentenceDone && cb.onTtsSentenceDone(msg); break;
-      case "tts_done": cb.onTtsDone && cb.onTtsDone(msg); break;
+      case "session.created":
+        this.ws.send(JSON.stringify(this._configFrame()));
+        break;
+      case "session.updated": {
+        this.capabilities = msg.session?.capabilities || this.capabilities;
+        const rate = msg.session?.audio?.output?.format?.rate
+          || msg.session?.audio?.output?.format?.sample_rate;
+        if (rate) {
+          this.sampleRate = Number(rate);
+          if (cb.onSampleRate) cb.onSampleRate(this.sampleRate);
+        }
+        if (this._connectResolve) this._connectResolve(this);
+        this._connectResolve = this._connectReject = null;
+        break;
+      }
+      case "conversation.item.input_audio_transcription.delta":
+        cb.onAsrPartial && cb.onAsrPartial({ ...msg, text: msg.delta || "" }); break;
+      case "input_audio_buffer.committed":
+        cb.onAsrEndpoint && cb.onAsrEndpoint(msg); break;
+      case "conversation.item.input_audio_transcription.completed":
+        cb.onAsrFinal && cb.onAsrFinal({ ...msg, text: msg.transcript || "" }); break;
+      case "input_audio_buffer.speech_started":
+        cb.onVadEvent && cb.onVadEvent("speech_start", msg); break;
+      case "input_audio_buffer.speech_stopped":
+        cb.onVadEvent && cb.onVadEvent("speech_end", msg); break;
+      case "response.created":
+        this._activeResponseId = msg.response?.id || null;
+        this._activeOutputItemId = null;
+        this._responsePlaybackStartedAt = null;
+        cb.onEvent && cb.onEvent(msg); break;
+      case "response.output_item.added":
+        if (msg.item?.type === "message" && msg.item?.role === "assistant") {
+          this._activeOutputItemId = msg.item.id || null;
+        }
+        cb.onEvent && cb.onEvent(msg); break;
+      case "response.function_call_arguments.done":
+        cb.onToolCall && cb.onToolCall({
+          ...msg,
+          id: msg.call_id,
+          arguments: (() => { try { return JSON.parse(msg.arguments || "{}"); }
+                              catch { return {}; } })(),
+        });
+        break;
+      case "x_v2v.tts_sentence.started":
+        cb.onTtsStarted && cb.onTtsStarted(msg); break;
+      case "x_v2v.tts_sentence.done":
+        cb.onTtsSentenceDone && cb.onTtsSentenceDone(msg); break;
+      case "response.done":
+        if (msg.response?.id === this._activeResponseId) {
+          this._activeResponseId = null;
+          this._activeOutputItemId = null;
+        }
+        cb.onTtsDone && cb.onTtsDone(msg); break;
       case "error": cb.onError && cb.onError(msg); break;
       default: cb.onEvent && cb.onEvent(msg); // unknown frames: ignorable
     }
@@ -179,18 +288,7 @@ export class V2VStreamClient {
 
   _onBinary(buf) {
     let bytes = new Uint8Array(buf);
-    // One-time 4-byte LE uint32 sample-rate header (first binary frame of
-    // the session; never re-emitted). Tolerate a pathological split across
-    // frames by accumulating until 4 bytes are available.
-    if (this.sampleRate === 0) {
-      const merged = new Uint8Array(this._pre.length + bytes.length);
-      merged.set(this._pre); merged.set(bytes, this._pre.length);
-      if (merged.length < 4) { this._pre = merged; return; }
-      this.sampleRate = new DataView(merged.buffer).getUint32(0, true);
-      this._pre = new Uint8Array(0);
-      bytes = merged.subarray(4);
-      if (this.opts.onSampleRate) this.opts.onSampleRate(this.sampleRate);
-    }
+    if (!this.sampleRate) return; // session.updated must precede audio
     if (this._leftover.length) {
       const merged = new Uint8Array(this._leftover.length + bytes.length);
       merged.set(this._leftover); merged.set(bytes, this._leftover.length);
@@ -224,6 +322,9 @@ export class V2VStreamClient {
     src.buffer = buf;
     src.connect(ctx.destination);
     const startAt = Math.max(ctx.currentTime + 0.03, this._playhead);
+    if (this._responsePlaybackStartedAt == null) {
+      this._responsePlaybackStartedAt = startAt;
+    }
     src.start(startAt);
     this._playhead = startAt + buf.duration;
     this._sources.push(src);

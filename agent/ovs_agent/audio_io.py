@@ -69,6 +69,10 @@ class AudioIO:
         # don't resume audible playback after we've silenced the speaker.
         # Cleared by arm_for_next_turn() at the start of the next utterance.
         self._discard_playback = False
+        # Actual TTS bytes handed to the output callback for the active
+        # response. Used to report conversation.item.truncate at barge-in.
+        self._playback_response_id: str | None = None
+        self._playback_device_bytes: int = 0
         # Device hot-plug watcher state.
         self._device_watcher_task: asyncio.Task | None = None
         self._device_signature: tuple | None = None
@@ -422,6 +426,8 @@ class AudioIO:
             if n:
                 outdata[:n] = self._playback_buffer[:n]
                 del self._playback_buffer[:n]
+                if self._playback_response_id is not None:
+                    self._playback_device_bytes += n
             if n < needed:
                 outdata[n:needed] = b"\x00" * (needed - n)
 
@@ -515,6 +521,20 @@ class AudioIO:
         tail audio is missed.
         """
         self._is_playing = False
+
+    def begin_response_playback(self, response_id: str) -> None:
+        """Start actual-played-duration accounting for one response."""
+        with self._playback_lock:
+            self._playback_response_id = response_id
+            self._playback_device_bytes = 0
+
+    def playback_position_ms(self, response_id: str | None = None) -> int:
+        """Return PCM duration already handed to the physical output stream."""
+        with self._playback_lock:
+            if response_id and response_id != self._playback_response_id:
+                return 0
+            byte_count = self._playback_device_bytes
+        return max(0, int(byte_count * 1000 / (2 * max(1, self.output_sr))))
 
     def play_notification(self, pcm: bytes) -> None:
         """Play a short audio clip without affecting _is_playing state.

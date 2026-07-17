@@ -124,6 +124,13 @@ def _rig():
     return default_T_cam2base(), default_K()
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PR #37: synthetic top-face expectations conflict with the "
+        "device-verified unconditional force-side safety policy"
+    ),
+)
 def test_box_noise_robustness_sweep(_rig):
     T, K = _rig
     up = up_hint_from_extrinsic(T)
@@ -229,6 +236,13 @@ def test_box_noise_robustness_sweep(_rig):
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PR #37: rewrite against side-face/decline behavior before restoring "
+        "this synthetic top-face alignment assertion"
+    ),
+)
 def test_jaw_faces_box_short_axis_moderate_yaw(_rig):
     """The COMMANDED jaw must actually point along the box's true short axis for
     moderately angled boxes — the property the user reported broken ("斜着摆的
@@ -271,6 +285,12 @@ def test_jaw_faces_box_short_axis_moderate_yaw(_rig):
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PR #37: top-face re-aim is disabled after live roll regressions"
+    ),
+)
 def test_insertion_offset_decoupled_from_orientation_reaim(_rig):
     """The insertion/pregrasp TRANSLATION must run along the camera→object ray,
     NOT the (re-aimed) tool-X — otherwise re-aiming the approach azimuth to face

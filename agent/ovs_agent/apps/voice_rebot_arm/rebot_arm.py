@@ -142,15 +142,18 @@ def _write_channel_override_yaml(src_cfg_path: str, channel: str) -> str:
 
 
 # ── 夹爪状态机常量 ────────────────────────────────────────────────────────────
-_G_MAX_DIST_M      = 0.09
-_G_ANGLE_OPEN      = -5.0
-_G_OPEN_SOFT_LIMIT = -4.9
+_G_MAX_DIST_M      = 0.100  # 100mm operational max (ladder-anchored 2026-07-10: ~18mm/rad to 104mm; physical ceiling 105-110mm)
+_G_ANGLE_OPEN      = -5.763  # open target; driver settles ~0.1 shy -> ~100mm true opening
+_G_OPEN_SOFT_LIMIT = -5.85  # worst case ~104mm, ruler-verified safe (claw borders intact)
 _G_ARRIVE_TOL      = 0.12
 _G_HARD_STOP_ANGLE = -0.05
 _G_TAU_MAX         = 1.5
 _G_KP_MOVE         = 5.0
 _G_KD_MOVE         = 1.0
-_G_OPEN_RATE       = 4.0
+_G_OPEN_RATE       = 4.0     # rad/s in free travel (to _G_SLOW_ZONE)
+_G_OPEN_RATE_SLOW  = 4.0     # rad/s past _G_SLOW_ZONE; stiction fixed in hardware 2026-07-14, creep no longer needed (was 0.12)
+_G_SLOW_ZONE       = -5.0    # boundary of the former stick-slip zone (kept so the creep leg can be re-enabled by one number)
+_G_OPEN_TIMEOUT_S  = 5.0     # blocking-open backstop; full open now ~1.5s at constant 4.0 rad/s
 _G_CLOSE_TORQUE    = 1.0
 _G_KD_CLOSE        = 0.5
 _G_STALL_VEL       = 0.05
@@ -167,7 +170,7 @@ _G_HOLD_TORQ_MIN   = 0.12    # N·m sustained grip torque ⇒ physically clampin
 # After an INTENTIONAL open, "holding" additionally requires the jaw to have
 # stopped at least this far (rad) short of the commanded open target — i.e. an
 # object physically blocked it. The soft-limit shortfall at full open is
-# ~0.26 rad (0.0853m measured vs 0.09m commanded) WITH residual limit torque,
+# ~0.1 rad (0.0853m measured vs 0.09m commanded) WITH residual limit torque,
 # which used to false-positive the release verification ("release failed —
 # jaw still gripping after full open" on a 0.057m object, real machine
 # 2026-06-12). NOTE the physical blind spot: an object ≥~0.082m wide is
@@ -177,6 +180,21 @@ _G_OPEN_BLOCKED_RAD = 0.35
 _G_OPEN_STALL_S    = 0.20    # s stalled after the open ramp finished ⇒ jaw at its physical open limit
 _G_CLOSE_GRACE_S   = 0.40    # s in CLOSING after which stall ⇒ contact even with no start-up travel
                              # (jaw already resting on the object moves < _G_STARTUP_DIST)
+# Feedback plausibility rails. The first frame(s) after boot can be pure
+# garbage pinned at the register limits (pos≈±PMAX 12.5, vel≈±VMAX 30, seen
+# 2026-07-13); caching one poisons the tau_ff compensation in _g_safe_mit
+# into a hard slam past the open limit, so such frames must never be cached.
+_G_FB_POS_SANE     = 7.0     # rad; |pos| beyond this = corrupt frame
+_G_FB_VEL_SANE     = 25.0    # rad/s; |vel| beyond this = corrupt frame
+# Boot zero re-referencing. The DM-J4310 encoder is SINGLE-TURN and gripper
+# travel exceeds one turn (hardware team, 2026-07-13), so the power-on zero
+# is only correct if the claw was fully closed at power-up — otherwise it
+# comes up shifted (+4.63 rad on 2026-07-10, +1.67 rad on 2026-07-13). All
+# width limits are denominated in encoder angle, so a shifted zero silently
+# opens the claw past its ~105mm breaking width. Stall-reference every boot.
+_G_ZERO_CHECK_TOL  = 0.15    # rad; stall must land within this of 0
+_G_ZERO_CHECK_CAP  = 6.5     # rad; max closing travel hunting the stop (covers full travel)
+_G_ZERO_CHECK_S    = 30.0    # s; overall time budget for the check
 
 
 class _GS:
@@ -324,6 +342,7 @@ class RebotArm:
         self._g_open_stall_s     = 0.0
         self._g_close_elapsed    = 0.0
         self._g_target_force     = _G_DEFAULT_FORCE
+        self._g_bad_frames       = 0
         self._g_loop_thread: Optional[threading.Thread] = None
         self._g_loop_running     = False
         self._g_loop_stop        = threading.Event()
@@ -528,8 +547,123 @@ class RebotArm:
         except CallError as e:
             raise RuntimeError(f"gripper MIT mode switch failed: {e}") from e
 
+        self._g_boot_zero_check()
+
         self._g_start_loop()
         print("[RebotArm] gripper registered on CAN bus, force-control loop started")
+
+    def _g_boot_zero_check(self) -> None:
+        """Close to the mechanical stop and verify the encoder reads ~0 there.
+
+        The encoder is single-turn while gripper travel exceeds one turn, so
+        the power-on zero is only valid if the claw was fully closed at
+        power-up; otherwise every angle-denominated width limit silently
+        over-opens the claw (2× observed). Stall-referencing here makes a
+        shifted zero impossible to miss.
+
+        DETECTION ONLY (2026-07-13, after the auto-heal re-zeroed onto a
+        box left in the jaw): this never calls set_zero. Landing ≉ 0 →
+        raise, which makes init_gripper leave the gripper DOWN — no open
+        is possible until a human runs the manual re-zero script. The
+        normal rest state is closed (put_down closes the claw), so the
+        healthy boot lands ≈ 0 in a second and nothing is refused.
+        Set REBOT_G_BOOT_ZEROCHECK=0 to skip (e.g. bench debugging).
+        """
+        if os.environ.get("REBOT_G_BOOT_ZEROCHECK", "1") == "0":
+            print("[RebotArm] gripper boot zero-check SKIPPED (env)", flush=True)
+            return
+        lock = self._gripper_ctrl._bus_lock
+
+        def _fresh(tries: int = 60):
+            for _ in range(tries):
+                with lock:
+                    self._gripper_mot.request_feedback()
+                    self._gripper_ctrl.poll_feedback_once()
+                time.sleep(0.005)
+                s = self._gripper_mot.get_state()
+                if s is not None and abs(s.pos) < _G_FB_POS_SANE and abs(s.vel) < _G_FB_VEL_SANE:
+                    return s
+            return None
+
+        st = _fresh()
+        if st is None:
+            raise RuntimeError("gripper boot zero-check: no sane feedback frame")
+
+        pos = float(st.pos)
+        start_pos = pos
+        q = pos
+        cap = pos + _G_ZERO_CHECK_CAP
+        plateau_ref, plateau_t = pos, time.monotonic()
+        deadline = time.monotonic() + _G_ZERO_CHECK_S
+        stalled = False
+        while time.monotonic() < deadline and q < cap:
+            q = min(cap, q + 0.3 / 100.0)          # 0.3 rad/s closing creep
+            with lock:
+                self._gripper_mot.send_mit(q, 0.0, _G_KP_MOVE, _G_KD_MOVE, 0.0)
+                self._gripper_ctrl.poll_feedback_once()
+            s = self._gripper_mot.get_state()
+            if s is not None and abs(s.pos) < _G_FB_POS_SANE and abs(s.vel) < _G_FB_VEL_SANE:
+                pos = float(s.pos)
+                if abs(s.torq) > 0.6:
+                    stalled = True                  # contact torque at the stop
+                    break
+                if abs(pos - plateau_ref) > 0.02:
+                    plateau_ref, plateau_t = pos, time.monotonic()
+                elif (time.monotonic() - plateau_t > 0.8 and q - pos > 0.15
+                      and abs(float(s.torq)) >= 0.25):
+                    # A plateau only counts as the stop if the motor is
+                    # actually pushing against something — frozen feedback
+                    # otherwise fakes an instant stall (seen 2026-07-13).
+                    stalled = True
+                    break
+            time.sleep(1.0 / 100.0)
+
+        def _park_quiet() -> None:
+            with lock:
+                self._gripper_mot.send_mit(pos, 0.0, 0.0, _G_KD_MOVE, 0.0)
+
+        if not stalled:
+            _park_quiet()
+            raise RuntimeError(
+                "gripper boot zero-check: no stall found — encoder frame "
+                "unverified (frozen feedback?); run the manual re-zero "
+                "(gripper_rezero_v2.py) before using the gripper")
+
+        # settle briefly at light press, then read the landing
+        for _ in range(50):
+            with lock:
+                self._gripper_mot.send_mit(min(cap, pos + 0.05), 0.0, _G_KP_MOVE, _G_KD_MOVE, 0.0)
+                self._gripper_ctrl.poll_feedback_once()
+            s = self._gripper_mot.get_state()
+            if s is not None and abs(s.pos) < _G_FB_POS_SANE:
+                pos = float(s.pos)
+            time.sleep(1.0 / 100.0)
+
+        if abs(pos) <= _G_ZERO_CHECK_TOL:
+            print(f"[RebotArm] gripper boot zero-check OK: closed reads {pos:+.4f}", flush=True)
+            # relax to damping-only so the loop starts from a quiet closed claw
+            with lock:
+                self._gripper_mot.send_mit(_G_HARD_STOP_ANGLE, 0.0, 0.0, _G_KD_MOVE, 0.0)
+            return
+
+        _park_quiet()
+        if abs(pos - start_pos) < 0.10:
+            raise RuntimeError(
+                f"gripper boot zero-check: stalled without travel at {pos:+.4f} "
+                f"— jaw blocked or feedback frozen; zero NOT changed, inspect "
+                f"and restart")
+        if pos < 0.0:
+            # Landed while still OPEN in the current frame: the jaw hit an
+            # OBJECT, not the closed stop (a power-on wrap reads POSITIVE:
+            # +4.63 and +1.67 observed). Never treat an object as the stop.
+            raise RuntimeError(
+                f"gripper boot zero-check: jaw stopped {-pos:.2f} rad short of "
+                f"closed — object between the claws? Remove it and restart; "
+                f"zero NOT changed")
+        raise RuntimeError(
+            f"gripper boot zero-check: ZERO SHIFTED — closed reads {pos:+.4f} "
+            f"(single-turn wrap); run the manual re-zero "
+            f"(gripper_rezero_v2.py), then restart")
 
     @property
     def has_gripper(self) -> bool:
@@ -560,7 +694,7 @@ class RebotArm:
         if last_open is not None:
             # After an INTENTIONAL open: only report holding when the jaw
             # stopped well SHORT of the commanded target (an object blocked
-            # it). Parking at/near the target — including the ~0.26 rad
+            # it). Parking at/near the target — including the ~0.1 rad
             # soft-limit shortfall at full open, with its residual limit
             # torque — is a successful release, not a grip (this exact case
             # false-positived the put_down release verification).
@@ -591,9 +725,16 @@ class RebotArm:
         try:
             st = self._gripper_mot.get_state()
             if st is not None:
-                self._g_pos  = float(st.pos)
-                self._g_vel  = float(st.vel)
-                self._g_torq = float(st.torq)
+                if abs(st.pos) < _G_FB_POS_SANE and abs(st.vel) < _G_FB_VEL_SANE:
+                    self._g_pos  = float(st.pos)
+                    self._g_vel  = float(st.vel)
+                    self._g_torq = float(st.torq)
+                else:
+                    self._g_bad_frames += 1
+                    if self._g_bad_frames <= 5 or self._g_bad_frames % 500 == 0:
+                        print(f"[RebotArm] gripper: rejected corrupt feedback frame "
+                              f"pos={st.pos:+.3f} vel={st.vel:+.3f} (n={self._g_bad_frames})",
+                              flush=True)
         except Exception:
             pass
 
@@ -607,7 +748,8 @@ class RebotArm:
         if s == _GS.OPENING:
             with self._g_lock:
                 target = self._g_open_target
-                self._g_open_q_des = max(self._g_open_q_des - _G_OPEN_RATE * dt, target)
+                rate = _G_OPEN_RATE if self._g_open_q_des > _G_SLOW_ZONE else _G_OPEN_RATE_SLOW
+                self._g_open_q_des = max(self._g_open_q_des - rate * dt, target)
                 q = self._g_open_q_des
                 ramp_done = q <= target + 1e-9
             self._g_safe_mit(q, 0.0, _G_KP_MOVE, _G_KD_MOVE)
@@ -615,9 +757,9 @@ class RebotArm:
             stalled = False
             if ramp_done and not arrived:
                 # The commanded ramp finished but the encoder never got within
-                # tolerance: the jaw is parked against its PHYSICAL open limit
-                # (the -4.9 rad soft-limit target is past what the mechanism
-                # can reach) or against an obstacle. A short sustained stall is
+                # tolerance: the jaw is blocked by an obstacle, or the creep
+                # leg lost the race against stiction (past _G_SLOW_ZONE the
+                # linkage only glides under a gentle sustained push). A short sustained stall is
                 # the completion signal — without it the loop pushes at the
                 # torque clamp forever (motor-overheat hazard) and every full
                 # open "fails" despite the jaw being open.
@@ -742,7 +884,7 @@ class RebotArm:
     # ── gripper public API ──────────────────────────────────────────────────
 
     def open_gripper(self, distance_m: float = _G_MAX_DIST_M) -> bool:
-        """Open the gripper (blocking, up to 3s).
+        """Open the gripper (blocking, up to _G_OPEN_TIMEOUT_S).
 
         Returns True when the open COMPLETED — either the encoder reached the
         target or the jaw stalled at its physical open limit (the control loop
@@ -761,7 +903,7 @@ class RebotArm:
             self._g_state = _GS.OPENING
         with self._g_lock:
             self._g_open_last_target = target
-        if not self._g_wait_idle(3.0):
+        if not self._g_wait_idle(_G_OPEN_TIMEOUT_S):
             # Backstop only (the in-loop stall completion should fire first):
             # force IDLE, then park at the CURRENT position with damping only
             # so the 500Hz loop stops regulating into whatever blocked it.

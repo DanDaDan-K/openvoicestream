@@ -334,6 +334,9 @@ class Config:
     # touching YAML. Resolved by ``server_loop_enabled()`` (env wins so a
     # deployment can flip the flag without editing config).
     server_loop: bool = False
+    # Device applications use the canonical Realtime V2 wire protocol by
+    # default. Set to 1 only for a time-bounded legacy server migration.
+    realtime_protocol_version: int = 2
     # Path the config was loaded from (set by `load_config`); used by
     # the dashboard's per-mode override editor to persist changes back
     # to disk. None when the Config was constructed in code.
@@ -344,6 +347,11 @@ class Config:
         if self.pipeline_mode not in allowed:
             raise ValueError(
                 f"pipeline_mode must be one of {sorted(allowed)}; got {self.pipeline_mode!r}"
+            )
+        if self.realtime_protocol_version not in (1, 2):
+            raise ValueError(
+                "realtime_protocol_version must be 1 or 2; "
+                f"got {self.realtime_protocol_version!r}"
             )
         if not (isinstance(self.llm_first_token_timeout_s, (int, float))
                 and self.llm_first_token_timeout_s > 0):

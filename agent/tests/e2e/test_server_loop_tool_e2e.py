@@ -54,7 +54,8 @@ Setup (verified 2026-06-14):
        bash ~/relaunch_serverloop.sh edgellm jetson-qwen3asr-matcha-nx
   2. Run:
        OVS_E2E_SERVER_LOOP=1 \
-       env -u http_proxy -u https_proxy NO_PROXY='100.82.225.102,localhost,127.0.0.1' \
+       OVS_E2E_SLV_URL='ws://<device>:8621/v2v/stream' \
+       env -u http_proxy -u https_proxy \
          uv run pytest tests/e2e/test_server_loop_tool_e2e.py -v -s
   3. ALWAYS restore client-loop afterwards (shared dev box):
        bash ~/relaunch_seeed_voice.sh edgellm jetson-qwen3asr-matcha-nx

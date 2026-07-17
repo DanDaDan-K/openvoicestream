@@ -201,6 +201,7 @@ class GraspPlugin(Plugin):
                     logger.debug("GraspPlugin: prime warm_up failed", exc_info=True)
                 # Pull frames until one is real — a cold camera returns None
                 # for the first second or two.
+                c = d = None
                 for _ in range(10):
                     try:
                         c, d = cam.get_frame()
@@ -208,6 +209,16 @@ class GraspPlugin(Plugin):
                         break
                     if c is not None and d is not None:
                         break
+                # Force the ORT session now — TRT engine load (~6s) and the
+                # memory-gate decision belong at boot, not inside the first
+                # grasp (2026-07-14).
+                if c is not None and self._segmenter is not None:
+                    try:
+                        self._segmenter.predict(c, conf=0.9)
+                        logger.info("GraspPlugin: prime inference session ready")
+                    except Exception:
+                        logger.debug("GraspPlugin: prime predict failed",
+                                     exc_info=True)
             logger.info(
                 "GraspPlugin: perception primed in %.1fs (first grasp will "
                 "skip model load + camera cold-start)",
@@ -882,7 +893,9 @@ class GraspPlugin(Plugin):
             if not ok:
                 err = str(res.get("error") or "")
                 stage = str(res.get("stage") or "")
-                if "no valid grasp" in err or res.get("found") is False:
+                if res.get("too_wide") or "too wide" in err:
+                    kind = "out_of_range"       # descending sweep
+                elif "no valid grasp" in err or res.get("found") is False:
                     kind = "not_found"          # double low beep
                 elif stage == "plausibility" or "implausible" in err or "too low" in err:
                     kind = "out_of_range"       # descending sweep
@@ -894,8 +907,8 @@ class GraspPlugin(Plugin):
             #  * failure WITH a spoken reason: announce WHY first, and DEFER
             #    the tone until that reply finishes (on_assistant_done), so the
             #    tone is always the final sound the user hears before speaking.
-            #    The voxedge CLIENT_TEXT path is a DIRECT text→TTS channel
-            #    (no LLM round), so the reason plays the moment the motion ends.
+            #    Realtime V2 direct speech is history-free (no LLM round), so
+            #    the reason plays the moment the motion ends.
             phrase = (
                 self._failure_phrase(kind, res)
                 if (kind != "ok" and self._announce_enabled())
@@ -942,6 +955,8 @@ class GraspPlugin(Plugin):
     def _failure_phrase(kind: str, res: dict) -> str:
         err = str(res.get("error") or "")
         target = str(res.get("target") or "object")
+        if res.get("too_wide") or "too wide" in err:
+            return "The box is too big for me to grip."
         if kind == "not_found":
             return f"I couldn't find the {target}."
         if kind == "out_of_range":
@@ -959,13 +974,25 @@ class GraspPlugin(Plugin):
         return "The action didn't succeed."
 
     async def _announce(self, text: str) -> None:
-        """Direct text→TTS via the SLV CLIENT_TEXT channel (no LLM)."""
+        """Deterministic, history-free speech through Realtime V2."""
         try:
+            speak = getattr(self.app, "speak", None)
+            if callable(speak):
+                await speak(text, conversation="none")
+                logger.info("GraspPlugin: announced %r", text)
+                return
+
+            # Compatibility for lightweight app fakes and protocol-v1 agents.
+            # SLVClient.speak() selects Realtime V2 or legacy text + flush.
             slv = getattr(self.app, "slv", None)
             if slv is None:
                 return
-            await slv.send_text(text)
-            await slv.flush_tts()
+            speak = getattr(slv, "speak", None)
+            if callable(speak):
+                await speak(text, conversation="none")
+            else:
+                await slv.send_text(text)
+                await slv.flush_tts()
             logger.info("GraspPlugin: announced %r", text)
         except Exception:
             logger.debug("GraspPlugin: announce failed", exc_info=True)
@@ -1065,7 +1092,12 @@ class GraspPlugin(Plugin):
             providers = self.cfg.get("onnx_providers")
             kwargs: dict[str, Any] = {}
             if providers:
-                kwargs["providers"] = tuple(providers)
+                # yaml expresses ORT (name, options) provider tuples as
+                # [name, {options}] lists — convert; strings pass through.
+                kwargs["providers"] = tuple(
+                    tuple(p) if isinstance(p, (list, tuple)) else p
+                    for p in providers
+                )
             # Optional detector input size (Item D): default unset → segmenter's
             # 640 default (unchanged). A larger size needs a matching re-exported
             # engine; pass an int (square) or [w, h].

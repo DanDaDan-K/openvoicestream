@@ -75,12 +75,21 @@ def _env(names: str | tuple[str, ...], default: str | None = None) -> str | None
 class HostSignature:
     sm: str             # "87" for Orin
     trt_version: str    # "10.3" (major.minor)
-    jp_version: str     # "6.2"
+    jp_version: str     # "6.2"  (JetPack; only meaningful on Tegra)
     cuda_version: str   # "12.6"
+    platform: str = "tegra"   # tegra | sbsa | x86 — arch and platform are
+    #                           ORTHOGONAL (GB10/Spark is Blackwell-on-sbsa, not
+    #                           Tegra). Defaults to tegra for backward-compat.
 
     @property
     def key(self) -> str:
-        return f"sm{self.sm}-trt{self.trt_version}-jp{self.jp_version}-cuda{self.cuda_version}"
+        # Tegra keeps the historical jp-tokened key so published Jetson bundles
+        # (keyed sm87-trt10.3-jp6.2-cuda12.6 etc.) still resolve byte-for-byte.
+        # Non-Tegra (sbsa/x86) has no JetPack, so the meaningless jp token is
+        # replaced by the platform token (e.g. sm121-trt10.14-sbsa-cuda13.0).
+        if self.platform == "tegra":
+            return f"sm{self.sm}-trt{self.trt_version}-jp{self.jp_version}-cuda{self.cuda_version}"
+        return f"sm{self.sm}-trt{self.trt_version}-{self.platform}-cuda{self.cuda_version}"
 
     def to_dict(self) -> dict:
         return {
@@ -88,6 +97,7 @@ class HostSignature:
             "trt_version": self.trt_version,
             "jp_version": self.jp_version,
             "cuda_version": self.cuda_version,
+            "platform": self.platform,
         }
 
 
@@ -150,12 +160,32 @@ def _detect_jp_version() -> str:
     return f"{jp_major}.{jp_minor}"
 
 
+def _detect_platform() -> str:
+    """tegra | sbsa | x86 — orthogonal to arch. Jetson (Orin/Thor) is a Tegra
+    SoC; GB10/Spark is Blackwell packaged as sbsa (DGX OS, no /etc/nv_tegra_release)."""
+    forced = _env(("OVS_PLATFORM",), "")
+    if forced:
+        return forced
+    if os.path.exists("/etc/nv_tegra_release"):
+        return "tegra"
+    try:
+        with open("/proc/device-tree/model") as f:
+            if re.search(r"orin|thor|tegra", f.read(), re.I):
+                return "tegra"
+    except OSError:
+        pass
+    return "sbsa" if os.uname().machine == "aarch64" else "x86"
+
+
 def detect_host_signature() -> HostSignature:
+    plat = _detect_platform()
     sig = HostSignature(
         sm=_detect_sm(),
         trt_version=_detect_trt_version(),
-        jp_version=_detect_jp_version(),
+        # JetPack version is only meaningful on Tegra; blank elsewhere.
+        jp_version=_detect_jp_version() if plat == "tegra" else "",
         cuda_version=_detect_cuda_version(),
+        platform=plat,
     )
     logger.info("host signature: %s", sig.key)
     return sig
@@ -239,6 +269,59 @@ def _meta_matches(engine_path: Path, host: HostSignature) -> bool:
     if meta.get("engine_sha256") != _sha256_file(engine_path):
         logger.warning("engine hash drift detected at %s — treating as stale", engine_path)
         return False
+    return True
+
+
+def _migrate_existing_engine(engine_path: Path, host: HostSignature) -> bool:
+    """Adopt an engine from an installation created before sidecars existed.
+
+    Existing offline installs may contain valid, device-built TensorRT engines
+    but either no sidecar or the pre-platform sidecar schema.  Re-downloading
+    those engines is both unnecessary and fatal on an offline device.  Trust a
+    non-empty engine once, record its hash/current host atomically, and let the
+    normal strict cache validation apply on every subsequent boot.
+
+    A malformed sidecar is *not* treated as absent.  Legacy sidecars are only
+    migrated on Tegra when every host field they knew about still matches; an
+    existing hash, when present, must also match the engine bytes.
+    """
+    try:
+        if not engine_path.is_file() or engine_path.stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+
+    mp = _meta_path(engine_path)
+    meta = _read_meta(engine_path)
+    if meta is None:
+        if mp.exists():
+            logger.warning("invalid engine sidecar at %s — refusing migration", mp)
+            return False
+    else:
+        cached_host = meta.get("host")
+        if not isinstance(cached_host, dict) or "platform" in cached_host:
+            return False
+        expected = host.to_dict()
+        legacy_keys = ("sm", "trt_version", "jp_version", "cuda_version")
+        if host.platform != "tegra" or any(
+            cached_host.get(key) != expected[key] for key in legacy_keys
+        ):
+            return False
+        cached_sha = meta.get("engine_sha256")
+        if cached_sha and cached_sha != _sha256_file(engine_path):
+            logger.warning(
+                "legacy engine hash drift detected at %s — refusing migration",
+                engine_path,
+            )
+            return False
+
+    _write_meta(
+        engine_path,
+        host,
+        source="existing_install_migration",
+        onnx_sha=meta.get("onnx_sha256") if meta else None,
+    )
+    logger.info("adopted existing engine and wrote sidecar: %s", engine_path)
     return True
 
 
@@ -732,6 +815,13 @@ def resolve_all(profile: dict, kind: Optional[str] = None) -> dict[str, Path]:
 def _resolve_one(spec: EngineSpec, host: HostSignature, force_rebuild: bool) -> None:
     if not force_rebuild and _meta_matches(spec.engine_path, host) and _extra_files_exist(spec):
         logger.info("cache hit: %s (host=%s)", spec.engine_path.name, host.key)
+        return
+
+    if (
+        not force_rebuild
+        and _extra_files_exist(spec)
+        and _migrate_existing_engine(spec.engine_path, host)
+    ):
         return
 
     # Stale/unverified cache: clear only the meta sidecar so a stale or

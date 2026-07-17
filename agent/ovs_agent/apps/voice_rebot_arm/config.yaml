@@ -302,11 +302,14 @@ metadata:
     # Phase B camera-guided grasp_object. Perception + calibration artifacts are
     # mounted at /opt/rebot-models (host /home/seeed/rebot-models).
     enabled: true
-    # Native-TRT engine by default (25× vs CPU: 20ms vs 496ms raw inference,
-    # built on-device via trtexec --fp16; arch-specific — rebuild if
-    # TRT/JetPack changes). Set REBOT_GRASP_MODEL to the .onnx sibling to
-    # fall back to the onnxruntime CPU path.
-    yolo_model_path: "${REBOT_GRASP_MODEL:-/opt/rebot-models/yoloe-26s-seg-box.engine}"
+    # Default: the MULTI-class ONNX (box family + banana/orange/water
+    # bottle/cup baked in — the 2026-07 multi-object release). Export it from
+    # the open-vocab base weights with tools/export_yoloe_seg_model.py (see
+    # RUNBOOK "Multi-object grasping"); the class order MUST match
+    # yolo_classes below. Set REBOT_GRASP_MODEL to a box-only engine/onnx to
+    # restore the box-demo detector (TRT engine is 25× faster but is
+    # arch-specific and box-only until re-exported).
+    yolo_model_path: "${REBOT_GRASP_MODEL:-/opt/rebot-models/yoloe-26s-seg-multi.onnx}"
     # NOTE: "yellow banana" only fires in embin (vocab-decoupled) mode — the
     # baked box engine has 4 classes (cls_id 0-3) and never emits the 5th, so
     # this extra label is inert in box mode and active once REBOT_TEXT_ENCODER +
@@ -367,13 +370,27 @@ metadata:
     # published yoloe-26s-seg-embin export). Slots beyond len(yolo_classes) are
     # inert zero pad rows; a detection landing on one is dropped by the guard.
     embin_pad_slots: ${REBOT_EMBIN_PAD_SLOTS:-16}
-    # CPU EP: production voice stack leaves <300MB GPU free → TRT/CUDA OOMs.
-    onnx_providers: ["CPUExecutionProvider"]
-    # Detection confidence floor. A tall/vertical cardboard box detects at only
-    # ~0.16-0.20 with the open-vocab YOLOE box head (real-machine 2026-06-12),
-    # so the 0.25 default would miss it. 0.15 is low enough to catch the box;
-    # the grasp filters to the box class only so a false positive is unlikely.
-    conf: ${REBOT_GRASP_CONF:-0.15}
+    # GPU inference (2026-07-14): TensorRT EP with engine cache at /trt-cache
+    # (sm87; ~6min first build, ~6s reload). The TRT session pins ~0.8-1.6GB
+    # unified RAM; yolo_onnx demotes to CPU below REBOT_GPU_MIN_AVAIL_MB
+    # (default 1200MB, boot-dip retries via REBOT_GPU_GATE_RETRIES) at
+    # session-create and rebuilds on CPU if a GPU predict fails mid-run.
+    # Device-verified 2026-07-14: capture 4-6s → 0.6-1.6s, grasp ~22.6s → ~11s.
+    # ROLLBACK: onnx_providers: ["CPUExecutionProvider"] + docker restart.
+    onnx_providers:
+      - ["TensorrtExecutionProvider", {"trt_engine_cache_enable": "True",
+         "trt_engine_cache_path": "/trt-cache",
+         "trt_timing_cache_enable": "True",
+         "trt_max_workspace_size": "536870912"}]
+      - "CPUExecutionProvider"
+    # Detection confidence floor. A tall/vertical cardboard box detects at
+    # ~0.16-0.20 (real-machine 2026-06-12) and a standing water/juice bottle
+    # at only 0.11-0.19 with the multi-class export (real-machine 2026-07-07)
+    # — the old 0.10 floor made bottle detection intermittent ("couldn't find
+    # the water bottle" between successful grasps). 0.06 gives the marginal
+    # classes headroom; the grasp filters to the requested class so false
+    # positives stay unlikely.
+    conf: ${REBOT_GRASP_CONF:-0.06}
     # Orbbec Gemini2 (color+depth+intrinsics via SDK at open time).
     camera:
       type: "orbbec_gemini2"
@@ -477,22 +494,30 @@ metadata:
       "yellow banana": ${REBOT_GRASP_FORCE_BANANA:-0.35}
       orange: ${REBOT_GRASP_FORCE_ORANGE:-0.35}
       cup: ${REBOT_GRASP_FORCE_CUP:-0.30}
-      "water bottle": ${REBOT_GRASP_FORCE_BOTTLE:-0.5}
+      # 0.8 (was 0.5): a smooth rigid plastic bottle needs a box-grade clamp
+      # — 0.5 fixed still slipped on lift (real machine 2026-07-07).
+      "water bottle": ${REBOT_GRASP_FORCE_BOTTLE:-0.8}
     # Classes that use their grasp_force_by_class value as a FIXED grip even
     # when adaptive_force_default=true (the configured force OVERRIDES the ramp).
     # Rigid objects (the box family) belong here: the adaptive ramp settles at
     # the lowest force that stops the gap creeping, but a rigid box never
     # compresses → it reads "stable" at the ~0.2 ramp start → too weak, and once
     # the jaw is aligned flush (2026-06-16 grasp-angle fix) the box slides out.
-    # Soft classes (fruit/cup) stay OFF this list so they keep the crush-avoiding
-    # ramp. Env override (JSON list): REBOT_FORCE_FIXED_CLASSES.
-    grasp_force_fixed_classes: ["box", "cardboard box", "carton", "package"]
+    # "water bottle" added 2026-07-07: a rigid plastic bottle hits the exact
+    # same trap (no compression → ramp settles at ~0.2 → slips on lift);
+    # fixed-force at its 0.8 ceiling is what finally held on the real arm.
+    # Soft classes (fruit/cup) stay OFF this list so they keep the
+    # crush-avoiding ramp. Env override (JSON list): REBOT_FORCE_FIXED_CLASSES.
+    grasp_force_fixed_classes: ["box", "cardboard box", "carton", "package", "water bottle"]
     # How far the TCP advances along the approach axis past the detected grasp
     # point before closing (m). Pipeline default was 0.015 — real-machine feel
     # "抓得浅": the jaw barely wrapped the box rim. 0.025 wraps ~1cm deeper for
-    # a fuller-contact grip; raise further with care (TCP presses lower —
-    # watch for table contact on short objects).
-    insertion_depth_m: ${REBOT_GRASP_INSERT:-0.025}
+    # a fuller-contact grip. 0.040 (2026-07-07): with the cylinder/elongated
+    # routes' level side approach, 0.025 still left only the fingertips on a
+    # bottle's curved body — 0.040 wraps past the curve. Box regression-tested
+    # OK at 0.040; raise further with care (TCP presses lower — watch for
+    # table contact on short objects).
+    insertion_depth_m: ${REBOT_GRASP_INSERT:-0.040}
     # Per-waypoint motion time for the grasp pipeline (s). 2.0 was the
     # conservative bring-up value; the B601 trajectory runs 1.4 cleanly —
     # saves ~2.5-3s per grasp across the 4-5 moves (validated by cycle runs).
@@ -514,7 +539,7 @@ metadata:
     # suspiciously wide (>0.085m), move the camera to the validated sweet-spot
     # viewing distance and re-measure before committing (side-view silhouette
     # inflation fix). One extra move only in those cases.
-    reobserve: true
+    reobserve: false
     # GG-CNN2 depth-grasp refiner (Phase 3): consistency check for plane
     # grasps (disagreement → re-observation) + PRIMARY estimator for curved
     # objects (plane fit fails on fruit — that failure routes here). Ships
@@ -524,7 +549,9 @@ metadata:
     ggcnn_refiner: ${REBOT_GGCNN:-true}
     # Servo-lite correction: one re-detection from the pregrasp pose shifts
     # the grasp x/y by the measured drift (≤3cm) — cancels calibration
-    # residue + far-view parallax in the final approach.
+    # residue + far-view parallax in the final approach. ON since 2026-07-10
+    # (chronic lateral aim offset); a >30mm guard discards the re-detection
+    # when the pregrasp is inside the camera's close-range blind zone.
     servo_correct: true
     # Base-frame sanity box [x_min,x_max, y_min,y_max, z_min,z_max] for the
     # computed grasp point. GARBAGE-ONLY bounds: catch depth-noise artefacts
