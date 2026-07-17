@@ -64,9 +64,23 @@ WORKDIR /opt/slv
 # 6-joint + gripper motor map; our actuator copies it and overrides only the
 # `channel` field at connect time. Pinned to the verified commit.
 ARG REBOT_SDK_REF=893f09568db51d4da46b2c368f995d3421161bd6
+# SDK patches (no push access to vectorBH6, so device-verified fixes ride
+# along as patches applied after the pinned checkout):
+#   0001: enable() auto-clears latched Damiao faults in-band (status 12 = coil
+#         over-temp — the chronic joint-4 boot lockout; clear_error() verified
+#         live on-device 2026-07-14/15, no power cycle needed; capped per motor
+#         so a genuinely faulting motor still fails loudly).
+#   0002: move_to_traj CLIK fallback — the single-shot IK solve is
+#         seed-sensitive and rejects reachable poses; plan straight to the
+#         target and accept only if tracking provably arrived (all waypoints
+#         solved, endpoint ≤10mm, no elbow-flip joint jumps). Kills the
+#         chronic sporadic "pregrasp IK failed".
+COPY agent/rebot-sdk-patches /tmp/rebot-sdk-patches
 RUN git clone https://github.com/vectorBH6/reBotArm_control_py.git \
         /opt/rebot/reBotArm_control_py \
     && git -C /opt/rebot/reBotArm_control_py checkout ${REBOT_SDK_REF} \
+    && git -C /opt/rebot/reBotArm_control_py apply --stat --apply \
+        /tmp/rebot-sdk-patches/*.patch \
     && pip install --no-cache-dir -e /opt/rebot/reBotArm_control_py
 
 # Python deps:

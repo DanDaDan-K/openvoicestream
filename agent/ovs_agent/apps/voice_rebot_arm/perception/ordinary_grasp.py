@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import os as _os
+_DEF_SIDE_ONLY = '["cup"]'
 import cv2
 import numpy as np
 
@@ -67,6 +69,10 @@ class GraspPose:
     # of partly down the tilted camera ray (which both lowers the grip and
     # shallows the wrap → the box slips). See grasp_geometry.finalize_grasp_pose.
     insertion_axis_cam: "Optional[np.ndarray]" = None
+    # Narrowest visible side-face width (m) seen for this box even when NO
+    # side candidate fit the jaw. Set on a "too_wide" reject so the orbit
+    # logic knows a box WAS measured and how wide its thinnest face was.
+    min_side_width_m: "Optional[float]" = None
 
     @property
     def is_valid(self) -> bool:
@@ -127,6 +133,9 @@ def estimate_grasp(
     ggcnn: Any = None,
 ) -> GraspPose:
     class_name, conf, bbox_xyxy = _detection_meta(result, index)
+    try:
+        import logging as _lg; _lg.getLogger(__name__).info("KDBG depth_shape=%s K_fx=%.1f fy=%.1f cx=%.1f cy=%.1f", depth_mm.shape, float(K[0,0]),float(K[1,1]),float(K[0,2]),float(K[1,2]))
+    except Exception: pass
     rect_points = _rect_points(result, index, depth_mm.shape, bbox_xyxy)
     center = rect_points.mean(axis=0).astype(np.float32)
 
@@ -174,8 +183,19 @@ def estimate_grasp(
     desc = None
     if up_hint_cam is not None:
         desc = _shape_descriptor(
-            mask, depth_mm, K, np.asarray(up_hint_cam, dtype=np.float64)
+            mask, depth_mm, K, np.asarray(up_hint_cam, dtype=np.float64),
+            bbox_xyxy=bbox_xyxy,
         )
+        if desc is not None:              #debug log
+            import logging as _lg; _lg.getLogger(__name__).info(
+                "SHAPEDBG elong=%.2f planar=%.3f round=%.2f spine=%.3f "
+                "extents(maj/mid/min)=%.3f/%.3f/%.3f top_align=%.2f npts=%d "
+                "table_proj=%.4f up_cam_none=%s",
+                desc.elongation, desc.planarity, desc.roundness, desc.spine_bend,
+                desc.extent_major, desc.extent_mid, desc.extent_minor,
+                desc.top_align, desc.n_points,
+                desc.table_proj, desc.up_cam is None,
+            )
     # PLANAR-TOPPED gate (the box guard): a confident, up-aligned top plane (the
     # RANSAC fit in ``_top_face_grasp`` only returns non-None when it finds a
     # plane with >= min_inliers inliers whose normal aligns with up >= 0.85)
@@ -194,6 +214,32 @@ def estimate_grasp(
     # the actual RANSAC top-plane fit, which is the reliable planar-top signal
     # under a multi-face box shell where the full-cloud planarity is high.
     _planar_topped = top is not None
+
+    if (
+        desc is not None
+        and (top is None or float(desc.elongation) >= 8.0)
+        and float(desc.elongation) >= 3.0
+        and float(desc.extent_minor) <= 0.07
+    ):
+        g = _descriptor_grasp(
+            desc, class_name, conf, bbox_xyxy, rect_points, K
+        )
+        if g is not None:
+            return g
+     
+    # the issue was: Camera could detect a bottle, but the restrictions the restrictions C and D 
+    # were preventing the code from executing,
+    # Restrictios C and D ask "is the object tall" and " is the long axis vertical?". So things like bottle answer yes
+    # to both questions, that is why only the code for tall boxes (not bottles) is executed! The guards couldn't tell them apart.
+    # They never check roundness/elongation, so a standing bottle looks identical to a box to them and gets blocked too.
+    # they perceived the bottle as a box and the code that was made
+    # specifically for bottles (and etc) was not executed
+    # The block above runs BEFORE C/D 
+    # Asks the question: "is it a strong rod? (is elong >= 4.0)," does it fit the jaw? (extent_minor <=0.07) 
+    # and has no box-top (top is None)?"
+    # If yes, it's a bottle/cup(something cylindrical). Then grab it directly and return, so C/D never get to block it.
+
+
     # EXCEPTION (real machine 2026-06-17): an OVER-WIDE top plane on a clearly
     # ELONGATED object must NOT suppress the descriptor. A box lying flat (e.g.
     # 0.165×0.085×0.043m) returns a borderline-over-wide top (0.088 → dropped by
@@ -214,7 +260,7 @@ def estimate_grasp(
     # A side candidate with a sane (fit-jaw) horizontal extent is the tall-box
     # case where the top is out of view but a vertical face is graspable — also a
     # box, handled by the side path below ⇒ also suppress the descriptor.
-    _side_box = any(c[3] <= 0.088 for c in side_cands)
+    _side_box = any(c[3] <= 0.095 for c in side_cands)
     # A TALL upright box reads as "elongated" (its major axis is the vertical
     # extent) but it is NOT a lying banana/bottle — the existing top/side path
     # owns it (IK-aware camera-ray approach, 8fb88ac over-wide guard). Defer to
@@ -229,11 +275,19 @@ def estimate_grasp(
         up = np.asarray(up_hint_cam, dtype=np.float64)
         up = up / max(float(np.linalg.norm(up)), 1e-9)
         _major_is_vertical = abs(float(np.dot(desc.axes[:, 0], up))) >= 0.70
+    # FORCE-SIDE demo guard (2026-07-03): a TALL box must never take the
+    # descriptor/near_square path — at steep angles it produced a floor-level
+    # tilted grasp (z~2.7cm) that dove into the table. When forced-side is on
+    # and the box is tall (>=10cm), skip it so the side/top arbitration owns
+    # the box (top is dropped there → side_face or a clean decline).
+    _force_side_on = _os.environ.get("REBOT_FORCE_SIDE", "1") == "1"
+    _tall_box = desc is not None and float(getattr(desc, "extent_major", 0.0) or 0.0) >= 0.10
     if (
         desc is not None
         and not _planar_topped
         and not _side_box
         and not _major_is_vertical
+        and not (_force_side_on and _tall_box)
     ):
         g = _descriptor_grasp(
             desc, class_name, conf, bbox_xyxy, rect_points, K
@@ -292,12 +346,41 @@ def estimate_grasp(
             )
         if _tall_upright and any(c[3] <= 0.085 for c in side_cands):
             top = None
+        # FORCE-SIDE (2026-07-03, demo): tall standing boxes must be grabbed
+        # side_face; the top_face path takes a ~45deg tilted approach that
+        # grabs air / froze. Default ON — drop the top fit whenever a side
+        # candidate that fits the jaw exists. Set REBOT_FORCE_SIDE=0 to
+        # restore the top/side arbitration.
+        # UNCONDITIONAL when ON: drop top even with NO side candidate, so a
+        # steep-angle box that yields no graspable side face DECLINES instead
+        # of taking the tilted top_face dive-into-floor (2026-07-03 demo).
+        if _os.environ.get("REBOT_FORCE_SIDE", "1") == "1":
+            top = None
         if top is None and side_cands:
             best_side = min(
                 (c for c in side_cands if c[3] <= 0.085),
                 key=lambda c: c[3],
                 default=None,
             )
+            # TOO-WIDE signal for the wide-box orbit: a box face WAS measured
+            # but every visible side candidate is wider than the jaw. Return a
+            # 'too_wide' reject carrying the narrowest face + its camera pos so
+            # run_grasp_once can orbit to look at the thin side (or decline).
+            if best_side is None:
+                _tw = min(side_cands, key=lambda c: c[3])
+                _tw_pos = np.asarray(_tw[0], dtype=np.float32)
+                _u, _v = _project(_tw_pos, K)
+                return GraspPose(
+                    class_name=class_name, conf=conf, bbox_xyxy=bbox_xyxy,
+                    center_px=(int(round(_u)), int(round(_v))),
+                    position=_tw_pos, rotation=None, tcp_rotation=None,
+                    jaw_width_m=float(_tw[3]), object_length_m=float(_tw[4]),
+                    angle_deg=0.0, rect_points=rect_points,
+                    short_edge_points=rect_points,
+                    valid_depth_pixels=int(_tw[5]),
+                    rejected_reason='too_wide', method='too_wide',
+                    min_side_width_m=float(_tw[3]),
+                )
             if best_side is not None:
                 c_pos, horiz, _n_cam, h_width, v_len, n_in = best_side
                 # Approach LEVEL into the vertical face along the FACE NORMAL,
@@ -421,6 +504,28 @@ def estimate_grasp(
                     ggcnn_agree=agree,
                 )
     # ── GG-CNN PRIMARY (curved/irregular objects) ──────────────────────
+    # SIDE-ONLY classes (2026-07-13): a cup must never take the top/legacy
+    # camera-ray dive. A cup is curved, so the side-face RANSAC finds a face
+    # only intermittently; frames WITHOUT a face fell through to the legacy
+    # route, planned z=-0.005 (below base zero, fingers into the table) and
+    # OUTVOTED the one good side_face frame 2:1 in the temporal aggregate.
+    # Declining the faceless frame is strictly better: side_face frames then
+    # own the vote, and if NO frame finds a face the grasp declines instead
+    # of diving. Env: REBOT_SIDE_ONLY_CLASSES (JSON list, default cup).
+    import json as _json
+    _side_only_raw = _os.environ.get("REBOT_SIDE_ONLY_CLASSES", None) or _DEF_SIDE_ONLY
+    try:
+        _side_only = {str(s).lower() for s in _json.loads(_side_only_raw)}
+    except Exception:
+        _side_only = {"cup"}
+    if str(class_name).lower() in _side_only:
+        _cx = int(round(0.5 * (bbox_xyxy[0] + bbox_xyxy[2])))
+        _cy = int(round(0.5 * (bbox_xyxy[1] + bbox_xyxy[3])))
+        return _rejected(
+            class_name, conf, bbox_xyxy, (_cx, _cy), rect_points,
+            rect_points, 0, "side_only_no_face",
+        )
+
     # Reaching here means NO plane fit held (the plane-failure itself is the
     # curved-object detector). When the refiner is enabled, its per-pixel
     # quality map replaces the weak silhouette geometry: grasp point + angle
@@ -863,6 +968,7 @@ def _mask_cloud(
     max_points: int = 3000,
     erode_k: int = 7,
     seed: int = 0,
+    bbox_xyxy: Optional[tuple[int, int, int, int]] = None,
 ) -> Optional[np.ndarray]:
     """Backproject the eroded mask to a camera-frame 3D cloud (N,3) metres.
 
@@ -870,6 +976,18 @@ def _mask_cloud(
     seg edge-bleed), keep depth>0, band-pass the depths around the median
     (±``band_m``), subsample to ``max_points``. Returns ``None`` when fewer than
     ``min_points`` survive (caller routes to the legacy 2D fallback).
+
+    ``band_m`` is a FIXED 12cm ceiling, sized for a bottle/box. On a small
+    object (orange, ~6cm) that band reaches past the body into the table or a
+    neighbouring object, and because a curved body has no flat surface to
+    anchor the PCA, a few frames' worth of leaked background points swing
+    elongation between ~2 and ~90 frame-to-frame (real machine 2026-07-13:
+    npts wobbled 951-2850, elongation 2.37-92.08, on a stationary orange).
+    When ``bbox_xyxy`` is given, shrink the band to the object's own
+    metric size (bbox diagonal, back-projected through the median depth)
+    instead of the fixed ceiling — clamped to [0.04, 0.12]m so small objects
+    get a tight band while bottles/boxes keep today's 0.12m behaviour
+    byte-identical (their bbox diagonal already exceeds the ceiling).
     """
     mask_in = cv2.erode(
         (mask > 0).astype(np.uint8), np.ones((erode_k, erode_k), dtype=np.uint8)
@@ -883,6 +1001,13 @@ def _mask_cloud(
     if len(xs) < min_points:
         return None
     z_med = float(np.median(z))
+    if bbox_xyxy is not None:
+        x1, y1, x2, y2 = bbox_xyxy
+        fx, fy = float(K[0, 0]), float(K[1, 1])
+        w_m = (float(x2) - float(x1)) * z_med / max(fx, 1e-6)
+        h_m = (float(y2) - float(y1)) * z_med / max(fy, 1e-6)
+        obj_diag_m = float(np.hypot(w_m, h_m))
+        band_m = float(np.clip(obj_diag_m, 0.04, band_m))
     band = np.abs(z - z_med) <= band_m
     xs, ys, z = xs[band], ys[band], z[band]
     if len(xs) < min_points:
@@ -903,10 +1028,11 @@ def _shape_descriptor(
     depth_mm: np.ndarray,
     K: np.ndarray,
     up_cam: Optional[np.ndarray],
+    bbox_xyxy: Optional[tuple[int, int, int, int]] = None,
 ) -> Optional[ShapeDescriptor]:
     """Compute the shared :class:`ShapeDescriptor`, or ``None`` if the cloud is
     too sparse (< 200 pts) — the caller then uses the legacy 2D path."""
-    pts = _mask_cloud(mask, depth_mm, K)
+    pts = _mask_cloud(mask, depth_mm, K, bbox_xyxy=bbox_xyxy)
     if pts is None or len(pts) < 200:
         return None
     # ── OUTLIER-ROBUST PCA (noise hardening, 2026-06-16) ───────────────────
@@ -1013,6 +1139,7 @@ def _pose_from_axes(
     K: np.ndarray,
     method: str,
     recenter_depth_m: float = 0.0,
+    standing: bool = False,
     up_cam: Optional[np.ndarray] = None,
     table_proj: float = 0.0,
 ) -> Optional[GraspPose]:
@@ -1030,12 +1157,93 @@ def _pose_from_axes(
     Returns ``None`` if the axis construction degenerates OR the jaw width is
     over the 0.088 m physical limit (same over-wide rejection as every route).
     """
-    if width_m > 0.088:
+    if width_m > 0.095:
         return None
     position = np.asarray(position, dtype=np.float64)
     approach = _normalize(-position)
     if approach is None:
         approach = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+
+    # FORCE-HORIZONTAL APPROACH for standing rods
+    # The camera-ray approach (-position) inherits the camera's downward
+    # view tilt (~33°), which for a STANDING object dives at it from above.
+    # A standing rod wants a LEVEL side grip: flatten the approach into the
+    # horizontal plane (remove its component along up) so the gripper reaches
+    # in sideways. Only when we know up AND the object stands tall.
+    if up_cam is not None and standing and method in ("cylinder", "elongated"):
+        up = np.asarray(up_cam, dtype=np.float64)
+        up = up / max(float(np.linalg.norm(up)), 1e-9)
+        a_flat = approach - float(np.dot(approach, up)) * up
+        a_flat = _normalize(a_flat)
+        if a_flat is not None:
+            approach = a_flat
+    elif up_cam is not None and method == "round":
+        # FORCE-HORIZONTAL for round objects (real machine 2026-07-14,
+        # orange): "round" has no meaningful `standing` orientation (the
+        # major axis is isotropic noise on a sphere), so it never took the
+        # branch above and fell through to the raw camera-ray default —
+        # inheriting the camera's ~33-40° downward tilt. That drove the
+        # STANDPIN-computed equator height (below, `_standing or elong<1.35`
+        # already pins round objects there) off target: the recenter push
+        # along a mostly-vertical approach shoved the grasp point DOWN into
+        # the table-safety floor instead of sideways into the body, and the
+        # resulting steep, low, shallow contact held with only 0.20 N·m
+        # adaptive force and slipped during the carry-home lift. A sphere is
+        # isotropic, so — unlike a lying rod — there is no orientation this
+        # would break: always flatten to a level, equator-height side grip.
+        up = np.asarray(up_cam, dtype=np.float64)
+        up = up / max(float(np.linalg.norm(up)), 1e-9)
+        a_flat = approach - float(np.dot(approach, up)) * up
+        a_flat = _normalize(a_flat)
+        if a_flat is not None:
+            approach = a_flat
+        # ROLL-LOCK (real machine 2026-07-14, second incident): passing
+        # `up_cam` itself as the open axis (first attempt at this fix) opens
+        # the jaw VERTICALLY — measured r=1.571 = exactly pi/2, a 90° roll
+        # off home that produced a visibly rotated, failed grasp. A sphere's
+        # open axis is free to pick (isotropic — costs nothing per the route
+        # comment above), so pick the one that keeps roll at 0: the HORIZONTAL
+        # direction perpendicular to both up and the (now-flattened) approach,
+        # matching side_face's own convention (`horiz = cross(n_cam, up)`,
+        # ordinary_grasp.py ~1588) — the box demo's r=0.000 confirms that
+        # convention is what this arm's home/zero-roll expects.
+        _round_horiz = _normalize(np.cross(up, approach))
+        if _round_horiz is not None:
+            open_axis_cam = _round_horiz
+    elif up_cam is not None and not standing and method in ("cylinder", "elongated"):
+         # Distance-adaptive descent (2026-07-09, user design): the measured
+        # IK envelope allows near-vertical only CLOSE to the base (pitch
+        # 1.57 = 100% at x 0.25-0.30) and demands gentler slopes with
+        # reach — and the live trajectory solver failed (IK 失败, err up to
+        # 0.24) even at pitch 0.90 / x 0.49 once the ~90° jaw roll is
+        # included. Camera-to-object range is the distance proxy here
+        # (base-frame reach isn't available in this layer).
+        rng = float(np.linalg.norm(position))
+        if rng < 0.50:
+            # k 0.80→0.35 (2026-07-09, user design + envelope data): in the
+            # MID zone (x 0.30-0.45) pitch 1.20 is 180/180 feasible and even
+            # 1.57 is 175/180 — the top-grab works HERE, not far out.
+            k = 0.35   # pitch ~1.23 — near-top grab
+        else:
+            k = 1.40   # pitch ~0.62 — gentle slope for far objects
+        up = np.asarray(up_cam, dtype=np.float64)
+        up = up / max(float(np.linalg.norm(up)), 1e-9)
+        cam_h = _normalize(approach - float(np.dot(approach, up)) * up)
+        if cam_h is not None:
+            tilted = _normalize(up + k * cam_h)
+            approach = tilted if tilted is not None else up
+        else:
+            approach = up
+             # The height pin added the FULL insertion depth vertically, but the
+
+             
+                # executor inserts ALONG the approach — the vertical component is
+                # only insert*dot(approach,up). Remove the overshoot so the fingers
+                # land mid-body at ANY pitch (at pitch 0.62 they closed ~1cm ABOVE
+                # a 2cm banana → fully-shut jaw, "nothing held").
+        _ins = float(_os.environ.get("REBOT_GRASP_INSERT", "0.040") or 0.040)
+        position = position - up * (_ins * (1.0 - float(np.dot(approach, up))))
+
     if recenter_depth_m > 0.0:
         # approach points TOWARD the camera; -approach goes into the object.
         position = position - approach * float(recenter_depth_m)
@@ -1121,6 +1329,57 @@ def _descriptor_grasp(
     minor = desc.axes[:, 2]
     pos = desc.centroid
 
+    # Is the rod STANDING (major axis ∥ gravity)? Standing rods get the
+    # level side approach + pinned grip height (proven on the real bottle,
+    # 2026-07-07). LYING rods must NOT: a level approach + 90° wrist roll
+    # swept a finger below the table and clamped the table edge instead of
+    # the banana (real machine 2026-07-08, joint4 fault) — they keep the
+    # route's original camera-ray top-down grasp.
+    _standing = False
+    if desc.up_cam is not None:
+        _up = np.asarray(desc.up_cam, dtype=np.float64)
+        _up = _up / max(float(np.linalg.norm(_up)), 1e-9)
+        _standing = abs(float(np.dot(desc.axes[:, 0], _up))) >= 0.7
+
+
+    # ── STANDING-ROD HEIGHT: grip at a fixed fraction up from the base ──
+    # The centroid's HEIGHT wobbles frame-to-frame (depends on how much of the
+    # bottle the depth view caught), which made the grip height jump. Pin it
+    # explicitly: grip at REBOT_STAND_HEIGHT_FRAC (default 45%) of the object's
+    # height above its measured table footprint — low enough that a full
+    # bottle stays below its centre of mass and doesn't pivot out. Horizontal
+    # position (where the bottle sits) is kept; only the up-component of pos
+    # is overridden.
+
+    if desc.up_cam is not None and desc.extent_major > 0.0 and (_standing or desc.elongation < 1.35):
+        up = np.asarray(desc.up_cam, dtype=np.float64)
+        up = up / max(float(np.linalg.norm(up)), 1e-9)
+        cur_h = float(np.dot(pos, up))
+        _frac = float(_os.environ.get("REBOT_STAND_HEIGHT_FRAC", "0.45") or 0.45)
+        # +0.035: the committed base-frame z lands ~3.5cm below this pin's
+        # intent — same offset the LYING pin corrects for (2026-07-09); this
+        # branch was missing it, so the old 0.55 landed at ~30% real height.
+        want_h = float(desc.table_proj) + _frac * float(desc.extent_major) + 0.035
+        import logging as _lg
+        _lg.getLogger(__name__).info(
+            "STANDPIN cur_h=%.4f want_h=%.4f (table_proj=%.4f frac=%.2f major=%.3f)",
+            cur_h, want_h, float(desc.table_proj), _frac, float(desc.extent_major))
+        pos = pos + up * (want_h - cur_h)
+    elif desc.up_cam is not None and desc.extent_major > 0.0:
+        # LYING rod (2026-07-08): pin ABOVE the body so the executor's
+        # insertion push (REBOT_GRASP_INSERT, straight DOWN with the
+        # vertical approach) lands the fingers at mid-body height:
+        # want = table + half body height + insertion.
+        _insert = float(_os.environ.get("REBOT_GRASP_INSERT", "0.040") or 0.040)
+        up = np.asarray(desc.up_cam, dtype=np.float64)
+        up = up / max(float(np.linalg.norm(up)), 1e-9)
+        cur_h = float(np.dot(pos, up))
+        # +0.035 empirical frame-offset correction (2026-07-09): the committed
+        # base-frame z consistently lands ~3.5cm below this pin's intent
+        # (measured -0.009 when ~+0.03 was wanted, same gap on 07-08).
+        want_h = float(desc.table_proj) + 0.5 * float(desc.extent_minor) + _insert + 0.035
+        pos = pos + up * (want_h - cur_h)
+    
     elong = desc.elongation
     planar = desc.planarity
 
@@ -1135,9 +1394,10 @@ def _descriptor_grasp(
         open_axis, diameter = mid, desc.extent_mid
         return _pose_from_axes(
             class_name, conf, bbox_xyxy, pos, open_axis,
-            width_m=diameter, length_m=desc.extent_major,
+            width_m=max(diameter - 0.012, 0.015), length_m=desc.extent_major,
             n_points=desc.n_points, rect_points=rect_points, K=K,
-            method="cylinder", recenter_depth_m=0.5 * desc.extent_mid,
+            method="cylinder", recenter_depth_m=(0.7 * desc.extent_mid) if _standing else 0.0,
+            standing=_standing,
             up_cam=desc.up_cam, table_proj=desc.table_proj,
         )
 
@@ -1160,9 +1420,10 @@ def _descriptor_grasp(
             open_axis, width = minor, desc.extent_minor
         return _pose_from_axes(
             class_name, conf, bbox_xyxy, pos, open_axis,
-            width_m=width, length_m=desc.extent_major,
+            width_m=max(width - 0.012, 0.015), length_m=desc.extent_major,
             n_points=desc.n_points, rect_points=rect_points, K=K,
-            method="elongated", recenter_depth_m=0.5 * width,
+            method="elongated", recenter_depth_m=(0.7 * width) if _standing else 0.0,
+            standing=_standing,
             up_cam=desc.up_cam, table_proj=desc.table_proj,
         )
 
@@ -1175,13 +1436,21 @@ def _descriptor_grasp(
     # gate is relaxed to 0.045. ``elongation<1.35`` already separates round from
     # the rods; this only distinguishes a round blob from a flat near-square
     # plate (lower planarity) for the method LABEL — both grasp the centroid.
-    if elong < 1.35 and planar > 0.045:
+    #
+    # open_axis: the noisy PCA `mid` axis is passed through here (harmless —
+    # `_pose_from_axes` OVERRIDES it with a horizontal axis for method=="round",
+    # see the FORCE-HORIZONTAL block there). Keeping `mid` as the nominal
+    # argument (not `up_cam`) matters: `up_cam` there would open the jaw
+    # VERTICALLY — an exact 90° roll off home (real machine 2026-07-14,
+    # r=1.571 measured — confirmed a mis-pick, not noise). The horizontal
+    # override in `_pose_from_axes` keeps roll at 0, matching home/side_face.
+    if elong < 1.35 and planar > 0.03:
         width = max(desc.extent_mid, desc.extent_minor)
         return _pose_from_axes(
             class_name, conf, bbox_xyxy, pos, mid,
             width_m=width, length_m=desc.extent_major,
             n_points=desc.n_points, rect_points=rect_points, K=K,
-            method="round", recenter_depth_m=0.5 * width,
+            method="round", recenter_depth_m=0.7 * width,
             up_cam=desc.up_cam, table_proj=desc.table_proj,
         )
 
@@ -1333,6 +1602,19 @@ def _top_face_grasp(
                     h_width = float(np.percentile(h_coord, 95) - np.percentile(h_coord, 5))
                     v_len = float(np.percentile(v_coord, 95) - np.percentile(v_coord, 5))
                     if h_width >= 0.005 and side_out is not None:
+                        # Grasp point = inlier centroid (extent-midpoint tried
+                        # 2026-07-10 planned LOWER — a sparse below-box point
+                        # tail drags the 5-95% midpoint down harder than it
+                        # drags the density centroid; reverted same day).
+                        import logging as _lg
+                        _v5 = float(np.percentile(v_coord, 5))
+                        _v95 = float(np.percentile(v_coord, 95))
+                        _lg.getLogger(__name__).info(
+                            "SIDEDBG inliers=%d h_width=%.3f v_len=%.3f "
+                            "v_mid_offset=%+.3f (centroid kept)",
+                            int(best_inliers.sum()), h_width, v_len,
+                            0.5 * (_v95 + _v5),
+                        )
                         side_out.append((centroid, horiz, n_cam, h_width, v_len,
                                          int(best_inliers.sum())))
         # remove this plane's inliers and try the next-largest candidate.

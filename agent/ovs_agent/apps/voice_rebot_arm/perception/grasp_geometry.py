@@ -66,6 +66,16 @@ def finalize_grasp_pose(best, T_cam2base, pregrasp_offset_m, insertion_depth_m):
         insertion_depth_m=insertion,
         offset_axis_cam=offset_axis,
     )
+    try:
+        _raw6d, _ = transform_grasp_pose_to_base(
+            best.position, best.tcp_rotation, T_cam2base,
+            pregrasp_offset_m, insertion_depth_m=0.0,
+            offset_axis_cam=offset_axis)
+        logger.info("FINDBG2 raw_base_z=%.4f insertion=%.3fm -> committed z=%.4f "
+                    "(insertion drop %.1fmm)", float(_raw6d[2]), float(insertion),
+                    float(grasp6d[2]), (float(_raw6d[2]) - float(grasp6d[2])) * 1000.0)
+    except Exception:
+        logger.debug("FINDBG2 failed", exc_info=True)
     if method == "top_face":
         surf = (
             np.asarray(T_cam2base, dtype=np.float64)
@@ -73,7 +83,7 @@ def finalize_grasp_pose(best, T_cam2base, pregrasp_offset_m, insertion_depth_m):
         )[:3]
         dx = float(surf[0]) - float(grasp6d[0])
         dy = float(surf[1]) - float(grasp6d[1])
-        z_bite = max(float(surf[2]) - 0.028, 0.025)
+        z_bite = max(float(surf[2]) - 0.018, 0.025)
         gz = min(float(grasp6d[2]), z_bite)
         logger.info(
             "grasp: centred top-grasp on centroid (dx %.3f dy %.3f) "
@@ -84,4 +94,49 @@ def finalize_grasp_pose(best, T_cam2base, pregrasp_offset_m, insertion_depth_m):
                    *(float(v) for v in grasp6d[3:])]
         pre6d = [float(pre6d[0]) + dx, float(pre6d[1]) + dy,
                  *(float(v) for v in pre6d[2:])]
+    # FWD_FIX: arm lands ~2-3cm short in forward x; nudge grasp+pregrasp forward
+    import os as _os
+    _fwd = float(_os.environ.get("REBOT_GRASP_FWD_M", "0.025"))
+    grasp6d = [grasp6d[0] + _fwd, *grasp6d[1:]]
+    pre6d = [pre6d[0] + _fwd, *pre6d[1:]]
+    # SIDE-GRASP Z FLOOR (base frame): table-edge noise in the face fit can
+    # plan the grip at table level — the wrist then drags the table and the
+    # jaw closes on air/box-bottom. A side grasp below ~4cm is never right on
+    # this rig (table sits ≈0.005-0.015m): clamp, and lift the pregrasp by the
+    # same amount so the approach line stays level.
+    if method == "side_face":
+        _zmin = float(_os.environ.get("REBOT_SIDE_ZMIN", "0.040"))
+        # Per-class floor (2026-07-14): at the generic 0.040 the jaw scrapes
+        # the table on cups; short boxes must stay low, so only listed
+        # classes get a taller floor.
+        import json as _json
+        try:
+            _by_cls = _json.loads(_os.environ.get(
+                "REBOT_SIDE_ZMIN_BY_CLASS", '{"cup": 0.055}'))
+            _zmin = float(_by_cls.get(
+                str(getattr(best, "class_name", "")).lower(), _zmin))
+        except Exception:
+            pass
+        if float(grasp6d[2]) < _zmin:
+            _dz = _zmin - float(grasp6d[2])
+            logger.info(
+                "grasp: side z %.3f below floor %.3f — raised %.0fmm",
+                float(grasp6d[2]), _zmin, _dz * 1000.0,
+            )
+            grasp6d = [grasp6d[0], grasp6d[1], _zmin, *grasp6d[3:]]
+            pre6d = [pre6d[0], pre6d[1], float(pre6d[2]) + _dz, *pre6d[3:]]
+    # UNIVERSAL Z FLOOR (2026-07-13): the legacy route committed a grasp at
+    # z=-0.005 — below base zero, finger tips into the table (cup incident).
+    # NO method may commit a TCP below this floor. Kept low enough (0.015)
+    # that legitimate top-face bites (>=0.025) and descriptor plans are
+    # untouched; the side_face floor above stays stricter (0.040).
+    _zuni = float(_os.environ.get("REBOT_Z_FLOOR_M", "0.015"))
+    if float(grasp6d[2]) < _zuni:
+        _dzu = _zuni - float(grasp6d[2])
+        logger.info(
+            "grasp: %s z %.3f below UNIVERSAL floor %.3f — raised %.0fmm",
+            method, float(grasp6d[2]), _zuni, _dzu * 1000.0,
+        )
+        grasp6d = [grasp6d[0], grasp6d[1], _zuni, *grasp6d[3:]]
+        pre6d = [pre6d[0], pre6d[1], float(pre6d[2]) + _dzu, *pre6d[3:]]
     return [float(v) for v in grasp6d], [float(v) for v in pre6d]

@@ -47,12 +47,39 @@ services:
       retries: 3
       start_period: 120s
 
+  # ── One-shot init: curate TensorRT/cuDNN libs for the detector's GPU path ──
+  # Copies just the needed host JetPack libs into the trt-libs volume.
+  # Mounting all of /usr/lib/aarch64-linux-gnu directly would shadow the
+  # container's own libs and segfault the loader (verified on device) —
+  # copying this curated set is the safe pattern. Idempotent; ~1.4 GB once.
+  # If the libs are absent the agent falls back to CPU inference on its own.
+  gpu-libs-init:
+    image: ${AGENT_IMAGE:-voice-rebot-arm:dev}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -e /trt-libs/libnvinfer.so.10 ]; then echo "trt-libs present, skipping"; exit 0; fi
+        cp -a /host-libs/libnvinfer*.so* /host-libs/libnvonnxparser*.so* /host-libs/libcudnn*.so* /trt-libs/ \
+          && echo "trt-libs curated: $(ls /trt-libs | wc -l) files" \
+          || { echo "WARN: TensorRT/cuDNN libs not found on host — detector will run on CPU"; exit 0; }
+    volumes:
+      - /usr/lib/aarch64-linux-gnu:/host-libs:ro
+      - trt-libs:/trt-libs
+    restart: "no"
+    networks:
+      - voice-net
+
   # ── Voice agent + robot arm (B601-DM) ──────────────────────────────────
   # Image built from agent/Dockerfile.rebot-arm.
   voice-rebot-arm:
     image: ${AGENT_IMAGE:-voice-rebot-arm:dev}
     container_name: voice-rebot-arm
     user: "0"
+    runtime: nvidia             # detector runs on TensorRT (agent demotes to
+                                # CPU on its own if GPU libs/RAM are missing)
+    depends_on:
+      gpu-libs-init:
+        condition: service_completed_successfully
     devices:
       - /dev/snd
       - ${REBOT_DEVICE:-/dev/ttyACM0}
@@ -60,6 +87,12 @@ services:
     volumes:
       - /run/user:/run/user:ro
       - /dev/serial:/dev/serial:ro
+      - /dev/bus/usb:/dev/bus/usb                    # Orbbec Gemini2 camera
+      - /opt/rebot-models:/opt/rebot-models          # YOLOE ONNX + hand-eye calib
+      # ── GPU inference: host CUDA + curated TensorRT/cuDNN libs (JetPack 6) ──
+      - /usr/local/cuda:/usr/local/cuda:ro
+      - trt-libs:/trt-libs:ro         # curated by gpu-libs-init
+      - trt-cache:/trt-cache          # TensorRT engine cache (~6 min first build)
     environment:
       VOICE_SERVICE_HOST: ${VOICE_SERVICE_HOST:-seeed-voice}
       VOICE_SERVICE_PORT: ${VOICE_SERVICE_PORT:-8000}
@@ -71,8 +104,29 @@ services:
       REBOT_CHANNEL: ${REBOT_CHANNEL:-auto}
       OBSERVATION_PORT: ${OBSERVATION_PORT:-8775}
       SPEAKER_DEVICE: ${SPEAKER_DEVICE:-reSpeaker}
+      # ── grasp tuning (device-verified state, 2026-07-15) ──
+      REBOT_REPO_ROOT: /opt/rebot
+      REBOT_GRASP_MODEL: /opt/rebot-models/yoloe-26s-seg-multi.onnx
+      REBOT_GRASP_CONF: "0.06"
+      REBOT_GRASP_FWD_M: "0.013"
+      REBOT_SIDE_INSERT: "0.068"
+      REBOT_GRASP_INSERT: "0.040"
+      REBOT_GRASP_OPEN_DIST: "0.100"
+      REBOT_OPEN_DIST: "0.100"
+      REBOT_GRASP_FORCE: "1.0"
+      REBOT_GRASP_FORCE_BOTTLE: "0.8"
+      REBOT_TABLE_Z: "-0.01"
+      REBOT_WIDEBOX_ORBIT: "0"
+      REBOT_FORCE_FIXED_CLASSES: '["box","cardboard box","carton","package","water bottle","yellow banana"]'
+      REBOT_SIDE_ONLY_CLASSES: '["box","cardboard box","carton","package","small cardboard box","brown box","orange","water bottle","cup"]'
+      REBOT_SCAN_POSES: '[[0.24,0.00,0.20,0.0,-0.22,0.0],[0.24,0.10,0.20,0.0,-0.22,0.30],[0.24,-0.10,0.20,0.0,-0.22,-0.30]]'
+      # ── GPU inference (TensorRT EP; engine cache persists in trt-cache) ──
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      LD_LIBRARY_PATH: /usr/local/cuda/lib64:/trt-libs:/usr/lib/aarch64-linux-gnu/nvidia
     ports:
       - "${OBSERVATION_PORT:-8775}:8775"
+      - "${DASHBOARD_PORT:-8776}:8776"   # read-only camera/arm dashboard
     restart: unless-stopped
     networks:
       - voice-net
@@ -81,3 +135,7 @@ networks:
   voice-net:
     external: true
     name: ${COMPOSE_NETWORK:-voice-arm_default}
+
+volumes:
+  trt-cache:
+  trt-libs:
