@@ -1,13 +1,8 @@
 # OpenVoiceStream — Jetson rebot-arm overlay.
 #
-# Can be used two ways:
-#
-# 1) Overlay on base compose (starts speech + edge-llm + agent):
+# Use as an overlay on the base compose (starts speech + edge-llm + agent):
 #      docker compose -f deploy/docker-compose.yml \
 #                     -f deploy/docker-compose.jetson-rebot.yml up -d
-#
-# 2) Agent-only (speech + edge-llm already running on voice-arm_default):
-#      docker compose -f deploy/docker-compose.jetson-rebot.yml up -d
 #
 # Build the agent image first (from repo root on the Jetson):
 #   docker build -f agent/Dockerfile.rebot-arm -t voice-rebot-arm:dev .
@@ -94,6 +89,9 @@ services:
       - trt-libs:/trt-libs:ro         # curated by gpu-libs-init
       - trt-cache:/trt-cache          # TensorRT engine cache (~6 min first build)
     environment:
+      # Keep the Agent and speech Gateway on the same server-managed response
+      # mode. Realtime V2 also confirms the effective mode via session.updated.
+      OVS_AGENT_SERVER_LOOP: ${OVS_AGENT_SERVER_LOOP:-1}
       VOICE_SERVICE_HOST: ${VOICE_SERVICE_HOST:-seeed-voice}
       VOICE_SERVICE_PORT: ${VOICE_SERVICE_PORT:-8000}
       LLM_SERVICE_HOST: ${LLM_SERVICE_HOST:-edge-llm}

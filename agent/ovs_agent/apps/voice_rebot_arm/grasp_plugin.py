@@ -907,8 +907,8 @@ class GraspPlugin(Plugin):
             #  * failure WITH a spoken reason: announce WHY first, and DEFER
             #    the tone until that reply finishes (on_assistant_done), so the
             #    tone is always the final sound the user hears before speaking.
-            #    The voxedge CLIENT_TEXT path is a DIRECT text→TTS channel
-            #    (no LLM round), so the reason plays the moment the motion ends.
+            #    Realtime V2 direct speech is history-free (no LLM round), so
+            #    the reason plays the moment the motion ends.
             phrase = (
                 self._failure_phrase(kind, res)
                 if (kind != "ok" and self._announce_enabled())
@@ -974,13 +974,25 @@ class GraspPlugin(Plugin):
         return "The action didn't succeed."
 
     async def _announce(self, text: str) -> None:
-        """Direct text→TTS via the SLV CLIENT_TEXT channel (no LLM)."""
+        """Deterministic, history-free speech through Realtime V2."""
         try:
+            speak = getattr(self.app, "speak", None)
+            if callable(speak):
+                await speak(text, conversation="none")
+                logger.info("GraspPlugin: announced %r", text)
+                return
+
+            # Compatibility for lightweight app fakes and protocol-v1 agents.
+            # SLVClient.speak() selects Realtime V2 or legacy text + flush.
             slv = getattr(self.app, "slv", None)
             if slv is None:
                 return
-            await slv.send_text(text)
-            await slv.flush_tts()
+            speak = getattr(slv, "speak", None)
+            if callable(speak):
+                await speak(text, conversation="none")
+            else:
+                await slv.send_text(text)
+                await slv.flush_tts()
             logger.info("GraspPlugin: announced %r", text)
         except Exception:
             logger.debug("GraspPlugin: announce failed", exc_info=True)

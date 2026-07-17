@@ -3141,6 +3141,186 @@ async def _asr_stream_backend(
 # ──────────────────────────────────────────────────────────────────────
 
 
+class _RealtimeV2WebSocketProxy:
+    """Translate voxedge's current V1 transport frames to Realtime V2.
+
+    The engine remains transport/protocol agnostic while its internal event
+    names are migrated. This proxy is deliberately thin and uses the same
+    ``RealtimeV2EventAdapter`` as the legacy orchestration path.
+    """
+
+    def __init__(self, ws, adapter):
+        self._ws = ws
+        self._adapter = adapter
+        self._binary_seen = False
+        self._pending_messages = []
+        self._tool_registry = None
+        self._advertised_tool_names = set()
+
+    def bind_tool_registry(self, registry) -> None:
+        self._tool_registry = registry
+
+    def __getattr__(self, name):
+        return getattr(self._ws, name)
+
+    async def receive(self):
+        import json as _json
+        from server.core import v2v as v2v_proto
+
+        while True:
+            if self._pending_messages:
+                return self._pending_messages.pop(0)
+            msg = await self._ws.receive()
+            text = msg.get("text")
+            if not text:
+                return msg
+            try:
+                payload = _json.loads(text)
+            except (ValueError, TypeError):
+                return msg
+            typ = payload.get("type")
+            if typ == v2v_proto.CLIENT_INPUT_AUDIO_BUFFER_COMMIT:
+                payload = {"type": v2v_proto.CLIENT_ASR_EOS}
+            elif typ == v2v_proto.CLIENT_RESPONSE_CANCEL:
+                self._adapter.mark_cancelled("client_cancelled")
+                payload = {"type": v2v_proto.CLIENT_ABORT}
+            elif typ == v2v_proto.CLIENT_INPUT_AUDIO_BUFFER_CLEAR:
+                payload = {"type": v2v_proto.CLIENT_ABORT}
+            elif typ == v2v_proto.CLIENT_SESSION_UPDATE:
+                session = payload.get("session")
+                session = session if isinstance(session, dict) else {}
+                extension = session.get("x_v2v")
+                extension = extension if isinstance(extension, dict) else {}
+                tools_supplied = "tools" in session
+                tools = list(session.get("tools") or [])
+                new_names = {
+                    str(
+                        (entry.get("function") or entry).get("name") or ""
+                    )
+                    for entry in tools
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("function") or entry, dict)
+                }
+                new_names.discard("")
+                if tools_supplied and self._tool_registry is not None:
+                    for removed in self._advertised_tool_names - new_names:
+                        self._tool_registry.unregister(removed)
+                if tools_supplied:
+                    self._advertised_tool_names = new_names
+                payload = {
+                    "type": v2v_proto.CLIENT_TOOL_ADVERTISE,
+                    "tools": [
+                        {
+                            **entry,
+                            **(
+                                entry.get("x_v2v")
+                                if isinstance(entry.get("x_v2v"), dict)
+                                else {}
+                            ),
+                        }
+                        for entry in tools
+                        if isinstance(entry, dict)
+                    ],
+                    "system_prompt": session.get("instructions"),
+                    "llm_params": dict(extension.get("llm_params") or {}),
+                    # Initial/tool-schema updates warm the stable prefix.
+                    # Reachy's per-turn instructions-only update must not race
+                    # response.create with a second GPU warm-up.
+                    "warm_prefix": tools_supplied,
+                }
+                await self._ws.send_json(self._adapter.session_updated(session))
+            elif typ == v2v_proto.CLIENT_CONVERSATION_ITEM_CREATE:
+                item = payload.get("item")
+                item = item if isinstance(item, dict) else {}
+                if item.get("type") != "function_call_output":
+                    await self._ws.send_json(self._adapter.translate({
+                        "type": v2v_proto.SERVER_ERROR,
+                        "code": "unsupported_conversation_item",
+                        "error": "only function_call_output items are accepted",
+                        "param": "item.type",
+                    })[0])
+                    continue
+                output = item.get("output", "{}")
+                try:
+                    result = _json.loads(output) if isinstance(output, str) else output
+                except (ValueError, TypeError):
+                    result = {"ok": True, "result": {"output": str(output)}}
+                result = result if isinstance(result, dict) else {"result": result}
+                ok = bool(result.get("ok", True))
+                payload = {
+                    "type": v2v_proto.CLIENT_TOOL_RESULT,
+                    "call_id": item.get("call_id"),
+                    "id": item.get("call_id"),
+                    "name": result.get("name", ""),
+                    "ok": ok,
+                }
+                if ok:
+                    value = result.get("result", result)
+                    payload["result"] = value if isinstance(value, dict) else {"value": value}
+                else:
+                    payload["error"] = str(result.get("error") or "tool execution failed")
+            elif typ == v2v_proto.CLIENT_DIRECT_SPEAK:
+                speech = payload.get("speech")
+                speech = speech if isinstance(speech, dict) else {}
+                text_value = str(speech.get("text") or "")
+                self._adapter.mark_direct_speak()
+                payload = {"type": v2v_proto.CLIENT_TEXT, "text": text_value}
+                self._pending_messages.append({
+                    "type": "websocket.receive",
+                    "text": _json.dumps({"type": v2v_proto.CLIENT_TTS_FLUSH}),
+                })
+            elif typ == v2v_proto.CLIENT_CONVERSATION_ITEM_TRUNCATE:
+                try:
+                    audio_end_ms = max(0, int(payload.get("audio_end_ms", 0)))
+                except (TypeError, ValueError):
+                    await self._ws.send_json(self._adapter.translate({
+                        "type": v2v_proto.SERVER_ERROR,
+                        "code": "invalid_audio_end_ms",
+                        "error": "audio_end_ms must be a non-negative integer",
+                        "param": "audio_end_ms",
+                    })[0])
+                    continue
+                await self._ws.send_json({
+                    "type": v2v_proto.SERVER_CONVERSATION_ITEM_TRUNCATED,
+                    "event_id": self._adapter._event_id(),
+                    "item_id": payload.get("item_id"),
+                    "content_index": payload.get("content_index", 0),
+                    "audio_end_ms": audio_end_ms,
+                })
+                continue
+            elif typ == v2v_proto.CLIENT_CONVERSATION_RESET:
+                self._adapter.mark_cancelled("conversation_reset")
+                await self._ws.send_json({
+                    "type": v2v_proto.SERVER_CONVERSATION_RESET_DONE,
+                    "event_id": self._adapter._event_id(),
+                })
+                payload = {"type": v2v_proto.CLIENT_ABORT}
+            msg = dict(msg)
+            msg["text"] = _json.dumps(payload)
+            return msg
+
+    async def send_json(self, payload):
+        for event in self._adapter.translate(payload):
+            await self._ws.send_json(event)
+
+    async def send_bytes(self, data):
+        # voxedge currently sends the negotiated sample rate as a standalone
+        # uint32 first frame. Realtime V2 declares it in the session instead.
+        if not self._binary_seen and len(data) == 4:
+            self._binary_seen = True
+            return
+        self._binary_seen = True
+        await self._ws.send_bytes(data)
+
+    async def close(self, code=None, reason=None):
+        kwargs = {}
+        if code is not None:
+            kwargs["code"] = code
+        if reason is not None:
+            kwargs["reason"] = reason
+        await self._ws.close(**kwargs)
+
+
 async def _v2v_stream_via_engine(
     ws,
     cfg: dict,
@@ -3324,6 +3504,9 @@ async def _v2v_stream_via_engine(
         # (== no tools) so the LLM just answers — but the pump path is live so
         # later-registered tools (or client-advertised) flow without re-wiring.
         tool_registry = ToolRegistry()
+        bind_registry = getattr(ws, "bind_tool_registry", None)
+        if callable(bind_registry):
+            bind_registry(tool_registry)
         # System prompt + LLM params for the server loop. Sourced from env/
         # config (interface for the future VoiceArm prompt port, spec §5); the
         # engine itself never reads env (spec §2 — params are injected here).
@@ -3373,6 +3556,13 @@ async def _v2v_stream_via_engine(
     low_latency_tts = os.environ.get(
         "OVS_TTS_LOW_LATENCY_CHUNKING", "1"
     ).lower() not in ("0", "false", "no", "off")
+    # V1 has always auto-started on ASR final. Realtime V2 can negotiate
+    # create_response=false so applications such as Reachy can update dynamic
+    # visual instructions before explicitly sending response.create.
+    auto_create_response = not (
+        isinstance(ws, _RealtimeV2WebSocketProxy)
+        and not bool(cfg.get("_create_response", False))
+    )
 
     engine = ConversationEngine(
         backends=backends,
@@ -3390,6 +3580,7 @@ async def _v2v_stream_via_engine(
         tts_voice=tts_voice,
         tts_speed=tts_speed,
         low_latency_tts=low_latency_tts,
+        auto_create_response=auto_create_response,
     )
 
     logger.info(
@@ -3419,9 +3610,12 @@ async def _v2v_stream_via_engine(
 async def v2v_stream(ws: WebSocket):
     """Unified bi-directional WebSocket: speech in, partials + audio out.
 
-    Client may enable any subset of features via the first ``config``
-    JSON frame. See ``docs/api/v2v-stream.md`` for the protocol spec.
-    Minimum viable patterns:
+    Realtime V2 clients request the ``seeed.realtime.v2`` WebSocket
+    subprotocol and use the session/response lifecycle documented in
+    ``docs/api/realtime-v2.md``. Connections without a subprotocol remain on
+    the migration-only V1 dialect in ``docs/api/v2v-stream.md``.
+
+    Legacy minimum viable patterns:
 
       TTS-only (LLM token stream → audio):
         send {"type":"config", "tts_language":"zh"}
@@ -3463,7 +3657,15 @@ async def v2v_stream(ws: WebSocket):
     _v2v_request_id = request_id_from_headers(ws.headers) or generate_request_id()
     _v2v_ctx_tokens = set_request_context(request_id=_v2v_request_id)
 
-    await ws.accept()
+    offered_subprotocols = {
+        part.strip()
+        for part in ws.headers.get("sec-websocket-protocol", "").split(",")
+        if part.strip()
+    }
+    realtime_v2 = v2v_proto.REALTIME_V2_SUBPROTOCOL in offered_subprotocols
+    await ws.accept(
+        subprotocol=v2v_proto.REALTIME_V2_SUBPROTOCOL if realtime_v2 else None
+    )
 
     # Idle / half-open watchdog for the two un-timed ws.receive() sites below
     # (config-phase + steady-state dispatcher). A dead or half-open client that
@@ -3526,6 +3728,44 @@ async def v2v_stream(ws: WebSocket):
     # if it leaks its slot (see _v2v_evict_and_reacquire). Removed in
     # _v2v_release_early (finally-guaranteed).
     _V2V_HOLDERS.add(_v2v_handle)
+
+    realtime_adapter = None
+    realtime_provider_name = os.environ.get("OVS_REALTIME_PROVIDER", "local").lower()
+    if realtime_v2:
+        try:
+            _output_sr = (
+                int(tts_service.get_sample_rate())
+                if tts_service.is_ready() and hasattr(tts_service, "get_sample_rate")
+                else 16000
+            )
+        except (TypeError, ValueError):
+            _output_sr = 16000
+        provider_label = (
+            realtime_provider_name
+            if realtime_provider_name in {"openai", "qwen"}
+            else "local-cascade"
+        )
+        provider_capabilities = None
+        if realtime_provider_name in {"openai", "qwen"}:
+            from server.core.realtime_provider import create_provider_adapter
+            provider_capabilities = create_provider_adapter(
+                realtime_provider_name
+            ).capabilities()
+        provider_model_defaults = {
+            "openai": "gpt-realtime-2.1",
+            "qwen": "qwen-audio-3.0-realtime-flash",
+        }
+        realtime_adapter = v2v_proto.RealtimeV2EventAdapter(
+            provider=provider_label,
+            model=(
+                os.environ.get(f"OVS_REALTIME_{realtime_provider_name.upper()}_MODEL", "")
+                or provider_model_defaults.get(realtime_provider_name, provider_label)
+            ),
+            input_sample_rate=16000,
+            output_sample_rate=_output_sr,
+            capabilities_override=provider_capabilities,
+        )
+        await ws.send_json(realtime_adapter.session_created())
 
     # MUST-FIX 1 round 2: make release idempotent + a nonlocal flag so the
     # outer setup try/except BaseException can safely cover CancelledError
@@ -3597,7 +3837,24 @@ async def v2v_stream(ws: WebSocket):
             cfg = _json.loads(cfg_text)
         except (ValueError, TypeError):
             await ws.close(code=1003); _v2v_release_early(); return
-        if cfg.get("type") != v2v_proto.CLIENT_CONFIG:
+        if realtime_v2:
+            if cfg.get("type") != v2v_proto.CLIENT_SESSION_UPDATE:
+                await ws.send_json(realtime_adapter.translate({
+                    "type": v2v_proto.SERVER_ERROR,
+                    "error": "first client message must be session.update",
+                    "code": "invalid_session_handshake",
+                })[0])
+                await ws.close(code=1003); _v2v_release_early(); return
+            try:
+                cfg = v2v_proto.session_update_to_legacy_config(cfg)
+            except (ValueError, TypeError) as exc:
+                await ws.send_json(realtime_adapter.translate({
+                    "type": v2v_proto.SERVER_ERROR,
+                    "error": str(exc),
+                    "code": "invalid_session_update",
+                })[0])
+                await ws.close(code=1003); _v2v_release_early(); return
+        elif cfg.get("type") != v2v_proto.CLIENT_CONFIG:
             await ws.send_json({"type": v2v_proto.SERVER_ERROR,
                                 "error": "first message must be a config frame"})
             await ws.close(code=1003); _v2v_release_early(); return
@@ -3678,6 +3935,57 @@ async def v2v_stream(ws: WebSocket):
                                 "error": "config must enable asr_language and/or tts_language"})
             await ws.close(code=1003); _v2v_release_early(); return
 
+        if realtime_v2:
+            canonical_session = cfg.get("_canonical_session")
+            canonical_session = (
+                canonical_session if isinstance(canonical_session, dict) else {}
+            )
+            if realtime_provider_name in {"openai", "qwen"}:
+                from server.core.realtime_relay import relay_cloud_realtime
+                try:
+                    await relay_cloud_realtime(
+                        ws,
+                        provider_name=realtime_provider_name,
+                        canonical_session=canonical_session,
+                        downstream_adapter=realtime_adapter,
+                        input_rate=sample_rate,
+                        create_response=bool(cfg.get("_create_response", False)),
+                        interrupt_response=bool(
+                            cfg.get("_interrupt_response", True)
+                        ),
+                    )
+                finally:
+                    _v2v_release_early()
+                    try:
+                        reset_request_context(_v2v_ctx_tokens)
+                    except BaseException:
+                        pass
+                return
+            requested_create_response = bool(cfg.get("_create_response", False))
+            server_loop_available = (
+                os.environ.get("OVS_V2V_ENGINE") == "voxedge"
+                and _env_truthy(os.environ.get("OVS_V2V_SERVER_LOOP"))
+            )
+            if requested_create_response and not server_loop_available:
+                await ws.send_json(realtime_adapter.translate({
+                    "type": v2v_proto.SERVER_ERROR,
+                    "code": "unsupported_create_response",
+                    "error": (
+                        "create_response=true requires OVS_V2V_ENGINE=voxedge "
+                        "and OVS_V2V_SERVER_LOOP=1"
+                    ),
+                    "param": "session.audio.input.turn_detection.create_response",
+                })[0])
+                await ws.close(code=1003); _v2v_release_early(); return
+            realtime_adapter.input_sample_rate = sample_rate
+            await ws.send_json(realtime_adapter.session_updated(
+                canonical_session,
+                create_response=(
+                    requested_create_response and server_loop_available
+                ),
+                interrupt_response=bool(cfg.get("_interrupt_response", True)),
+            ))
+
         # ── Phase 1b: optional voxedge ConversationEngine path ──────────
         # Feature-flag a parallel implementation that delegates the V2V
         # orchestration to voxedge's importable ConversationEngine instead of
@@ -3693,7 +4001,9 @@ async def v2v_stream(ws: WebSocket):
         if os.environ.get("OVS_V2V_ENGINE") == "voxedge":
             try:
                 await _v2v_stream_via_engine(
-                    ws,
+                    _RealtimeV2WebSocketProxy(ws, realtime_adapter)
+                    if realtime_v2
+                    else ws,
                     cfg,
                     asr_language=asr_language,
                     tts_language=tts_language,
@@ -3872,13 +4182,24 @@ async def v2v_stream(ws: WebSocket):
         async def send_json(payload):
             async with send_lock:
                 try:
-                    await ws.send_json(payload)
+                    if realtime_v2:
+                        for event in realtime_adapter.translate(payload):
+                            await ws.send_json(event)
+                    else:
+                        await ws.send_json(payload)
                 except Exception:
                     state["client_closed"] = True
     
         async def send_bytes(data):
             async with send_lock:
                 try:
+                    # V1 sends a standalone uint32 sample-rate header once.
+                    # V2 negotiated the format in session.updated, so suppress
+                    # that header and keep every binary frame pure PCM.
+                    if realtime_v2 and not state.get("v2_binary_seen") and len(data) == 4:
+                        state["v2_binary_seen"] = True
+                        return
+                    state["v2_binary_seen"] = True
                     await ws.send_bytes(data)
                 except Exception:
                     state["client_closed"] = True
@@ -4066,6 +4387,8 @@ async def v2v_stream(ws: WebSocket):
                                     "type": v2v_proto.SERVER_VAD_EVENT,
                                     "event": v2v_proto.VAD_EVENT_SPEECH_START,
                                 })
+                                if realtime_v2 and realtime_adapter is not None:
+                                    realtime_adapter.mark_cancelled("turn_detected")
                                 if not multi_utterance and state["asr_started_once"]:
                                     if (
                                         state["asr_active"]
@@ -4275,6 +4598,59 @@ async def v2v_stream(ws: WebSocket):
                     except (ValueError, TypeError):
                         continue
                     typ = payload.get("type")
+                    if realtime_v2:
+                        if typ == v2v_proto.CLIENT_INPUT_AUDIO_BUFFER_COMMIT:
+                            typ = v2v_proto.CLIENT_ASR_EOS
+                        elif typ == v2v_proto.CLIENT_RESPONSE_CANCEL:
+                            realtime_adapter.mark_cancelled("client_cancelled")
+                            typ = v2v_proto.CLIENT_ABORT
+                        elif typ == v2v_proto.CLIENT_INPUT_AUDIO_BUFFER_CLEAR:
+                            typ = v2v_proto.CLIENT_ABORT
+                        elif typ == v2v_proto.CLIENT_SESSION_UPDATE:
+                            session = payload.get("session")
+                            session = session if isinstance(session, dict) else {}
+                            await send_json(realtime_adapter.session_updated(session))
+                            continue
+                        elif typ == v2v_proto.CLIENT_DIRECT_SPEAK:
+                            speech = payload.get("speech")
+                            speech = speech if isinstance(speech, dict) else {}
+                            text_value = str(speech.get("text") or "")
+                            realtime_adapter.mark_direct_speak()
+                            if tts_buffer is not None and text_value:
+                                for sentence in tts_buffer.add(text_value):
+                                    await tts_q.put(sentence)
+                                for sentence in tts_buffer.flush():
+                                    await tts_q.put(sentence)
+                            state["tts_flush"] = True
+                            continue
+                        elif typ == v2v_proto.CLIENT_CONVERSATION_ITEM_TRUNCATE:
+                            try:
+                                audio_end_ms = max(
+                                    0, int(payload.get("audio_end_ms", 0))
+                                )
+                            except (TypeError, ValueError):
+                                await send_json({
+                                    "type": v2v_proto.SERVER_ERROR,
+                                    "code": "invalid_audio_end_ms",
+                                    "error": (
+                                        "audio_end_ms must be a non-negative integer"
+                                    ),
+                                    "param": "audio_end_ms",
+                                })
+                                continue
+                            await send_json({
+                                "type": v2v_proto.SERVER_CONVERSATION_ITEM_TRUNCATED,
+                                "item_id": payload.get("item_id"),
+                                "content_index": payload.get("content_index", 0),
+                                "audio_end_ms": audio_end_ms,
+                            })
+                            continue
+                        elif typ == v2v_proto.CLIENT_CONVERSATION_RESET:
+                            realtime_adapter.mark_cancelled("conversation_reset")
+                            await send_json({
+                                "type": v2v_proto.SERVER_CONVERSATION_RESET_DONE,
+                            })
+                            typ = v2v_proto.CLIENT_ABORT
                     if typ == v2v_proto.CLIENT_TEXT and tts_buffer is not None:
                         for sentence in tts_buffer.add(payload.get("text", "")):
                             await tts_q.put(sentence)

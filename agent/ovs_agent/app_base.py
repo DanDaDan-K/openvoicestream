@@ -63,9 +63,19 @@ from .tools import default_registry as _default_tool_registry
 from .translator import CTranslate2Translator, NoopTranslator, TranslatorBackend
 from .vad import create_vad
 from .slv_client import (
+    AssistantTranscriptDelta,
+    AssistantTranscriptDone,
     ASREndpoint,
     ASRFinal,
     ASRPartial,
+    InputAudioSpeechStarted,
+    InputAudioSpeechStopped,
+    InputAudioCommitted,
+    ConversationItemTruncated,
+    ConversationResetDone,
+    ResponseCreated,
+    ResponseDone,
+    ResponseOutputAudioDone,
     ServerToolCall,
     SLVClient,
     SLVError,
@@ -177,7 +187,17 @@ class BaseApp:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.events = EventBus()
-        self.slv = SLVClient(config.slv_url, config.slv_config)
+        slv_config = dict(config.slv_config)
+        # Make server-loop an explicit session semantic. This removes the old
+        # failure mode where the speech service had its server loop enabled
+        # but the device still behaved as a client-loop application.
+        slv_config.setdefault("create_response", config.server_loop_enabled())
+        slv_config.setdefault("interrupt_response", True)
+        self.slv = SLVClient(
+            config.slv_url,
+            slv_config,
+            protocol_version=config.realtime_protocol_version,
+        )
         self.audio = AudioIO(
             input_device=config.audio_input_device,
             output_device=config.audio_output_device,
@@ -915,6 +935,19 @@ class BaseApp:
             await self.sleep()
 
     # ── public API ──────────────────────────────────────────────────
+
+    async def speak(self, text: str, *, conversation: str = "none") -> None:
+        """Speak exact text through the provider-neutral direct-speech API."""
+        await self.slv.speak(text, conversation=conversation)
+
+    async def reset_conversation(self) -> None:
+        """Clear local and remote conversational context when available."""
+        reset_local = getattr(self.session, "reset", None)
+        if callable(reset_local):
+            reset_local()
+        reset = getattr(self.slv, "reset_conversation", None)
+        if callable(reset):
+            await reset()
 
     def register(self, plugin: "Plugin") -> bool:
         if not plugin.setup():
@@ -2192,6 +2225,15 @@ class BaseApp:
                 await self._llm_turn_task
             except (asyncio.CancelledError, Exception):
                 pass
+        playback_position_ms = 0
+        position = getattr(self.audio, "playback_position_ms", None)
+        if callable(position):
+            try:
+                playback_position_ms = int(
+                    position(getattr(self, "_active_response_id", None))
+                )
+            except Exception:
+                logger.exception("failed to read playback position during barge-in")
         try:
             await self.audio.stop_playback()
         except Exception:
@@ -2205,6 +2247,16 @@ class BaseApp:
             raise
         except Exception:
             logger.exception("SLV abort failed during barge-in")
+        truncate = getattr(self.slv, "truncate_active_response", None)
+        if callable(truncate):
+            try:
+                await asyncio.wait_for(
+                    truncate(playback_position_ms), timeout=0.5
+                )
+            except asyncio.TimeoutError:
+                logger.warning("SLV conversation truncate timed out during barge-in")
+            except Exception:
+                logger.exception("SLV conversation truncate failed during barge-in")
         self._eos_sent_this_turn = False
         self._cancel_asr_watchdog()
         self._first_tts_seen = False
@@ -2642,6 +2694,47 @@ class BaseApp:
             await self.on_user_partial(evt.text, getattr(evt, "language", None))
             return
 
+        if isinstance(evt, InputAudioSpeechStarted):
+            await self._broadcast("on_user_speech_start")
+            # Canonical server VAD is an earlier and stronger barge-in signal
+            # than waiting for an ASR partial. Stop local playback immediately;
+            # the Gateway is responsible for cancelling the remote response.
+            if (
+                self._state == ConvState.SPEAKING
+                and self.audio.is_playing
+                and self._barge_in_enabled()
+            ):
+                self._set_state(ConvState.BARGED_IN)
+                if self._llm_turn_task is not None and not self._llm_turn_task.done():
+                    self._llm_turn_task.cancel()
+                    try:
+                        await self._llm_turn_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                await self._interrupt_current_turn_for_barge_in()
+            return
+
+        if isinstance(evt, InputAudioSpeechStopped):
+            await self._broadcast("on_user_speech_end")
+            return
+
+        if isinstance(evt, InputAudioCommitted):
+            await self._broadcast(
+                "on_user_audio_committed", {"item_id": evt.item_id}
+            )
+            return
+
+        if isinstance(evt, ConversationItemTruncated):
+            await self._broadcast(
+                "on_conversation_item_truncated",
+                {"item_id": evt.item_id, "audio_end_ms": evt.audio_end_ms},
+            )
+            return
+
+        if isinstance(evt, ConversationResetDone):
+            await self._broadcast("on_conversation_reset")
+            return
+
         if isinstance(evt, ASREndpoint):
             await self._broadcast("on_user_speech_start")
             return
@@ -2898,6 +2991,21 @@ class BaseApp:
             await self._broadcast("on_assistant_sentence_start", evt.sentence)
             return
 
+        if isinstance(evt, ResponseCreated):
+            # A response exists but may not have produced audio yet. Keep the
+            # FSM in THINKING; the first binary frame remains the authoritative
+            # transition to SPEAKING.
+            self._active_response_id = evt.response_id
+            begin_playback = getattr(self.audio, "begin_response_playback", None)
+            if callable(begin_playback):
+                begin_playback(evt.response_id)
+            self._cancel_thinking_watchdog()
+            await self._broadcast(
+                "on_response_created",
+                {"response_id": evt.response_id, "response": evt.response},
+            )
+            return
+
         if isinstance(evt, TTSAudio):
             if getattr(self, "_drop_current_tts_sentence", False):
                 return
@@ -2934,6 +3042,81 @@ class BaseApp:
                 self._drop_current_tts_sentence = False
                 return
             await self._broadcast("on_assistant_sentence", evt.sentence)
+            return
+
+        if isinstance(evt, ResponseOutputAudioDone):
+            # Remote generation is finished, but buffered PCM may still be
+            # playing locally. Do not complete the application turn here.
+            mark = getattr(self.audio, "mark_playback_done", None)
+            if callable(mark):
+                mark()
+            await self._broadcast(
+                "on_response_output_audio_done",
+                {"response_id": evt.response_id},
+            )
+            return
+
+        if isinstance(evt, AssistantTranscriptDelta):
+            await self._broadcast("on_assistant_token", evt.delta)
+            return
+
+        if isinstance(evt, AssistantTranscriptDone):
+            await self._broadcast(
+                "on_assistant_transcript_done",
+                {
+                    "response_id": evt.response_id,
+                    "transcript": evt.transcript,
+                },
+            )
+            return
+
+        if isinstance(evt, ResponseDone):
+            logger.debug(
+                "ResponseDone received (response_id=%s status=%s)",
+                evt.response_id,
+                evt.status,
+            )
+            self._active_response_id = None
+            self._first_tts_seen = False
+            self._cancel_thinking_watchdog()
+            await self._broadcast(
+                "on_response_done",
+                {
+                    "response_id": evt.response_id,
+                    "status": evt.status,
+                    "response": evt.response,
+                },
+            )
+            output = evt.response.get("output")
+            output = output if isinstance(output, list) else []
+            if output and all(
+                isinstance(item, dict) and item.get("type") == "function_call"
+                for item in output
+            ):
+                # Cloud Realtime providers terminate the function-call
+                # response before the device returns its output. This is an
+                # intermediate tool boundary, not an audible assistant turn.
+                if self._state != ConvState.BARGED_IN:
+                    self._set_state(ConvState.THINKING)
+                return
+            # Don't override BARGED_IN: the user utterance owns the next FSM
+            # transition after a cancelled response.
+            if self._state != ConvState.BARGED_IN:
+                drain_task = getattr(self, "_playback_drain_task", None)
+                if drain_task is not None and not drain_task.done():
+                    drain_task.cancel()
+                drain_enabled = bool(
+                    getattr(self.config, "playback_drain_enabled", False)
+                )
+                if drain_enabled and getattr(self.audio, "is_playing", False):
+                    self._playback_drain_task = asyncio.create_task(
+                        self._finish_assistant_turn_after_playback(),
+                        name="playback-drain",
+                    )
+                    return
+            await self._complete_assistant_turn()
+            self._first_tts_seen = False
+            self._eos_sent_this_turn = False
             return
 
         if isinstance(evt, TTSDone):

@@ -139,6 +139,40 @@ def test_setup_does_not_register_tool_when_disabled() -> None:
     assert not app.tool_registry.has("grasp_object")
 
 
+def test_announce_uses_app_realtime_v2_speak() -> None:
+    app = _FakeApp()
+    calls = []
+
+    async def _speak(text: str, *, conversation: str) -> None:
+        calls.append((text, conversation))
+
+    app.speak = _speak
+    plugin = GraspPlugin(app)
+
+    asyncio.run(plugin._announce("I couldn't find the cup."))  # noqa: SLF001
+
+    assert calls == [("I couldn't find the cup.", "none")]
+
+
+def test_announce_keeps_legacy_slv_fallback() -> None:
+    app = _FakeApp()
+    calls = []
+
+    class _LegacySLV:
+        async def send_text(self, text: str) -> None:
+            calls.append(("text", text))
+
+        async def flush_tts(self) -> None:
+            calls.append(("flush", None))
+
+    app.slv = _LegacySLV()
+    plugin = GraspPlugin(app)
+
+    asyncio.run(plugin._announce("Please try again."))  # noqa: SLF001
+
+    assert calls == [("text", "Please try again."), ("flush", None)]
+
+
 # ── stop() lifecycle (item 9) ───────────────────────────────────────
 
 
