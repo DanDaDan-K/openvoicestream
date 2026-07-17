@@ -326,6 +326,14 @@ def estimate_grasp(
         # never trip this — their path stays byte-identical.
         if top is not None and top[3] > 0.085:
             top = None
+        # Top_face is disabled for ALL classes (2026-07-17 live regression
+        # pair): a round object's plane fit has an ARBITRARY in-plane PCA
+        # angle (orange grasped at roll 0.956), and a wide flat box re-hits
+        # the 2026-07-03 tilted-approach failure (top_face at roll -1.449 /
+        # pitch 0.433 reported success on an angled edge grip). This restores
+        # the unconditional force-side drop; the label-scoped _tall_box above
+        # keeps the branch's real fix (tall bottles use the descriptor).
+        # Reviving top_face needs its own approach/roll fix first.
         # TALL UPRIGHT objects → force the SIDE grasp. The shape descriptor's
         # verticality (major axis ∥ gravity, elongated, ≥~12cm tall) is STABLE
         # across frames, unlike the per-frame top/legacy routing that
@@ -355,7 +363,7 @@ def estimate_grasp(
         # UNCONDITIONAL when ON: drop top even with NO side candidate, so a
         # steep-angle box that yields no graspable side face DECLINES instead
         # of taking the tilted top_face dive-into-floor (2026-07-03 demo).
-        if _force_side_on and _tall_box:
+        if _force_side_on:
             top = None
         if top is None and side_cands:
             best_side = min(
