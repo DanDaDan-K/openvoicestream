@@ -272,6 +272,59 @@ def _meta_matches(engine_path: Path, host: HostSignature) -> bool:
     return True
 
 
+def _migrate_existing_engine(engine_path: Path, host: HostSignature) -> bool:
+    """Adopt an engine from an installation created before sidecars existed.
+
+    Existing offline installs may contain valid, device-built TensorRT engines
+    but either no sidecar or the pre-platform sidecar schema.  Re-downloading
+    those engines is both unnecessary and fatal on an offline device.  Trust a
+    non-empty engine once, record its hash/current host atomically, and let the
+    normal strict cache validation apply on every subsequent boot.
+
+    A malformed sidecar is *not* treated as absent.  Legacy sidecars are only
+    migrated on Tegra when every host field they knew about still matches; an
+    existing hash, when present, must also match the engine bytes.
+    """
+    try:
+        if not engine_path.is_file() or engine_path.stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+
+    mp = _meta_path(engine_path)
+    meta = _read_meta(engine_path)
+    if meta is None:
+        if mp.exists():
+            logger.warning("invalid engine sidecar at %s — refusing migration", mp)
+            return False
+    else:
+        cached_host = meta.get("host")
+        if not isinstance(cached_host, dict) or "platform" in cached_host:
+            return False
+        expected = host.to_dict()
+        legacy_keys = ("sm", "trt_version", "jp_version", "cuda_version")
+        if host.platform != "tegra" or any(
+            cached_host.get(key) != expected[key] for key in legacy_keys
+        ):
+            return False
+        cached_sha = meta.get("engine_sha256")
+        if cached_sha and cached_sha != _sha256_file(engine_path):
+            logger.warning(
+                "legacy engine hash drift detected at %s — refusing migration",
+                engine_path,
+            )
+            return False
+
+    _write_meta(
+        engine_path,
+        host,
+        source="existing_install_migration",
+        onnx_sha=meta.get("onnx_sha256") if meta else None,
+    )
+    logger.info("adopted existing engine and wrote sidecar: %s", engine_path)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
@@ -762,6 +815,13 @@ def resolve_all(profile: dict, kind: Optional[str] = None) -> dict[str, Path]:
 def _resolve_one(spec: EngineSpec, host: HostSignature, force_rebuild: bool) -> None:
     if not force_rebuild and _meta_matches(spec.engine_path, host) and _extra_files_exist(spec):
         logger.info("cache hit: %s (host=%s)", spec.engine_path.name, host.key)
+        return
+
+    if (
+        not force_rebuild
+        and _extra_files_exist(spec)
+        and _migrate_existing_engine(spec.engine_path, host)
+    ):
         return
 
     # Stale/unverified cache: clear only the meta sidecar so a stale or
