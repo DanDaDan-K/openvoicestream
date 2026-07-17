@@ -214,9 +214,18 @@ def estimate_grasp(
     # the actual RANSAC top-plane fit, which is the reliable planar-top signal
     # under a multi-face box shell where the full-cloud planarity is high.
     _planar_topped = top is not None
+    _class_key = str(class_name).strip().lower()
+    _box_like = any(
+        token in _class_key
+        for token in ("box", "carton", "package")
+    )
 
+    # A standing bottle can look geometrically like a tall box when its top
+    # plane is missing or noisy.  Use the detector label as the final arbiter:
+    # known box classes must retain the proven top/side routing.
     if (
         desc is not None
+        and not _box_like
         and (top is None or float(desc.elongation) >= 8.0)
         and float(desc.elongation) >= 3.0
         and float(desc.extent_minor) <= 0.07
@@ -226,19 +235,6 @@ def estimate_grasp(
         )
         if g is not None:
             return g
-     
-    # the issue was: Camera could detect a bottle, but the restrictions the restrictions C and D 
-    # were preventing the code from executing,
-    # Restrictios C and D ask "is the object tall" and " is the long axis vertical?". So things like bottle answer yes
-    # to both questions, that is why only the code for tall boxes (not bottles) is executed! The guards couldn't tell them apart.
-    # They never check roundness/elongation, so a standing bottle looks identical to a box to them and gets blocked too.
-    # they perceived the bottle as a box and the code that was made
-    # specifically for bottles (and etc) was not executed
-    # The block above runs BEFORE C/D 
-    # Asks the question: "is it a strong rod? (is elong >= 4.0)," does it fit the jaw? (extent_minor <=0.07) 
-    # and has no box-top (top is None)?"
-    # If yes, it's a bottle/cup(something cylindrical). Then grab it directly and return, so C/D never get to block it.
-
 
     # EXCEPTION (real machine 2026-06-17): an OVER-WIDE top plane on a clearly
     # ELONGATED object must NOT suppress the descriptor. A box lying flat (e.g.
@@ -281,7 +277,12 @@ def estimate_grasp(
     # and the box is tall (>=10cm), skip it so the side/top arbitration owns
     # the box (top is dropped there → side_face or a clean decline).
     _force_side_on = _os.environ.get("REBOT_FORCE_SIDE", "1") == "1"
-    _tall_box = desc is not None and float(getattr(desc, "extent_major", 0.0) or 0.0) >= 0.10
+    _tall_box = (
+        _box_like
+        and _major_is_vertical
+        and desc is not None
+        and float(getattr(desc, "extent_major", 0.0) or 0.0) >= 0.10
+    )
     if (
         desc is not None
         and not _planar_topped
@@ -354,7 +355,7 @@ def estimate_grasp(
         # UNCONDITIONAL when ON: drop top even with NO side candidate, so a
         # steep-angle box that yields no graspable side face DECLINES instead
         # of taking the tilted top_face dive-into-floor (2026-07-03 demo).
-        if _os.environ.get("REBOT_FORCE_SIDE", "1") == "1":
+        if _force_side_on and _tall_box:
             top = None
         if top is None and side_cands:
             best_side = min(
@@ -1234,13 +1235,11 @@ def _pose_from_axes(
             approach = tilted if tilted is not None else up
         else:
             approach = up
-             # The height pin added the FULL insertion depth vertically, but the
-
-             
-                # executor inserts ALONG the approach — the vertical component is
-                # only insert*dot(approach,up). Remove the overshoot so the fingers
-                # land mid-body at ANY pitch (at pitch 0.62 they closed ~1cm ABOVE
-                # a 2cm banana → fully-shut jaw, "nothing held").
+        # The height pin added the FULL insertion depth vertically, but the
+        # executor inserts ALONG the approach — the vertical component is only
+        # insert*dot(approach,up). Remove the overshoot so the fingers land
+        # mid-body at ANY pitch (at pitch 0.62 they closed ~1cm ABOVE a 2cm
+        # banana → fully-shut jaw, "nothing held").
         _ins = float(_os.environ.get("REBOT_GRASP_INSERT", "0.040") or 0.040)
         position = position - up * (_ins * (1.0 - float(np.dot(approach, up))))
 
@@ -1379,7 +1378,7 @@ def _descriptor_grasp(
         # (measured -0.009 when ~+0.03 was wanted, same gap on 07-08).
         want_h = float(desc.table_proj) + 0.5 * float(desc.extent_minor) + _insert + 0.035
         pos = pos + up * (want_h - cur_h)
-    
+
     elong = desc.elongation
     planar = desc.planarity
 
