@@ -107,6 +107,13 @@ def test_renderer_backprojection_sane():
     assert mx < 6.0, f"back-projection max residual {mx:.3f} mm too large"
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PR #37: flat-box top_face is disabled until approach/roll is "
+        "device-safe; force-side may decline instead"
+    ),
+)
 def test_flat_box_top_face_width_is_short_dim():
     """A flat box at x=0.4: the top-face fit's width ≈ the true short HORIZONTAL
     dimension (0.08), not the diagonal, not inflated.
@@ -131,9 +138,23 @@ def test_flat_box_top_face_width_is_short_dim():
 # (id, dims (Lx,Ly,Lz), base_x, expected_method_in, width_lo, width_hi, expect_reach)
 _CASES = [
     # flat box, near — top face clearly visible, short dim 0.08
-    ("flat_near", (0.12, 0.08, 0.04), 0.40, {"top_face"}, 0.05, 0.085, True),
+    pytest.param(
+        "flat_near", (0.12, 0.08, 0.04), 0.40,
+        {"top_face"}, 0.05, 0.085, True,
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason="PR #37: force-side disables unsafe flat-box top_face",
+        ),
+    ),
     # flat box, far — still a top face, geometry holds at distance
-    ("flat_far", (0.12, 0.08, 0.04), 0.52, {"top_face"}, 0.05, 0.085, True),
+    pytest.param(
+        "flat_far", (0.12, 0.08, 0.04), 0.52,
+        {"top_face"}, 0.05, 0.085, True,
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason="PR #37: force-side disables unsafe flat-box top_face",
+        ),
+    ),
     # wide box, near — short dim 0.10 is at/over the jaw; top fit may be
     # rejected by the 0.085 guard → side_face / legacy / None all acceptable.
     ("wide_near", (0.16, 0.10, 0.04), 0.40, {"top_face", "side_face", "legacy"}, 0.0, 0.30, True),
@@ -150,7 +171,7 @@ _CASES = [
 @pytest.mark.parametrize(
     "cid,dims,base_x,methods,wlo,whi,expect_reach",
     _CASES,
-    ids=[c[0] for c in _CASES],
+    ids=["flat_near", "flat_far", "wide_near", "tall_near", "tall_far"],
 )
 def test_grasp_grid(cid, dims, base_x, methods, wlo, whi, expect_reach):
     T, K = _scene()
@@ -193,6 +214,13 @@ def test_grasp_grid(cid, dims, base_x, methods, wlo, whi, expect_reach):
 
 
 # ── acceptance: the 8fb88ac tall-box-at-distance fix ──────────────────────────
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PR #37: this guard-isolation control requires top_face to remain "
+        "reachable, but force-side now suppresses it unconditionally"
+    ),
+)
 def test_tall_box_at_distance_8fb88ac():
     """ACCEPTANCE — reproduce the scenario commit 8fb88ac fixed.
 
@@ -322,6 +350,13 @@ def test_tall_box_at_distance_8fb88ac():
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PR #37: synthetic selector fixture assumes top_face; rewrite it with "
+        "device-safe side-face candidates"
+    ),
+)
 def test_reachability_aware_selection_prefers_in_envelope_box():
     """Sim validation of the reachability-aware multi-candidate selector
     (grasp_service._select_reachable_grasp), grounded in the MEASURED B601-DM
