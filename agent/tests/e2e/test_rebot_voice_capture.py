@@ -18,7 +18,6 @@ Run: pytest tests/e2e/test_rebot_voice_capture.py -v -s  (needs orin-nx live)
 from __future__ import annotations
 
 import asyncio
-import subprocess
 import wave
 from dataclasses import replace
 
@@ -75,28 +74,19 @@ _REBOT_TTS_CMDS = [
 
 def _ensure_rebot_wavs() -> None:
     WAV_DIR.mkdir(parents=True, exist_ok=True)
-    have_say = subprocess.run(["which", "say"], capture_output=True).returncode == 0
     for name, text in _REBOT_CMDS:
         out = WAV_DIR / f"{name}.wav"
         if out.exists() and out.stat().st_size > 0:
             continue
-        if not have_say:
-            raise RuntimeError(f"{out.name} missing and `say` unavailable; commit fixtures.")
-        subprocess.run(
-            ["say", "-v", "Tingting", text, "-o", str(out),
-             "--data-format=LEI16@16000", "--file-format=WAVE"],
-            check=True, capture_output=True,
+        raise FileNotFoundError(
+            f"required E2E WAV fixture is missing: {out}; restore/commit it"
         )
     for name, text, _need in _REBOT_EN_CMDS:
         out = WAV_DIR / f"{name}.wav"
         if out.exists() and out.stat().st_size > 0:
             continue
-        if not have_say:
-            raise RuntimeError(f"{out.name} missing and `say` unavailable; commit fixtures.")
-        subprocess.run(
-            ["say", "-v", "Samantha", text, "-o", str(out),
-             "--data-format=LEI16@16000", "--file-format=WAVE"],
-            check=True, capture_output=True,
+        raise FileNotFoundError(
+            f"required E2E WAV fixture is missing: {out}; restore/commit it"
         )
     for src, fade_ms in _FADEIN:
         out = WAV_DIR / f"{src}_fadein.wav"
