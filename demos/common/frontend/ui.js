@@ -71,6 +71,11 @@ export function createMetricCard(container, { label = "", unit = "s", digits = 2
  *
  * opts:
  *   api            base path of the demo backend API (default "/api")
+ *   kinds          array of switchable kinds, e.g. ["asr"] / ["tts"] /
+ *                  ["asr","tts"] (default both). A single kind hides the
+ *                  ASR/TTS toggle row and pins the panel to that kind — used
+ *                  by demos that only exercise one side (asr-caption → ["asr"],
+ *                  tts-playground → ["tts"]). The gallery passes both (tabs).
  *   strings        i18n overrides, see DEFAULT_STRINGS below
  *   pollMs         status poll interval during a switch (default 600)
  *   onSwitched(kind, result)  optional callback after a settled switch
@@ -93,6 +98,7 @@ const DEFAULT_STRINGS = {
   unreachable: "语音服务不可达",
   current: "当前",
   noProfiles: "没有可用的模型组合",
+  noLoadable: "该设备无可切换的 {kind} 模型",
   noHotReload: "该设备的引擎不支持运行时切换（更换模型需重启容器）",
 };
 
@@ -100,6 +106,12 @@ export function createModelSwitchPanel(container, opts = {}) {
   const api = (opts.api || "/api").replace(/\/$/, "");
   const S = { ...DEFAULT_STRINGS, ...(opts.strings || {}) };
   const pollMs = opts.pollMs || 600;
+  // Which kinds this demo exposes. A single kind pins the panel to it and
+  // hides the toggle row; both keeps the ASR/TTS tabs (gallery default).
+  const kinds = Array.isArray(opts.kinds) && opts.kinds.length
+    ? opts.kinds.filter((k) => k === "tts" || k === "asr")
+    : ["tts", "asr"];
+  const singleKind = kinds.length === 1;
   // Hard device trait per kind (e.g. RK NPU engines): once SLV answers
   // hot_reload_not_supported, stop offering the switch for that kind.
   const noReload = { tts: false, asr: false };
@@ -109,6 +121,8 @@ export function createModelSwitchPanel(container, opts = {}) {
   const btnTts = el("button", "active", S.kindTts);
   const btnAsr = el("button", "", S.kindAsr);
   kindRow.append(btnTts, btnAsr);
+  // Single-kind demos never switch kinds — drop the toggle row entirely.
+  if (singleKind) kindRow.style.display = "none";
 
   const currentLine = el("div", "muted switch-current", "");
   const select = document.createElement("select");
@@ -123,18 +137,23 @@ export function createModelSwitchPanel(container, opts = {}) {
   root.append(kindRow, currentLine, select, desc, switchBtn, progress, result);
   container.appendChild(root);
 
-  let kind = "tts";
+  // Default to TTS when available (preserves the gallery's initial tab),
+  // otherwise the sole pinned kind.
+  let kind = kinds.includes("tts") ? "tts" : kinds[0];
   let profiles = [];
+  let loadableFiltered = false;
   let pollTimer = null;
 
   function setKind(newKind) {
     kind = newKind;
     btnTts.classList.toggle("active", kind === "tts");
     btnAsr.classList.toggle("active", kind === "asr");
-    switchBtn.disabled = noReload[kind] || !profiles.length;
     result.className = noReload[kind] ? "switch-result warn" : "switch-result";
     result.textContent = noReload[kind] ? S.noHotReload : "";
     renderCurrent();
+    // Each kind has its own loadable set — re-fetch scoped to this kind so the
+    // dropdown only lists profiles the device can actually load for it.
+    refresh();
   }
   btnTts.addEventListener("click", () => setKind("tts"));
   btnAsr.addEventListener("click", () => setKind("asr"));
@@ -149,27 +168,39 @@ export function createModelSwitchPanel(container, opts = {}) {
   let lastStatus = null;
   function renderCurrent() {
     const entry = lastStatus?.slv?.backend_status?.[kind];
-    currentLine.textContent = entry
-      ? `${S.current}: ${entry.profile_name || "?"} (${entry.backend_name || "?"}, ${entry.state || "?"})`
-      : "";
+    if (!entry) { currentLine.textContent = ""; return; }
+    // Prefer the friendly model name (the deduped list marks the loaded one);
+    // fall back to the raw backend name when the list hasn't loaded yet.
+    const cur = profiles.find((p) => p.current);
+    const model = cur?.label || entry.backend_name || "?";
+    currentLine.textContent = `${S.current}: ${model} (${entry.state || "?"})`;
   }
 
   async function refresh() {
     try {
       const [pRes, sRes] = await Promise.all([
-        fetch(`${api}/profiles`).then((r) => r.json()),
+        fetch(`${api}/profiles?kind=${encodeURIComponent(kind)}`).then((r) => r.json()),
         fetch(`${api}/status`).then((r) => r.json()),
       ]);
       profiles = pRes.profiles || [];
+      loadableFiltered = !!pRes.loadable_filtered;
       lastStatus = sRes;
       select.innerHTML = "";
       if (!profiles.length) {
-        select.appendChild(el("option", "", S.noProfiles));
+        // When the SLV answered the loadable pre-flight (loadable_filtered) and
+        // still nothing survived, this device genuinely can't switch this kind.
+        const msg = loadableFiltered
+          ? S.noLoadable.replace("{kind}", kind.toUpperCase())
+          : S.noProfiles;
+        select.appendChild(el("option", "", msg));
         switchBtn.disabled = true;
       } else {
         for (const p of profiles) {
-          const opt = el("option", "", p.name);
+          // Show the MODEL name (Qwen3-ASR / Matcha / …), not the bundle stem;
+          // value stays the representative profile the SLV reloads.
+          const opt = el("option", "", p.label || p.name);
           opt.value = p.name;
+          if (p.current) opt.selected = true;
           select.appendChild(opt);
         }
         switchBtn.disabled = noReload[kind];

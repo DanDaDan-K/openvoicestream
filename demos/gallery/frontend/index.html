@@ -189,8 +189,12 @@ function renderStatus(s) {
     ttsPill.set("idle", `${t("tts")} —`);
   } else {
     slvPill.set(s.degraded ? "warn" : "ok", s.degraded ? "SLV degraded" : "SLV online");
-    asrPill.set(h.asr ? "ok" : "err", `${t("asr")} ${h.asr_backend || t("notReady")}`);
-    ttsPill.set(h.tts ? "ok" : "err", `${t("tts")} ${h.tts_backend || t("notReady")}`);
+    // Prefer the concrete model name (model_id) over the raw engine name;
+    // fall back to the engine when the backend doesn't report a model_id.
+    const asrModel = s.slv?.asr_capabilities?.model_id || h.asr_backend;
+    const ttsModel = s.slv?.tts_capabilities?.model_id || h.tts_backend;
+    asrPill.set(h.asr ? "ok" : "err", `${t("asr")} ${asrModel || t("notReady")}`);
+    ttsPill.set(h.tts ? "ok" : "err", `${t("tts")} ${ttsModel || t("notReady")}`);
   }
   if (!kioskMode) {
     document.getElementById("debug-json").textContent = JSON.stringify(s, null, 2);

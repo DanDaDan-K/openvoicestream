@@ -25,7 +25,7 @@
  *     vad_event speech_start arrives while speaking. ⏹ still works too.
  */
 
-import { createStatusPill, createMetricCard } from "/common/ui.js";
+import { createStatusPill, createMetricCard, createModelSwitchPanel } from "/common/ui.js";
 import { MicCapture } from "/common/mic-capture.js";
 import { V2VStreamClient } from "/common/v2v-client.js";
 
@@ -55,6 +55,7 @@ const I18N = {
     duplexHalfState: "回答播放时麦克风静音，用 ⏹ 按钮打断",
     duplexFullState: "回答播放时麦克风保持开启，开口即打断",
     duplexTip: "戴耳机或使用带 AEC 的 reSpeaker 麦克风可开启全双工语音打断；笔记本外放请保持半双工，避免回声误触发。",
+    switchTitle: "模型切换",
     settingsTitle: "模型 / 语言",
     asrLangLabel: "识别语言", ttsLangLabel: "回答语言",
     langAuto: "自动", langZh: "中文", langEn: "英文",
@@ -97,6 +98,7 @@ const I18N = {
     duplexHalfState: "Mic muted while the reply plays; interrupt with ⏹",
     duplexFullState: "Mic stays open while the reply plays; speak to barge in",
     duplexTip: "Wear headphones or use an AEC microphone (e.g. reSpeaker) to enable full-duplex voice barge-in. On laptop speakers keep half duplex to avoid echo-triggered false interrupts.",
+    switchTitle: "Switch model",
     settingsTitle: "Model / Language",
     asrLangLabel: "Recognition language", ttsLangLabel: "Reply language",
     langAuto: "Auto", langZh: "Chinese", langEn: "English",
@@ -135,6 +137,10 @@ const connPill = createStatusPill($("pills"), { state: "idle", text: "…" });
 const totalCard = createMetricCard($("metrics"), { label: "", unit: "s", digits: 2 });
 
 $("gallery-link").href = `//${window.location.hostname}:8700/`;
+
+// Inline model switch — v2v runs the full ASR→LLM→TTS loop, so expose both
+// kinds (ASR/TTS tabs). Talks to this backend's shared /api/switch.
+createModelSwitchPanel($("switch-panel"), { kinds: ["asr", "tts"] });
 
 /* ── state ─────────────────────────────────────────────────────────── */
 let state = "idle";        // "idle" | "connecting" | "live"

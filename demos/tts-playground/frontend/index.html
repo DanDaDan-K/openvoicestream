@@ -231,13 +231,17 @@
     <section class="panel">
       <p class="muted" style="font-size:var(--fs-small); margin:0" data-i18n="aboutTtfa"></p>
     </section>
+    <section class="panel">
+      <h2 data-i18n="switchTitle"></h2>
+      <div id="switch-panel"></div>
+    </section>
   </aside>
 </div>
 
 <footer class="footer" data-i18n="footer"></footer>
 
 <script type="module">
-import { createStatusPill, createMetricCard } from "/common/ui.js";
+import { createStatusPill, createMetricCard, createModelSwitchPanel } from "/common/ui.js";
 import { TTSStreamPlayer } from "/common/slv-client.js";
 
 /* ── i18n (default zh, shared localStorage key with the gallery) ──── */
@@ -248,6 +252,7 @@ const I18N = {
     step2: "输入或选一句话",
     step3: "点播放",
     placeholder: "输入任意文本，或点击下方示例句…",
+    switchTitle: "模型切换",
     voiceLabel: "音色",
     speedLabel: "语速",
     pitchLabel: "音高",
@@ -278,6 +283,7 @@ const I18N = {
     step2: "Type or pick a sentence",
     step3: "Press play",
     placeholder: "Type anything, or tap a sample sentence below…",
+    switchTitle: "Switch model",
     voiceLabel: "Voice",
     speedLabel: "Speed",
     pitchLabel: "Pitch",
@@ -572,6 +578,9 @@ $("lang-btn").addEventListener("click", () => {
 applyStaticI18n();
 updateSteps();
 loadSpeakers();
+
+// Inline model switch — this demo only exercises TTS, so pin the panel to it.
+createModelSwitchPanel($("switch-panel"), { kinds: ["tts"] });
 </script>
 </body>
 </html>

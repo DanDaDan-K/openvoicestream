@@ -5578,3 +5578,52 @@ async def admin_backend_reload(
 async def admin_backend_status(_: None = Depends(_admin_dep())):
     from server.core.backend_manager import tts_manager, asr_manager
     return {"tts": tts_manager().status(), "asr": asr_manager().status()}
+
+
+@app.get("/admin/backend/loadable")
+async def admin_backend_loadable(_: None = Depends(_admin_dep())):
+    """Classify every server-side profile by whether *this* SLV can actually
+    load it, split per kind (tts / asr).
+
+    For each profile JSON under ``configs/profiles/`` we ask each manager to
+    preview its own half (``_load_profile_kind``) and run the same artifact
+    pre-flight the hot-reload path uses (``find_missing_artifacts``). A profile
+    is *loadable* for a kind when no expected artifact path is missing.
+
+    Because tts_manager loads the TTS side and asr_manager loads the ASR side,
+    the same profile can be loadable for one kind and not the other (e.g. the
+    ASR engine is absent) — which is exactly what the demo portal needs to
+    only offer switch targets that will succeed.
+
+    A single broken profile never fails the whole endpoint: load/parse errors
+    are captured per-profile under ``invalid``.
+    """
+    from server.core.backend_manager import tts_manager, asr_manager
+    from server.core import backend_manager as _bm_mod
+    from server.core import profile_loader as _pl
+    from pathlib import Path as _Path
+
+    repo_root = _Path(_bm_mod.__file__).resolve().parents[2]
+    profiles_dir = repo_root / "configs" / "profiles"
+    names: list[str] = []
+    if profiles_dir.is_dir():
+        names = sorted(p.stem for p in profiles_dir.glob("*.json"))
+
+    def _classify(mgr) -> dict:
+        loadable: list[str] = []
+        unloadable: list[dict] = []
+        invalid: list[dict] = []
+        for name in names:
+            try:
+                preview = mgr._load_profile_kind(name)
+                missing = _pl.find_missing_artifacts(preview, kind=mgr.name)
+            except Exception as exc:  # noqa: BLE001 — one bad profile ≠ dead endpoint
+                invalid.append({"name": name, "error": str(exc)})
+                continue
+            if missing:
+                unloadable.append({"name": name, "missing": missing})
+            else:
+                loadable.append(name)
+        return {"loadable": loadable, "unloadable": unloadable, "invalid": invalid}
+
+    return {"tts": _classify(tts_manager()), "asr": _classify(asr_manager())}
