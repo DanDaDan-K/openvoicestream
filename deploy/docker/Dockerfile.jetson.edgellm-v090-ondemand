@@ -2,10 +2,8 @@
 #
 # Build context is the REPO ROOT (server/, configs/, deploy/ are copied in):
 #   docker build -f deploy/docker/Dockerfile.jetson.edgellm-v090-ondemand \
-#     --build-arg VOXEDGE_WHEEL=voxedge-0.0.5a0-py3-none-any.whl \
 #     -t sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:<tag> .
-# The voxedge wheel must be copied into the repo root before building (it is
-# built out of the sibling voxedge repo with `uv build --wheel`).
+# Nothing has to be staged first — voxedge comes from PyPI.
 #
 # WHY THIS EXISTS
 # The published v0.9.0 images bake ~2.6 GB of engines under /opt/edgellm-v090.
@@ -27,7 +25,7 @@
 # layers onto it rather than rebuilding the world from Dockerfile.jetson.slim.
 FROM sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:prod-unified-v9
 
-ARG VOXEDGE_WHEEL=voxedge-0.0.5a0-py3-none-any.whl
+ARG VOXEDGE_VERSION=0.0.5a0
 
 # moss_tts_nano_worker links against libsentencepiece and dlopens the
 # unversioned onnxruntime SONAME. prod-unified-v9 ships neither the package nor
@@ -47,9 +45,15 @@ COPY deploy/artifacts/ /opt/speech/deploy/artifacts/
 
 # v090 voxedge: WAV-ingest ASR + streaming-only TTS routing. --no-deps keeps the
 # base's pinned runtime stack intact.
-COPY ${VOXEDGE_WHEEL} /tmp/${VOXEDGE_WHEEL}
-RUN pip3 install --force-reinstall --no-deps /tmp/${VOXEDGE_WHEEL} \
-    && rm -f /tmp/${VOXEDGE_WHEEL}
+#
+# pypi.org is listed first on purpose: the base sets PIP_INDEX_URL to the
+# Tsinghua mirror, which lags upstream by hours to days, so a freshly released
+# voxedge is not there yet and the build would silently install an older one.
+# The mirror stays as an extra index so a China build still has a fallback.
+RUN pip3 install --force-reinstall --no-deps \
+      --index-url https://pypi.org/simple \
+      --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+      "voxedge==${VOXEDGE_VERSION}"
 
 # The provisioner writes to exactly these paths. They are image-owned: the
 # profile deliberately does not set them ("operator-owned/baked ... MUST NOT be
