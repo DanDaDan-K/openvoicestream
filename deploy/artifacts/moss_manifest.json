@@ -27,14 +27,14 @@
   },
   "files": [
     {
-      "path": "codec_onnx/codec_browser_onnx_meta.json",
+      "path": "engines/codec_browser_onnx_meta.json",
       "source_path": "codec_onnx/codec_browser_onnx_meta.json",
       "dest": "model_root",
       "size": 17036,
       "md5": "d626fe90be2ff6fba3522216dcd4bd21"
     },
     {
-      "path": "codec_onnx/codec_decode_step.plan",
+      "path": "engines/codec_decode_step.plan",
       "source_path": "codec_onnx/codec_decode_step.plan",
       "dest": "model_root",
       "size": 32316980,
@@ -67,7 +67,6 @@
       "dest": "model_root",
       "size": 503354,
       "md5": "c71399442790593dce2c38724d46621c",
-      "optional": true,
       "note": "WebGPU browser-POC manifest only; NOT consumed by the Jetson C++ moss_tts_nano worker. Absent from HF (#44) — marked optional so slim-image provisioning does not 404-abort."
     },
     {
@@ -132,7 +131,6 @@
       "dest": "model_root",
       "size": 4627,
       "md5": "c5315660d3b09c84f103ab284bd6fe1e",
-      "optional": true,
       "note": "WebGPU browser-POC ONNX meta only; NOT consumed by the Jetson C++ moss_tts_nano worker. Absent from HF (#44) — marked optional so slim-image provisioning does not 404-abort."
     },
     {
