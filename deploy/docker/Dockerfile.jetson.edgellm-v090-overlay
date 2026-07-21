@@ -19,7 +19,16 @@
 # the three profile JSONs + the wheel copied in flat (same convention as the
 # moss-nx overlay).
 #
-# TODO(P5): pin BASE to the published v090 prefix tag before building.
+# UNBUILT. The "v090 prefix base" this overlay assumes was never produced —
+# Dockerfile.jetson's v090 bake section is comments only — so BASE below has
+# never resolved to a real tag. The shipped v0.9.0 images were assembled by
+# hand instead.
+#
+# Prefer Dockerfile.jetson.edgellm-v090-ondemand: it drops the baked-engine
+# premise entirely (the ASR engines are provisioned at first boot from the
+# artifact repo) and therefore needs no prefix base. Keep this file only if you
+# actually want a baked-engine v090 image; in that case build the prefix base
+# first and pin BASE to it.
 ARG BASE=sensecraft-missionpack.seeed.cn/solution/seeed-local-voice:TODO-v090-prefix-tag-set-at-P5
 FROM ${BASE}
 
