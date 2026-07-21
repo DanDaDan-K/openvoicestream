@@ -17,6 +17,12 @@ services:
       - OVS_V2V_SERVER_LOOP=1
       - EDGE_LLM_BASE_URL=http://edge-llm:8000/v1
       - EDGE_LLM_MODEL=${EDGE_LLM_MODEL:-qwen3}
+      # Half-open v2v slot watchdog. Default (code) is 90s; lowered to 45s so
+      # a wedged/half-open session frees ~2x faster and the client auto-
+      # reconnect recovers audio sooner. Kept ABOVE the 30s LLM stream-idle
+      # so a slow-but-alive thinking turn is never cut.
+      # (Incident 2026-07-21: single-slot sessions_full wedge -> no TTS out.)
+      - OVS_V2V_IDLE_TIMEOUT_S=45
 
   # ── Local LLM (OpenAI-compatible, Qwen3 on TensorRT) ──────────────────
   # Not built in this repo — pulled from registry.
