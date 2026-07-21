@@ -103,7 +103,7 @@
     {
       "model_id": "moss-audio-tokenizer-nano",
       "engine_file": "codec_decode_step.plan",
-      "engine_path": "/opt/models/moss-tts-nano/codec_onnx/codec_decode_step.plan",
+      "engine_path": "/opt/models/moss-tts-nano/engines/codec_decode_step.plan",
       "env_var": "MOSS_RESOLVED_CODEC",
       "build_env": {
         "ENGINE_NAME": "codec_decode_step.plan",
