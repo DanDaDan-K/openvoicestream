@@ -16,7 +16,6 @@
     "OVS_TTS_SAMPLE_RATE": "16000",
     "OVS_TTS_CHANNELS": "1",
     "OVS_TTS_WORKER_CONCURRENCY": "2",
-
     "SPARKTTS_WORKER_BINARY": "/opt/jv-workers/spark_tts_worker",
     "SPARKTTS_PLUGIN_PATH": "/opt/edgellm/libNvInfer_edgellm_plugin.so",
     "SPARKTTS_LLM_ENGINE_DIR": "/opt/models/sparktts-0p5b/llm_engine",
@@ -38,7 +37,7 @@
       "model_id": "sparktts-0p5b",
       "engine_file": "llm.engine",
       "engine_path": "/opt/models/sparktts-0p5b/llm_engine/llm.engine",
-      "env_var": "SPARKTTS_LLM_ENGINE_DIR",
+      "env_var": "SPARKTTS_RESOLVED_LLM",
       "extra_files": [
         "tokenizer.json",
         "tokenizer_config.json",

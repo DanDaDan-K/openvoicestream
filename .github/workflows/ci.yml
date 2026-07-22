@@ -14,8 +14,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+        # No submodules: nothing below touches third_party/. They were fetched
+        # recursively out of habit, and it broke every run once the
+        # jetson-voice-engine pin (308c2a9d, set 2026-07-13) was force-pushed
+        # away upstream -- checkout then fails with "not our ref" before a
+        # single gate executes, including on main.
+        #
+        # The pin itself is still dangling and still breaks
+        # `git clone --recursive`. Fixing that needs someone who knows which
+        # commit replaced it; no surviving branch contains it, so it cannot be
+        # inferred from the repo.
 
       - name: Set up Python
         uses: actions/setup-python@v5
